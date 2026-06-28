@@ -1,0 +1,54 @@
+# macOS / editor state
+.DS_Store
+*.swp
+*.swo
+.fuse_hidden*
+.memory
+docs/.memory
+
+# CMake / build outputs
+build/
+build-*/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+compile_commands.json
+_deps/
+
+# Python caches / virtual environments
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+venv/
+research/.venv_seed_vc/
+
+# Large local datasets, downloads, and experiment artifacts
+data/*
+!data/gtsinger_alignment/
+data/gtsinger_alignment/*
+!data/gtsinger_alignment/multilingual_mps_full_breath_diffcut_encoder_thr075_tcn.pt
+checkpoints/
+research/checkpoints*/
+research/logs/
+research/outputs/
+
+# Nested third-party checkouts and generated dependency trees
+third_party/
+
+# Local audio/media scratch
+*.wav
+*.aif
+*.aiff
+*.flac
+*.mp3
+*.m4a
+
+# App/package artifacts
+*.app/
+*.vst3/
+*.component/
+*.pkg
+*.dmg

@@ -1,0 +1,26 @@
+# Training hyperparameters
+epochs: 100
+batch_size: 16
+lr: 1e-4
+grad_clip: 1.0
+
+# Loss weights
+lambda_spec: 1.0
+lambda_wave: 1.0
+lambda_rms: 2.0
+lambda_peak: 10.0
+lambda_f0: 0.1
+lambda_disent: 0.01
+lambda_perc: 0.0        # enable in Phase 2
+
+# Logging
+log_every_n_steps: 50
+checkpoint_every_n_epochs: 10
+max_steps_per_epoch: null
+
+# Resume. Set this to an explicit checkpoint when continuing a hand-picked run.
+# Partial resume lets us keep compatible weights after architecture changes
+# such as the FIR-noise -> STFT-noise decoder swap.
+resume_from: null
+allow_partial_resume: true
+checkpoint_dir: checkpoints

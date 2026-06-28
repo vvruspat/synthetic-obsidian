@@ -1,0 +1,19 @@
+# DDSP Neural Vocal Tuner — model config
+_target_: nvt.models.full_model.NeuralVocalTuner
+
+sample_rate: 24000
+hop_length: 256          # mel hop = 5.3ms at 24kHz ≈ 5ms WORLD frame
+n_fft: 1024
+n_mels: 80
+
+# Encoder dims. Current VocalSet checkpoints use this wider Phase 0 setup.
+timbre_dim: 64
+noise_dim: 32
+
+# DDSP synth
+n_harmonics: 100
+noise_filter_len: 128
+
+# Vocos
+vocos_checkpoint: "charactr/vocos-mel-24khz"
+freeze_vocos: true       # freeze during Phase 0-1, unfreeze in Phase 2

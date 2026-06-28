@@ -1,0 +1,18 @@
+# Dataset config
+sample_rate: 24000
+segment_duration: 4.0    # seconds per training segment
+target_lufs: -23.0
+
+# Path to manifest.json produced by prepare_vocalset.py.
+# Set via env: DATA_DIR=/path/to/processed python -m nvt.train
+# or override on CLI: data.manifest=/path/to/manifest.json
+# If null or file not found, falls back to synthetic random dataset.
+manifest: null
+
+datasets:
+  - name: vocalset
+    path: ${oc.env:DATA_DIR,/tmp}/vocalset
+    weight: 1.0
+  - name: nus48e
+    path: ${oc.env:DATA_DIR,/tmp}/nus48e
+    weight: 1.0

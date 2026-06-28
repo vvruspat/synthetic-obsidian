@@ -1,0 +1,15 @@
+# Root Hydra config for NVT training
+# Composes sub-configs from model/, train/, data/ groups.
+
+defaults:
+  - model: default
+  - train: default
+  - data: default
+  - _self_
+
+# Training phase:
+#   0 — DDSP autoencoder only (no disentanglement, no Vocos fine-tune)
+#   1 — add GRL disentanglement loss
+#   2 — unfreeze Vocos, perceptual loss
+#   3 — full joint training
+phase: 0

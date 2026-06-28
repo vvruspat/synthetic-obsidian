@@ -1,0 +1,34 @@
+[
+  {
+    "name": "ch7_intro",
+    "audio": "/Users/aleksandrkolesov/Music/Models/Sasha-dataset/CH.7-Clean.wav",
+    "midi": "/Users/aleksandrkolesov/Music/Models/Sasha-dataset/CH.7-Clean.mid",
+    "start": 1.65,
+    "end": 12.6,
+    "midi_shift_seconds": 0.0
+  },
+  {
+    "name": "sample4",
+    "audio": "/Users/aleksandrkolesov/Music/ai-dataset/AlexSamples/Sample4.wav",
+    "midi": "/Users/aleksandrkolesov/Music/ai-dataset/AlexSamples/Sample4.mid",
+    "start": 0.0,
+    "end": 13.0,
+    "midi_shift_seconds": 0.0
+  },
+  {
+    "name": "sample5",
+    "audio": "/Users/aleksandrkolesov/Music/ai-dataset/AlexSamples/Sample5.wav",
+    "midi": "/Users/aleksandrkolesov/Music/ai-dataset/AlexSamples/Sample5.mid",
+    "start": 0.0,
+    "end": 13.0,
+    "midi_shift_seconds": 0.0
+  },
+  {
+    "name": "sample6",
+    "audio": "/Users/aleksandrkolesov/Music/ai-dataset/AlexSamples/Sample6.wav",
+    "midi": "/Users/aleksandrkolesov/Music/ai-dataset/AlexSamples/Sample6.mid",
+    "start": 0.0,
+    "end": 19.787,
+    "midi_shift_seconds": 40.0
+  }
+]

@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "nvt"
+version = "0.1.0"
+description = "Neural Vocal Tuner — research training code for Synthetic Obsidian"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.5",
+    "torchaudio>=2.5",
+    "torchcrepe>=0.0.24",
+    "vocos",
+    "pyworld",
+    "librosa",
+    "basic-pitch",
+    "hydra-core>=1.3",
+    "wandb",
+    "einops",
+    "scipy",
+    "numpy",
+    "soundfile",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["nvt*"]

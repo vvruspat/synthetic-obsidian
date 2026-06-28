@@ -1,0 +1,29 @@
+# SVC pitch/backing-vocal spike config.
+
+sample_rate: 24000
+
+source_dir: ../../data/inference_v3
+eval_dir: ../../data/svc_pitch_eval
+
+clips:
+  - female_straight
+  - female_vibrato
+  - male_belt
+  - male_breathy
+
+outputs:
+  identity: 0
+  up2st: 2
+  down2st: -2
+  harmony_minor_third: 3
+  harmony_major_third: 4
+  harmony_fifth: 7
+  harmony_octave: 12
+
+backends:
+  seed_vc:
+    repo_dir: ../../third_party/seed-vc
+    output_dir: ../../data/svc_pitch_seed_vc
+  rvc:
+    repo_dir: ../../third_party/rvc
+    output_dir: ../../data/svc_pitch_rvc

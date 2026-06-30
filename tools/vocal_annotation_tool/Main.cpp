@@ -64,6 +64,12 @@ struct TimedLyricSyllable
     double confidence = 0.5;
 };
 
+struct AnalysisWindow
+{
+    double start = 0.0;
+    double end = 0.0;
+};
+
 bool isNonVocalBoundary(BoundaryKind kind)
 {
     return kind == BoundaryKind::breath
@@ -134,6 +140,98 @@ int removeMicroNonVocalBoundaries(std::vector<BoundaryMarker>& boundaries,
     return removed;
 }
 
+bool isVocalBoundary(BoundaryKind kind)
+{
+    return kind == BoundaryKind::syllable
+        || kind == BoundaryKind::rearticulation
+        || kind == BoundaryKind::legato;
+}
+
+bool isNonVocalRegionKind(const juce::String& kind)
+{
+    return kind == "breath" || kind == "noise" || kind == "pause";
+}
+
+int normalizeNonVocalRegions(std::vector<AnnotationRegion>& regions,
+                             std::vector<BoundaryMarker>& boundaries,
+                             double documentDuration,
+                             double mergeGapSeconds = 0.20)
+{
+    std::vector<AnnotationRegion> nonVocal;
+    std::vector<AnnotationRegion> other;
+    nonVocal.reserve(regions.size());
+    other.reserve(regions.size());
+
+    for (const auto& region : regions)
+    {
+        if (isNonVocalRegionKind(region.kind))
+        {
+            auto clipped = region;
+            clipped.start = juce::jlimit(0.0, documentDuration, clipped.start);
+            clipped.end = juce::jlimit(clipped.start, documentDuration, clipped.end);
+            if (clipped.end - clipped.start >= 0.04)
+                nonVocal.push_back(std::move(clipped));
+        }
+        else
+        {
+            other.push_back(region);
+        }
+    }
+
+    if (nonVocal.empty())
+        return 0;
+
+    std::sort(nonVocal.begin(), nonVocal.end(), [](const auto& a, const auto& b) { return a.start < b.start; });
+    std::vector<AnnotationRegion> merged;
+    merged.reserve(nonVocal.size());
+    auto mergedCount = 0;
+
+    for (const auto& region : nonVocal)
+    {
+        if (merged.empty()
+            || region.kind != merged.back().kind
+            || region.start > merged.back().end + mergeGapSeconds)
+        {
+            merged.push_back(region);
+            continue;
+        }
+
+        auto& last = merged.back();
+        last.end = juce::jmax(last.end, region.end);
+        ++mergedCount;
+    }
+
+    boundaries.erase(std::remove_if(boundaries.begin(),
+                                    boundaries.end(),
+                                    [&merged](const auto& boundary)
+                                    {
+                                        if (! isVocalBoundary(boundary.kind))
+                                            return false;
+
+                                        return std::any_of(merged.begin(), merged.end(),
+                                                           [&boundary](const auto& region)
+                                                           {
+                                                               return boundary.time > region.start + 0.015
+                                                                   && boundary.time < region.end - 0.015;
+                                                           });
+                                    }),
+                     boundaries.end());
+
+    boundaries.erase(std::remove_if(boundaries.begin(),
+                                    boundaries.end(),
+                                    [](const auto& boundary)
+                                    {
+                                        return isNonVocalBoundary(boundary.kind)
+                                            && boundary.source == "gtsinger_tcn";
+                                    }),
+                     boundaries.end());
+
+    std::sort(boundaries.begin(), boundaries.end(), [](const auto& a, const auto& b) { return a.time < b.time; });
+    regions = std::move(other);
+    regions.insert(regions.end(), merged.begin(), merged.end());
+    return mergedCount;
+}
+
 int collapseShortNoteGaps(std::vector<NoteBlock>& notes,
                           std::vector<BoundaryMarker>& boundaries,
                           double maximumGap = 0.12)
@@ -169,6 +267,96 @@ int collapseShortNoteGaps(std::vector<NoteBlock>& notes,
     }
 
     return collapsed;
+}
+
+std::vector<AnalysisWindow> buildVocalPitchAnalysisWindows(const AnnotationDocument& document,
+                                                           double paddingSeconds = 0.06,
+                                                           double mergeGapSeconds = 0.18,
+                                                           double minimumWindowSeconds = 0.12)
+{
+    struct Interval
+    {
+        double start = 0.0;
+        double end = 0.0;
+    };
+
+    std::vector<Interval> excluded;
+    for (const auto& region : document.regions)
+    {
+        if (region.kind != "breath" && region.kind != "noise" && region.kind != "pause")
+            continue;
+
+        const auto start = juce::jlimit(0.0, document.duration, region.start);
+        const auto end = juce::jlimit(start, document.duration, region.end);
+        if (end - start >= 0.04)
+            excluded.push_back({ start, end });
+    }
+
+    if (excluded.empty() || document.duration <= 0.0)
+        return {};
+
+    std::sort(excluded.begin(), excluded.end(), [](const auto& a, const auto& b) { return a.start < b.start; });
+
+    std::vector<Interval> mergedExcluded;
+    for (const auto& interval : excluded)
+    {
+        if (mergedExcluded.empty() || interval.start > mergedExcluded.back().end + 0.01)
+        {
+            mergedExcluded.push_back(interval);
+            continue;
+        }
+
+        mergedExcluded.back().end = juce::jmax(mergedExcluded.back().end, interval.end);
+    }
+
+    std::vector<AnalysisWindow> windows;
+    auto cursor = 0.0;
+    for (const auto& interval : mergedExcluded)
+    {
+        if (interval.start > cursor)
+        {
+            const auto start = juce::jlimit(0.0, document.duration, cursor - paddingSeconds);
+            const auto end = juce::jlimit(start, document.duration, interval.start + paddingSeconds);
+            if (end - start >= minimumWindowSeconds)
+                windows.push_back({ start, end });
+        }
+
+        cursor = juce::jmax(cursor, interval.end);
+    }
+
+    if (cursor < document.duration)
+    {
+        const auto start = juce::jlimit(0.0, document.duration, cursor - paddingSeconds);
+        const auto end = document.duration;
+        if (end - start >= minimumWindowSeconds)
+            windows.push_back({ start, end });
+    }
+
+    if (windows.empty())
+        return {};
+
+    std::vector<AnalysisWindow> mergedWindows;
+    for (const auto& window : windows)
+    {
+        if (mergedWindows.empty() || window.start > mergedWindows.back().end + mergeGapSeconds)
+        {
+            mergedWindows.push_back(window);
+            continue;
+        }
+
+        mergedWindows.back().end = juce::jmax(mergedWindows.back().end, window.end);
+    }
+
+    auto coveredDuration = 0.0;
+    for (const auto& window : mergedWindows)
+        coveredDuration += juce::jmax(0.0, window.end - window.start);
+
+    // If AI Parts did not carve out meaningful non-vocal sections, keep the old
+    // full-file path. It avoids edge effects without buying any real speed.
+    if (coveredDuration >= document.duration * 0.94)
+        return {};
+
+    return mergedWindows;
 }
 
 juce::String analysisPythonExecutable()
@@ -958,7 +1146,6 @@ private:
         document_.duration = static_cast<double>(reader->lengthInSamples) / reader->sampleRate;
         currentJsonFile_ = file.withFileExtension(".annotation.json");
         ++documentRevision_;
-        createDraftAnnotation(*reader);
         configureTransportForFile(file);
 
         editor_.setAudioFile(file);
@@ -966,14 +1153,7 @@ private:
         syncInspector();
         markChanged();
         resetHistory();
-        setStatus("Loaded audio and auto-detected " + juce::String(static_cast<int>(document_.notes.size())) + " editable parts. Starting Analyze...");
-
-        juce::WeakReference<MainComponent> safeThis(this);
-        juce::MessageManager::callAsync([safeThis]
-        {
-            if (safeThis != nullptr)
-                safeThis->runCombinedAnalysis();
-        });
+        setStatus("Loaded audio. Run AI Parts or Analyze to create annotation.");
     }
 
     void loadLyrics(const juce::File& file)
@@ -1699,7 +1879,7 @@ private:
                                                     double start,
                                                     double end) const
     {
-        constexpr auto minPlateauDuration = 0.075;
+        constexpr auto minPlateauDuration = 0.055;
         constexpr auto maxConnectedGap = 0.12;
         constexpr auto samePitchTolerance = 0.68;
 
@@ -1729,6 +1909,252 @@ private:
         std::sort(candidates.begin(), candidates.end(), [](const auto& a, const auto& b) { return a.start < b.start; });
         if (candidates.empty())
             return {};
+
+        const auto splitCandidateByCurve = [](const NoteBlock& source)
+        {
+            std::vector<NoteBlock> result;
+            if (source.curve.size() < 6)
+                return result;
+
+            std::vector<PitchCurvePoint> usableCurve;
+            usableCurve.reserve(source.curve.size());
+            for (const auto& point : source.curve)
+            {
+                if (point.time < source.start || point.time > source.end || point.confidence < 0.08)
+                    continue;
+                usableCurve.push_back(point);
+            }
+
+            if (usableCurve.size() < 6)
+                return result;
+
+            std::vector<double> smoothedMidi;
+            smoothedMidi.reserve(usableCurve.size());
+            for (size_t pointIndex = 0; pointIndex < usableCurve.size(); ++pointIndex)
+            {
+                std::array<double, 5> neighbourhood {};
+                auto count = 0;
+                const auto first = static_cast<int>(juce::jmax<size_t>(0, pointIndex > 2 ? pointIndex - 2 : 0));
+                const auto last = juce::jmin(static_cast<int>(usableCurve.size()) - 1, static_cast<int>(pointIndex) + 2);
+                for (int i = first; i <= last; ++i)
+                    neighbourhood[static_cast<size_t>(count++)] = usableCurve[static_cast<size_t>(i)].midi;
+
+                std::sort(neighbourhood.begin(), neighbourhood.begin() + count);
+                smoothedMidi.push_back(neighbourhood[static_cast<size_t>(count / 2)]);
+            }
+
+            struct CurveRun
+            {
+                int first = 0;
+                int last = 0;
+                int pitchBin = 0;
+            };
+
+            std::vector<CurveRun> runs;
+            constexpr auto curvePitchBinWidth = 0.40;
+            constexpr auto minIndependentCurvePlateauDuration = 0.13;
+            for (int pointIndex = 0; pointIndex < static_cast<int>(usableCurve.size()); ++pointIndex)
+            {
+                const auto pitchBin = static_cast<int>(std::round(smoothedMidi[static_cast<size_t>(pointIndex)] / curvePitchBinWidth));
+                const auto startsNewRun = runs.empty()
+                    || std::abs(pitchBin - runs.back().pitchBin) >= 1
+                    || usableCurve[static_cast<size_t>(pointIndex)].time - usableCurve[static_cast<size_t>(runs.back().last)].time > 0.09;
+                if (startsNewRun)
+                {
+                    runs.push_back({ pointIndex, pointIndex, pitchBin });
+                    continue;
+                }
+
+                runs.back().last = pointIndex;
+            }
+
+            for (size_t runIndex = 0; runIndex < runs.size();)
+            {
+                const auto& run = runs[runIndex];
+                const auto runDuration = usableCurve[static_cast<size_t>(run.last)].time - usableCurve[static_cast<size_t>(run.first)].time;
+                if (runDuration >= minIndependentCurvePlateauDuration || runs.size() <= 1)
+                {
+                    ++runIndex;
+                    continue;
+                }
+
+                if (runIndex > 0 && runIndex + 1 < runs.size())
+                {
+                    const auto previousDelta = std::abs(runs[runIndex - 1].pitchBin - run.pitchBin);
+                    const auto nextDelta = std::abs(runs[runIndex + 1].pitchBin - run.pitchBin);
+                    if (runs[runIndex - 1].pitchBin == runs[runIndex + 1].pitchBin)
+                    {
+                        runs[runIndex - 1].last = runs[runIndex + 1].last;
+                        runs.erase(runs.begin() + static_cast<std::ptrdiff_t>(runIndex + 1));
+                    }
+                    else if (previousDelta <= nextDelta)
+                    {
+                        runs[runIndex - 1].last = run.last;
+                    }
+                    else
+                    {
+                        runs[runIndex + 1].first = run.first;
+                    }
+                }
+                else if (runIndex > 0)
+                {
+                    runs[runIndex - 1].last = run.last;
+                }
+                else if (runs.size() > 1)
+                {
+                    runs[runIndex + 1].first = run.first;
+                }
+
+                runs.erase(runs.begin() + static_cast<std::ptrdiff_t>(runIndex));
+            }
+
+            for (const auto& run : runs)
+            {
+                const auto plateauStart = usableCurve[static_cast<size_t>(run.first)].time;
+                const auto plateauEnd = usableCurve[static_cast<size_t>(run.last)].time;
+                if (plateauEnd - plateauStart < minIndependentCurvePlateauDuration)
+                    continue;
+
+                NoteBlock plateau = source;
+                plateau.start = plateauStart;
+                plateau.end = plateauEnd;
+                plateau.voicedStart = plateauStart;
+                plateau.voicedEnd = plateauEnd;
+                plateau.curve.assign(usableCurve.begin() + run.first, usableCurve.begin() + run.last + 1);
+                updateRepresentativePitch(plateau);
+                result.push_back(std::move(plateau));
+            }
+
+            return result.size() >= 2 ? result : std::vector<NoteBlock> {};
+        };
+
+        std::vector<NoteBlock> curveExpandedCandidates;
+        curveExpandedCandidates.reserve(candidates.size());
+        auto splitAnyCandidate = false;
+        for (const auto& candidate : candidates)
+        {
+            auto split = splitCandidateByCurve(candidate);
+            if (split.empty())
+            {
+                curveExpandedCandidates.push_back(candidate);
+                continue;
+            }
+
+            splitAnyCandidate = true;
+            curveExpandedCandidates.insert(curveExpandedCandidates.end(),
+                                           std::make_move_iterator(split.begin()),
+                                           std::make_move_iterator(split.end()));
+        }
+
+        if (splitAnyCandidate)
+            candidates = std::move(curveExpandedCandidates);
+
+        if (candidates.size() == 1 && candidates.front().curve.size() >= 6)
+        {
+            const auto& source = candidates.front();
+            std::vector<PitchCurvePoint> usableCurve;
+            usableCurve.reserve(source.curve.size());
+            for (const auto& point : source.curve)
+            {
+                if (point.time < start || point.time > end || point.confidence < 0.08)
+                    continue;
+                usableCurve.push_back(point);
+            }
+
+            if (usableCurve.size() >= 6)
+            {
+                std::vector<double> smoothedMidi;
+                smoothedMidi.reserve(usableCurve.size());
+                for (size_t pointIndex = 0; pointIndex < usableCurve.size(); ++pointIndex)
+                {
+                    std::array<double, 5> neighbourhood {};
+                    auto count = 0;
+                    const auto first = static_cast<int>(juce::jmax<size_t>(0, pointIndex > 2 ? pointIndex - 2 : 0));
+                    const auto last = juce::jmin(static_cast<int>(usableCurve.size()) - 1, static_cast<int>(pointIndex) + 2);
+                    for (int i = first; i <= last; ++i)
+                        neighbourhood[static_cast<size_t>(count++)] = usableCurve[static_cast<size_t>(i)].midi;
+
+                    std::sort(neighbourhood.begin(), neighbourhood.begin() + count);
+                    smoothedMidi.push_back(neighbourhood[static_cast<size_t>(count / 2)]);
+                }
+
+                struct CurveRun
+                {
+                    int first = 0;
+                    int last = 0;
+                    int pitchBin = 0;
+                };
+
+                std::vector<CurveRun> runs;
+                constexpr auto curvePitchBinWidth = 0.40;
+                for (int pointIndex = 0; pointIndex < static_cast<int>(usableCurve.size()); ++pointIndex)
+                {
+                    const auto pitchBin = static_cast<int>(std::round(smoothedMidi[static_cast<size_t>(pointIndex)] / curvePitchBinWidth));
+                    const auto startsNewRun = runs.empty()
+                        || std::abs(pitchBin - runs.back().pitchBin) >= 1
+                        || usableCurve[static_cast<size_t>(pointIndex)].time - usableCurve[static_cast<size_t>(runs.back().last)].time > 0.09;
+                    if (startsNewRun)
+                    {
+                        runs.push_back({ pointIndex, pointIndex, pitchBin });
+                        continue;
+                    }
+
+                    runs.back().last = pointIndex;
+                }
+
+                for (size_t runIndex = 0; runIndex < runs.size();)
+                {
+                    const auto& run = runs[runIndex];
+                    const auto runDuration = usableCurve[static_cast<size_t>(run.last)].time - usableCurve[static_cast<size_t>(run.first)].time;
+                    if (runDuration >= minPlateauDuration || runs.size() <= 1)
+                    {
+                        ++runIndex;
+                        continue;
+                    }
+
+                    if (runIndex > 0 && runIndex + 1 < runs.size())
+                    {
+                        const auto previousDelta = std::abs(runs[runIndex - 1].pitchBin - run.pitchBin);
+                        const auto nextDelta = std::abs(runs[runIndex + 1].pitchBin - run.pitchBin);
+                        if (previousDelta <= nextDelta)
+                            runs[runIndex - 1].last = run.last;
+                        else
+                            runs[runIndex + 1].first = run.first;
+                    }
+                    else if (runIndex > 0)
+                    {
+                        runs[runIndex - 1].last = run.last;
+                    }
+                    else if (runs.size() > 1)
+                    {
+                        runs[runIndex + 1].first = run.first;
+                    }
+
+                    runs.erase(runs.begin() + static_cast<std::ptrdiff_t>(runIndex));
+                }
+
+                std::vector<NoteBlock> curvePlateaus;
+                for (const auto& run : runs)
+                {
+                    const auto plateauStart = usableCurve[static_cast<size_t>(run.first)].time;
+                    const auto plateauEnd = usableCurve[static_cast<size_t>(run.last)].time;
+                    if (plateauEnd - plateauStart < minPlateauDuration)
+                        continue;
+
+                    NoteBlock plateau = source;
+                    plateau.start = plateauStart;
+                    plateau.end = plateauEnd;
+                    plateau.voicedStart = plateauStart;
+                    plateau.voicedEnd = plateauEnd;
+                    plateau.curve.assign(usableCurve.begin() + run.first, usableCurve.begin() + run.last + 1);
+                    updateRepresentativePitch(plateau);
+                    curvePlateaus.push_back(std::move(plateau));
+                }
+
+                if (curvePlateaus.size() >= 2)
+                    return curvePlateaus;
+            }
+        }
 
         std::vector<std::vector<NoteBlock>> chains(1);
         for (auto& candidate : candidates)
@@ -1823,13 +2249,13 @@ private:
                     continue;
                 }
 
-                if (selectedPlateaus.size() >= 8)
+                if (selectedPlateaus.size() >= 12)
                     break;
-                if (plateau.start - selectedPlateaus.back().start < 0.085)
+                if (plateau.start - selectedPlateaus.back().start < 0.055)
                     continue;
-                if (end - plateau.start < 0.075)
+                if (end - plateau.start < 0.055)
                     continue;
-                if (std::abs(plateau.pitchExact - selectedPlateaus.back().pitchExact) < 0.70)
+                if (std::abs(plateau.pitchExact - selectedPlateaus.back().pitchExact) < 0.28)
                     continue;
 
                 selectedPlateaus.push_back(plateau);
@@ -1931,11 +2357,16 @@ private:
             return;
 
         analysisRunning_ = true;
-        setStatus("Running offline pYIN analysis...");
+        const auto analysisWindows = buildVocalPitchAnalysisWindows(document_);
+        setStatus(analysisWindows.empty()
+            ? "Running offline pYIN analysis..."
+            : "Running offline pYIN analysis in "
+                + juce::String(static_cast<int>(analysisWindows.size()))
+                + " vocal windows...");
 
         juce::WeakReference<MainComponent> safeThis(this);
         const auto audioFile = document_.audioFile;
-        juce::Thread::launch([safeThis, audioFile]
+        juce::Thread::launch([safeThis, audioFile, analysisWindows]
         {
             const auto script = juce::File(SYNTHETIC_OBSIDIAN_ROOT).getChildFile("research/svc_pitch/analyze_notes_pyin.py");
             juce::String output;
@@ -1948,6 +2379,13 @@ private:
             args.add(audioFile.getFullPathName());
             args.add("--sensitivity");
             args.add("0.72");
+            args.add("--pitch-backend");
+            args.add("pyin");
+            for (const auto& window : analysisWindows)
+            {
+                args.add("--analysis-window");
+                args.add(juce::String(window.start, 6) + ":" + juce::String(window.end, 6));
+            }
 
             if (! script.existsAsFile())
             {
@@ -2249,8 +2687,7 @@ private:
                     static_cast<double>(object->getProperty("confidence")));
                 if (end - start < 0.08)
                     continue;
-                if ((kind == BoundaryKind::breath || kind == BoundaryKind::pause)
-                    && overlapsKnownVocal(start, end))
+                if (kind == BoundaryKind::breath && overlapsKnownVocal(start, end))
                     continue;
 
                 BoundaryMarker boundary;
@@ -2269,7 +2706,22 @@ private:
 
         const auto breathCount = addIntervals("breath", BoundaryKind::breath);
         const auto silenceCount = addIntervals("silence", BoundaryKind::pause);
-        const auto removedMicroBoundaries = removeMicroNonVocalBoundaries(document_.boundaries);
+        const auto mergedNonVocalRegions = normalizeNonVocalRegions(document_.regions, document_.boundaries, document_.duration);
+        for (const auto& region : document_.regions)
+        {
+            if (! isNonVocalRegionKind(region.kind))
+                continue;
+
+            BoundaryMarker boundary;
+            boundary.id = document_.nextBoundaryId();
+            boundary.time = region.start;
+            boundary.kind = boundaryKindFromString(region.kind);
+            boundary.text = region.kind;
+            boundary.confidence = 0.85;
+            boundary.source = "gtsinger_tcn";
+            document_.boundaries.push_back(std::move(boundary));
+        }
+        const auto removedMicroBoundaries = removeMicroNonVocalBoundaries(document_.boundaries, 0.08, 0.11);
 
         editor_.fitToClip();
         markChanged();
@@ -2278,8 +2730,12 @@ private:
                   + " syllable candidates, "
                   + juce::String(breathCount) + " breaths, and "
                   + juce::String(silenceCount) + " pauses"
+                  + (mergedNonVocalRegions > 0
+                         ? "; merged " + juce::String(mergedNonVocalRegions) + " non-vocal splits"
+                         : juce::String())
                   + (removedMicroBoundaries > 0
-                         ? "; suppressed " + juce::String(removedMicroBoundaries) + " micro-segments"
+                         ? (mergedNonVocalRegions > 0 ? ", suppressed " : "; suppressed ")
+                            + juce::String(removedMicroBoundaries) + " micro-segments"
                          : juce::String())
                   + (preserveLyrics ? " while preserving lyrics." : "."));
 

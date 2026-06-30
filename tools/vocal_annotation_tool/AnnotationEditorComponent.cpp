@@ -112,7 +112,7 @@ juce::Colour waveformColourFor(BoundaryKind kind, size_t index)
 std::vector<WaveformSegmentStart> waveformSegmentStarts(const AnnotationDocument& document)
 {
     std::vector<WaveformSegmentStart> starts;
-    starts.reserve(document.boundaries.size() + document.notes.size() + document.regions.size() * 2);
+    starts.reserve(document.boundaries.size() + document.regions.size() * 2);
     for (const auto& boundary : document.boundaries)
     {
         if (boundary.kind != BoundaryKind::ignore
@@ -134,13 +134,6 @@ std::vector<WaveformSegmentStart> waveformSegmentStarts(const AnnotationDocument
 
         starts.push_back({ juce::jlimit(0.0, document.duration, region.start), kind });
         starts.push_back({ juce::jlimit(0.0, document.duration, region.end), BoundaryKind::ignore });
-    }
-
-    if (starts.empty())
-    {
-        for (const auto& note : document.notes)
-            if (note.start >= 0.0 && note.start <= document.duration)
-                starts.push_back({ note.start, BoundaryKind::syllable });
     }
 
     std::sort(starts.begin(), starts.end(), [](const auto& a, const auto& b) { return a.time < b.time; });
@@ -1588,6 +1581,9 @@ void AnnotationEditorComponent::drawBoundaries(juce::Graphics& g, juce::Rectangl
 {
     for (const auto& boundary : document_.boundaries)
     {
+        if (boundary.source == "pyin_draft")
+            continue;
+
         if (boundary.time < visibleStart_ || boundary.time > visibleEnd_)
             continue;
 

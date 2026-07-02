@@ -1,10 +1,7 @@
 const state = {
   song: null,
   fileName: "",
-  tracks: [
-    { id: "lead", name: "Lead Vocal", color: "#65a9ff", muted: false, solo: false },
-    { id: "chords", name: "Chords", color: "#f0bd62", muted: false, solo: false },
-  ],
+  tracks: [],
   tempo: 120,
   totalBeats: 1,
   pxPerBeat: 42,
@@ -38,6 +35,7 @@ const els = {
   stats: document.getElementById("stats"),
   ruler: document.getElementById("ruler"),
   scroll: document.getElementById("timelineScroll"),
+  spacer: document.getElementById("timelineSpacer"),
   canvas: document.getElementById("timelineCanvas"),
   playhead: document.getElementById("playhead"),
   chordList: document.getElementById("chordList"),
@@ -74,6 +72,10 @@ els.scroll.addEventListener("click", (event) => {
   seek(beat, state.isPlaying);
 });
 
+els.scroll.addEventListener("scroll", () => {
+  requestAnimationFrame(renderViewport);
+});
+
 els.zoomSlider.addEventListener("input", () => {
   state.pxPerBeat = Number(els.zoomSlider.value);
   render();
@@ -95,12 +97,15 @@ renderTrackControls();
 function parseDslYaml(text) {
   const song = {
     meta: {},
-    tracks: { chords: [], lead_vocal: [] },
+    tracks: { chords: [], lead_vocal: [], backing_vocals: [] },
     analysis: { warnings: [], lead_detection: {}, chord_detection: {} },
   };
   let section = "";
   let subsection = "";
   let current = null;
+  let currentBacking = null;
+  let currentPart = null;
+  let currentBackingNote = null;
 
   for (const rawLine of text.split(/\r?\n/)) {
     const line = rawLine.replace(/\t/g, "  ");
@@ -124,7 +129,61 @@ function parseDslYaml(text) {
     if (section === "tracks" && indent === 2 && trimmed.endsWith(":")) {
       subsection = trimmed.slice(0, -1);
       current = null;
+      currentBacking = null;
+      currentPart = null;
+      currentBackingNote = null;
       continue;
+    }
+
+    if (section === "tracks" && subsection === "backing_vocals") {
+      if (indent === 4 && trimmed.startsWith("- ")) {
+        currentBacking = { parts: [] };
+        song.tracks.backing_vocals.push(currentBacking);
+        currentPart = null;
+        currentBackingNote = null;
+        const rest = trimmed.slice(2);
+        if (rest.includes(":")) {
+          const [key, value] = splitPair(rest);
+          currentBacking[key] = parseScalar(value);
+        }
+        continue;
+      }
+      if (currentBacking && indent === 6 && trimmed.includes(":") && trimmed !== "parts:") {
+        const [key, value] = splitPair(trimmed);
+        currentBacking[key] = parseScalar(value);
+        continue;
+      }
+      if (currentBacking && indent === 8 && trimmed.startsWith("- ")) {
+        currentPart = { notes: [] };
+        currentBacking.parts.push(currentPart);
+        currentBackingNote = null;
+        const rest = trimmed.slice(2);
+        if (rest.includes(":")) {
+          const [key, value] = splitPair(rest);
+          currentPart[key] = parseScalar(value);
+        }
+        continue;
+      }
+      if (currentPart && indent === 10 && trimmed.includes(":") && trimmed !== "notes:") {
+        const [key, value] = splitPair(trimmed);
+        currentPart[key] = parseScalar(value);
+        continue;
+      }
+      if (currentPart && indent === 12 && trimmed.startsWith("- ")) {
+        currentBackingNote = {};
+        currentPart.notes.push(currentBackingNote);
+        const rest = trimmed.slice(2);
+        if (rest.includes(":")) {
+          const [key, value] = splitPair(rest);
+          currentBackingNote[key] = parseScalar(value);
+        }
+        continue;
+      }
+      if (currentBackingNote && indent === 14 && trimmed.includes(":")) {
+        const [key, value] = splitPair(trimmed);
+        currentBackingNote[key] = parseScalar(value);
+        continue;
+      }
     }
 
     if (section === "tracks" && indent === 4 && trimmed.startsWith("- ")) {
@@ -223,13 +282,34 @@ function normalizeSong(song) {
     midi_note: Number(note.midi_note) || noteNameToMidi(note.pitch) || 60,
     velocity: Number(note.velocity) || 80,
   }));
+  const backing = (song.tracks.backing_vocals || []).map((track) => ({
+    ...track,
+    parts: (track.parts || []).map((part) => ({
+      ...part,
+      notes: (part.notes || []).map((note) => ({
+        ...note,
+        start: Number(note.start) || 0,
+        duration: Math.max(Number(note.duration) || 0, 0.05),
+        midi_note: Number(note.midi_note) || noteNameToMidi(note.pitch) || 60,
+        velocity: Number(note.velocity) || 72,
+      })),
+    })),
+  }));
   const maxChordBeat = chords.reduce((max, chord) => Math.max(max, chord.start + chord.duration), 0);
   const maxLeadBeat = lead.reduce((max, note) => Math.max(max, note.start + note.duration), 0);
+  const maxBackingBeat = backing.reduce(
+    (trackMax, track) =>
+      Math.max(
+        trackMax,
+        ...track.parts.map((part) => part.notes.reduce((partMax, note) => Math.max(partMax, note.start + note.duration), 0))
+      ),
+    0
+  );
   return {
     ...song,
     meta: { ...song.meta, tempo },
-    tracks: { chords, lead_vocal: lead },
-    totalBeats: Math.max(maxChordBeat, maxLeadBeat, 1),
+    tracks: { chords, lead_vocal: lead, backing_vocals: backing },
+    totalBeats: Math.max(maxChordBeat, maxLeadBeat, maxBackingBeat, 1),
   };
 }
 
@@ -237,6 +317,7 @@ function loadSong(song, fileName) {
   stop();
   state.song = song;
   state.fileName = fileName;
+  state.tracks = buildTrackList(song);
   state.tempo = song.meta.tempo;
   state.totalBeats = song.totalBeats;
   state.currentBeat = 0;
@@ -257,6 +338,39 @@ function loadSong(song, fileName) {
   updateReadout();
 }
 
+function buildTrackList(song) {
+  const previous = new Map(state.tracks.map((track) => [track.id, track]));
+  const tracks = [
+    makeTrack("chords", "Chords", "#f0bd62", "chords", null, previous),
+    makeTrack("lead", "Lead Vocal", "#65a9ff", "lead", null, previous),
+  ];
+  const palette = ["#55c7a3", "#ff8e72", "#c792ea", "#8bd3dd", "#f78fb3", "#b8e986", "#f5d76e", "#9aa7ff"];
+  let colorIndex = 0;
+  for (const backing of song.tracks.backing_vocals || []) {
+    for (const part of backing.parts || []) {
+      const id = `backing:${backing.id}:${part.id}`;
+      const role = part.role ? ` ${part.role}` : "";
+      const name = `${backing.name || backing.id}${role}`;
+      tracks.push(makeTrack(id, name, palette[colorIndex % palette.length], "backing", { backing, part }, previous));
+      colorIndex += 1;
+    }
+  }
+  return tracks;
+}
+
+function makeTrack(id, name, color, type, source, previous) {
+  const old = previous.get(id);
+  return {
+    id,
+    name,
+    color,
+    type,
+    source,
+    muted: old?.muted || false,
+    solo: old?.solo || false,
+  };
+}
+
 function renderMetadata() {
   const meta = state.song?.meta || {};
   els.metadata.innerHTML = `
@@ -273,10 +387,14 @@ function renderMetadata() {
 function renderStats() {
   const chords = state.song?.tracks.chords.length || 0;
   const lead = state.song?.tracks.lead_vocal.length || 0;
+  const backingTracks = state.song?.tracks.backing_vocals.length || 0;
+  const backingParts = state.tracks.filter((track) => track.type === "backing").length;
   const seconds = beatsToSeconds(state.totalBeats);
   els.stats.innerHTML = `
     <span class="stat">${chords} chords</span>
     <span class="stat">${lead} lead notes</span>
+    <span class="stat">${backingTracks} backing sets</span>
+    <span class="stat">${backingParts} backing parts</span>
     <span class="stat">${formatTime(seconds)}</span>
   `;
 }
@@ -334,29 +452,88 @@ function renderWarnings() {
     : `<div class="empty-state">No warnings.</div>`;
 }
 
+function timelineLanes() {
+  const tracks = state.tracks.length
+    ? state.tracks
+    : [
+        { id: "chords", name: "Chords", color: "#f0bd62", type: "chords" },
+        { id: "lead", name: "Lead Vocal", color: "#65a9ff", type: "lead" },
+      ];
+  let y = 0;
+  return tracks.map((track) => {
+    const height = track.type === "chords" ? 96 : 54;
+    const lane = { track, y, height };
+    y += height;
+    return lane;
+  });
+}
+
+function timelineHeight() {
+  const lanes = timelineLanes();
+  return Math.max(520, lanes.reduce((height, lane) => Math.max(height, lane.y + lane.height), 0));
+}
+
 function render() {
-  const width = Math.max(Math.ceil(state.totalBeats * state.pxPerBeat) + 240, els.scroll.clientWidth || 800);
-  const height = 520;
-  const ratio = window.devicePixelRatio || 1;
-  els.canvas.style.width = `${width}px`;
-  els.canvas.style.height = `${height}px`;
-  els.canvas.width = Math.round(width * ratio);
-  els.canvas.height = Math.round(height * ratio);
-  ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
-  drawTimeline(width, height);
+  const width = contentWidth();
+  const height = timelineHeight();
+  els.spacer.style.width = `${width}px`;
+  els.spacer.style.height = `${height}px`;
+  els.playhead.style.height = `${height}px`;
+  renderViewport();
   drawRuler(width);
   updatePlayhead();
 }
 
-function drawTimeline(width, height) {
-  ctx.clearRect(0, 0, width, height);
+function renderViewport() {
+  const width = contentWidth();
+  const height = timelineHeight();
+  const viewportWidth = Math.max(els.scroll.clientWidth || 800, 1);
+  const viewportHeight = Math.max(els.scroll.clientHeight || 520, 1);
+  const ratio = canvasScaleRatio();
+  els.canvas.style.width = `${viewportWidth}px`;
+  els.canvas.style.height = `${viewportHeight}px`;
+  els.canvas.style.transform = `translate(${els.scroll.scrollLeft}px, ${els.scroll.scrollTop}px)`;
+  els.canvas.width = Math.round(viewportWidth * ratio);
+  els.canvas.height = Math.round(viewportHeight * ratio);
+  ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+  ctx.imageSmoothingEnabled = false;
+  drawTimeline(viewportWidth, viewportHeight, width, height, els.scroll.scrollLeft, els.scroll.scrollTop);
+}
+
+function contentWidth() {
+  return Math.max(Math.ceil(state.totalBeats * state.pxPerBeat) + 240, els.scroll.clientWidth || 800);
+}
+
+function canvasScaleRatio() {
+  const dpr = window.devicePixelRatio || 1;
+  return Math.max(1, Math.min(dpr, 2));
+}
+
+function hexToRgba(hex, alpha) {
+  const normalized = hex.replace("#", "");
+  const value = Number.parseInt(normalized.length === 3 ? normalized.replace(/(.)/g, "$1$1") : normalized, 16);
+  const r = (value >> 16) & 255;
+  const g = (value >> 8) & 255;
+  const b = value & 255;
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+function drawTimeline(viewportWidth, viewportHeight, width, height, scrollLeft, scrollTop) {
+  ctx.clearRect(0, 0, viewportWidth, viewportHeight);
   ctx.fillStyle = "#0d0f12";
-  ctx.fillRect(0, 0, width, height);
+  ctx.fillRect(0, 0, viewportWidth, viewportHeight);
+  ctx.save();
+  ctx.translate(-scrollLeft, -scrollTop);
   drawGrid(width, height);
-  drawTrackLabels();
-  if (!state.song) return;
-  drawChords();
-  drawLead();
+  drawTrackLabels(scrollLeft);
+  if (state.song) {
+    for (const lane of timelineLanes()) {
+      if (lane.track.type === "chords") drawChords(lane);
+      if (lane.track.type === "lead") drawNoteTrack(lane, state.song.tracks.lead_vocal, "rgba(101, 169, 255, 0.86)");
+      if (lane.track.type === "backing") drawNoteTrack(lane, lane.track.source.part.notes, hexToRgba(lane.track.color, 0.78));
+    }
+  }
+  ctx.restore();
 }
 
 function drawGrid(width, height) {
@@ -371,28 +548,32 @@ function drawGrid(width, height) {
     ctx.lineTo(x, height);
     ctx.stroke();
   }
-  ctx.fillStyle = "#14171b";
-  ctx.fillRect(0, 0, width, 44);
-  ctx.fillRect(0, 250, width, 44);
   ctx.strokeStyle = "#313641";
-  ctx.beginPath();
-  ctx.moveTo(0, 44);
-  ctx.lineTo(width, 44);
-  ctx.moveTo(0, 250);
-  ctx.lineTo(width, 250);
-  ctx.moveTo(0, 294);
-  ctx.lineTo(width, 294);
-  ctx.stroke();
+  for (const lane of timelineLanes()) {
+    ctx.fillStyle = "#14171b";
+    ctx.fillRect(0, lane.y, width, 34);
+    ctx.beginPath();
+    ctx.moveTo(0, lane.y);
+    ctx.lineTo(width, lane.y);
+    ctx.moveTo(0, lane.y + 34);
+    ctx.lineTo(width, lane.y + 34);
+    ctx.moveTo(0, lane.y + lane.height);
+    ctx.lineTo(width, lane.y + lane.height);
+    ctx.stroke();
+  }
 }
 
-function drawTrackLabels() {
+function drawTrackLabels(scrollLeft) {
   ctx.font = "700 13px Inter, sans-serif";
-  ctx.fillStyle = "#a5adba";
-  ctx.fillText("Chords", 12, 28);
-  ctx.fillText("Lead Vocal", 12, 278);
+  for (const lane of timelineLanes()) {
+    ctx.fillStyle = lane.track.color;
+    ctx.fillRect(scrollLeft + 10, lane.y + 10, 8, 14);
+    ctx.fillStyle = "#a5adba";
+    ctx.fillText(lane.track.name, scrollLeft + 26, lane.y + 23);
+  }
 }
 
-function drawChords() {
+function drawChords(lane) {
   if (!isAudible("chords")) return;
   const chords = state.song.tracks.chords;
   ctx.font = "700 13px Inter, sans-serif";
@@ -400,29 +581,29 @@ function drawChords() {
     const x = beatToX(chord.start);
     const w = Math.max(chord.duration * state.pxPerBeat - 2, 4);
     ctx.fillStyle = "rgba(240, 189, 98, 0.26)";
-    ctx.fillRect(x, 62, w, 154);
+    ctx.fillRect(x, lane.y + 42, w, lane.height - 50);
     ctx.strokeStyle = "rgba(240, 189, 98, 0.65)";
-    ctx.strokeRect(x, 62, w, 154);
+    ctx.strokeRect(x, lane.y + 42, w, lane.height - 50);
     ctx.fillStyle = "#f0bd62";
-    ctx.fillText(String(chord.chord || ""), x + 7, 84, Math.max(w - 12, 20));
+    ctx.fillText(String(chord.chord || ""), x + 7, lane.y + 62, Math.max(w - 12, 20));
   }
 }
 
-function drawLead() {
-  if (!isAudible("lead")) return;
-  const notes = state.song.tracks.lead_vocal;
+function drawNoteTrack(lane, notes, fill) {
+  if (!isAudible(lane.track.id)) return;
   if (!notes.length) return;
   const pitches = notes.map((note) => note.midi_note);
   const minPitch = Math.min(...pitches) - 2;
   const maxPitch = Math.max(...pitches) + 2;
   const range = Math.max(maxPitch - minPitch, 1);
+  const noteArea = Math.max(lane.height - 42, 8);
   for (const note of notes) {
     const x = beatToX(note.start);
     const w = Math.max(note.duration * state.pxPerBeat - 1, 3);
-    const y = 482 - ((note.midi_note - minPitch) / range) * 170;
-    ctx.fillStyle = "rgba(101, 169, 255, 0.86)";
-    ctx.fillRect(x, y, w, 9);
-    if (note.syllable) {
+    const y = lane.y + lane.height - 13 - ((note.midi_note - minPitch) / range) * noteArea;
+    ctx.fillStyle = fill;
+    ctx.fillRect(x, y, w, 7);
+    if (note.syllable && lane.height >= 80) {
       ctx.fillStyle = "#d8e7ff";
       ctx.font = "11px Inter, sans-serif";
       ctx.fillText(String(note.syllable), x + 3, y - 4, Math.max(w + 30, 40));
@@ -534,6 +715,12 @@ function scheduleAhead() {
       if (chord.start >= fromBeat && chord.start < toBeat) scheduleChord(chord);
     }
   }
+  for (const track of state.tracks) {
+    if (track.type !== "backing" || !isAudible(track.id)) continue;
+    for (const note of track.source.part.notes) {
+      if (note.start >= fromBeat && note.start < toBeat) scheduleBacking(note);
+    }
+  }
   state.scheduledUntilBeat = toBeat;
   if (rawBeat >= state.totalBeats) stop();
 }
@@ -541,7 +728,7 @@ function scheduleAhead() {
 function scheduleLead(note) {
   const time = beatToAudioTime(note.start);
   const duration = beatsToSeconds(note.duration);
-  playTone(note.midi_note, time, duration, (note.velocity / 127) * 0.18, "triangle");
+  playPianoNote(note.midi_note, time, duration, (note.velocity / 127) * 0.22);
 }
 
 function scheduleChord(chord) {
@@ -549,27 +736,80 @@ function scheduleChord(chord) {
   const duration = beatsToSeconds(Math.min(chord.duration, 4));
   const notes = chord.notes.map(noteNameToMidi).filter(Boolean);
   for (const midi of notes) {
-    playTone(midi, time, duration, 0.055, "sine");
+    playPianoNote(midi, time, duration, 0.055);
   }
 }
 
-function playTone(midi, time, duration, gainValue, type) {
+function scheduleBacking(note) {
+  const time = beatToAudioTime(note.start);
+  const duration = beatsToSeconds(note.duration);
+  playPianoNote(note.midi_note, time, duration, (note.velocity / 127) * 0.12);
+}
+
+function playPianoNote(midi, time, duration, gainValue) {
   const audio = state.audio;
-  const osc = audio.createOscillator();
+  const output = audio.createGain();
+  const filter = audio.createBiquadFilter();
   const gain = audio.createGain();
-  osc.type = type;
-  osc.frequency.value = 440 * 2 ** ((midi - 69) / 12);
+
+  const frequency = 440 * 2 ** ((midi - 69) / 12);
+  const stopTime = time + Math.max(0.18, Math.min(duration + 0.55, 2.4));
+  const peak = Math.max(gainValue, 0.0002);
+  const sustain = peak * 0.28;
+  const releaseStart = Math.min(time + Math.max(duration, 0.08), stopTime - 0.08);
+
+  filter.type = "lowpass";
+  filter.frequency.setValueAtTime(Math.min(8500, frequency * 10 + 1800), time);
+  filter.frequency.exponentialRampToValueAtTime(Math.max(900, frequency * 4), stopTime);
+  filter.Q.value = 0.6;
+
   gain.gain.setValueAtTime(0.0001, time);
-  gain.gain.exponentialRampToValueAtTime(Math.max(gainValue, 0.0002), time + 0.004);
-  gain.gain.setValueAtTime(Math.max(gainValue, 0.0002), Math.max(time + 0.008, time + duration - 0.04));
-  gain.gain.exponentialRampToValueAtTime(0.0001, time + duration);
-  osc.connect(gain).connect(audio.destination);
-  osc.start(time);
-  osc.stop(time + duration + 0.03);
-  state.activeNodes.push(osc);
-  osc.addEventListener("ended", () => {
-    state.activeNodes = state.activeNodes.filter((node) => node !== osc);
+  gain.gain.exponentialRampToValueAtTime(peak, time + 0.006);
+  gain.gain.exponentialRampToValueAtTime(Math.max(sustain, 0.0002), time + 0.12);
+  gain.gain.setValueAtTime(Math.max(sustain, 0.0002), releaseStart);
+  gain.gain.exponentialRampToValueAtTime(0.0001, stopTime);
+
+  output.gain.value = 0.9;
+  filter.connect(gain).connect(output).connect(audio.destination);
+
+  const partials = [
+    { ratio: 1, gain: 1, type: "triangle", detune: 0 },
+    { ratio: 2, gain: 0.38, type: "sine", detune: 3 },
+    { ratio: 3, gain: 0.16, type: "sine", detune: -4 },
+    { ratio: 4.01, gain: 0.08, type: "sine", detune: 5 },
+  ];
+  const oscillators = partials.map((partial) => {
+    const osc = audio.createOscillator();
+    const partialGain = audio.createGain();
+    osc.type = partial.type;
+    osc.frequency.value = frequency * partial.ratio;
+    osc.detune.value = partial.detune;
+    partialGain.gain.value = partial.gain;
+    osc.connect(partialGain).connect(filter);
+    osc.start(time);
+    osc.stop(stopTime + 0.03);
+    state.activeNodes.push(osc);
+    osc.addEventListener("ended", () => {
+      state.activeNodes = state.activeNodes.filter((node) => node !== osc);
+    });
+    return osc;
   });
+
+  const transient = audio.createOscillator();
+  const transientGain = audio.createGain();
+  transient.type = "square";
+  transient.frequency.value = frequency * 8;
+  transientGain.gain.setValueAtTime(peak * 0.08, time);
+  transientGain.gain.exponentialRampToValueAtTime(0.0001, time + 0.018);
+  transient.connect(transientGain).connect(output);
+  transient.start(time);
+  transient.stop(time + 0.025);
+  state.activeNodes.push(transient);
+  transient.addEventListener("ended", () => {
+    state.activeNodes = state.activeNodes.filter((node) => node !== transient);
+  });
+
+  return oscillators;
 }
 
 function stopActiveNodes() {

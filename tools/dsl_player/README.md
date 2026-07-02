@@ -24,8 +24,10 @@ Use **Open DSL YAML** to load a generated file from:
 
 - Lead-vocal piano-roll visualization.
 - Chord-grid visualization.
+- Generated `backing_vocals` visualization, one lane per backing part.
 - WebAudio preview synth for lead vocal and chords.
-- Mute/solo controls per track.
+- WebAudio preview synth for generated backing vocal parts.
+- Mute/solo controls per track or backing part.
 - Seek, stop, play/pause, zoom, and follow-playhead controls.
 - Click anywhere on the timeline to move the playhead.
 

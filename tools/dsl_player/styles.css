@@ -201,15 +201,18 @@ input[type="range"] {
 
 .track-controls {
   display: grid;
-  gap: 10px;
+  gap: 6px;
+  max-height: 360px;
+  overflow: auto;
+  padding-right: 4px;
 }
 
 .track-row {
   display: grid;
-  grid-template-columns: 1fr 40px 40px;
+  grid-template-columns: minmax(0, 1fr) 34px 34px;
   gap: 8px;
   align-items: center;
-  min-height: 38px;
+  min-height: 32px;
 }
 
 .track-name {
@@ -232,7 +235,7 @@ input[type="range"] {
 }
 
 .mini-button {
-  height: 32px;
+  height: 28px;
   font-size: 12px;
   font-weight: 800;
 }
@@ -315,10 +318,24 @@ input[type="range"] {
   height: calc(100% - 32px);
   overflow: auto;
   cursor: crosshair;
+  background: #0d0f12;
+}
+
+.timeline-spacer {
+  position: relative;
+  min-width: 100%;
+  min-height: 100%;
+  pointer-events: none;
 }
 
 #timelineCanvas {
   display: block;
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 1;
+  background: #0d0f12;
+  pointer-events: none;
 }
 
 .playhead {
@@ -330,6 +347,7 @@ input[type="range"] {
   pointer-events: none;
   transform: translateX(0);
   box-shadow: 0 0 12px rgba(239, 111, 108, 0.6);
+  z-index: 2;
 }
 
 .details {

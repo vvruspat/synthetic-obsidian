@@ -10,11 +10,74 @@ namespace vocal_annotation
 namespace
 {
 constexpr int kTimelineHeight = 26;
-constexpr int kKeyboardWidth = 56;
+constexpr int kKeyboardWidth = 96;
 constexpr int kLyricsHeight = 34;
+constexpr int kMusicalContextHeight = 112;
+constexpr int kInstrumentalWaveformHeight = 64;
 constexpr double kMinNoteLength = 0.02;
 constexpr double kBoundaryHitPixels = 7.0;
 constexpr float kSelectedCornerRadius = 5.0f;
+
+int instrumentalTrackHeight(const AnnotationDocument& document)
+{
+    if (! document.instrumentalFile.existsAsFile())
+        return 0;
+
+    return (document.tempoSegments.empty() && document.timeSignatures.empty() && document.chords.empty())
+        ? kInstrumentalWaveformHeight
+        : kMusicalContextHeight + kInstrumentalWaveformHeight;
+}
+
+int numeratorAtTime(const AnnotationDocument& document, double time)
+{
+    for (const auto& signature : document.timeSignatures)
+        if (time >= signature.start && time < signature.end)
+            return juce::jlimit(1, 12, signature.numerator);
+
+    return 4;
+}
+
+std::vector<double> beatTimesFor(const AnnotationDocument& document, double visibleStart, double visibleEnd)
+{
+    std::vector<double> beats;
+    const auto duration = juce::jmax(document.duration, visibleEnd);
+
+    if (document.tempoSegments.empty())
+    {
+        const auto step = 60.0 / juce::jlimit(20.0, 300.0, document.bpm);
+        auto time = std::floor(visibleStart / step) * step;
+        while (time <= visibleEnd + step && time <= duration + 0.001)
+        {
+            if (time >= visibleStart - step)
+                beats.push_back(time);
+            time += step;
+        }
+        return beats;
+    }
+
+    for (const auto& tempo : document.tempoSegments)
+    {
+        const auto bpm = juce::jlimit(20.0, 300.0, tempo.bpm);
+        const auto step = 60.0 / bpm;
+        const auto segmentStart = juce::jmax(0.0, tempo.start);
+        const auto segmentEnd = juce::jmin(duration, tempo.end > tempo.start ? tempo.end : duration);
+        if (segmentEnd < visibleStart || segmentStart > visibleEnd)
+            continue;
+
+        auto beatIndex = std::floor((visibleStart - segmentStart) / step);
+        auto time = segmentStart + juce::jmax(0.0, beatIndex) * step;
+        while (time <= segmentEnd + 0.001 && time <= visibleEnd + step)
+        {
+            if (time >= visibleStart - step)
+                beats.push_back(time);
+            time += step;
+        }
+    }
+
+    std::sort(beats.begin(), beats.end());
+    beats.erase(std::unique(beats.begin(), beats.end(), [](double a, double b) { return std::abs(a - b) < 0.01; }), beats.end());
+    return beats;
+}
 
 juce::Colour selectedShadowColour()
 {
@@ -180,7 +243,8 @@ AnnotationEditorComponent::AnnotationEditorComponent(juce::AudioFormatManager& f
     : document_(document),
       formatManager_(formatManager),
       thumbnailCache_(16),
-      thumbnail_(512, formatManager_, thumbnailCache_)
+      thumbnail_(512, formatManager_, thumbnailCache_),
+      instrumentalThumbnail_(512, formatManager_, thumbnailCache_)
 {
     setWantsKeyboardFocus(true);
 }
@@ -194,6 +258,12 @@ void AnnotationEditorComponent::setAudioFile(const juce::File& file)
 {
     thumbnail_.setSource(new juce::FileInputSource(file));
     fitToClip();
+}
+
+void AnnotationEditorComponent::setInstrumentalFile(const juce::File& file)
+{
+    instrumentalThumbnail_.setSource(file.existsAsFile() ? new juce::FileInputSource(file) : nullptr);
+    repaint();
 }
 
 void AnnotationEditorComponent::fitToClip()
@@ -400,10 +470,12 @@ void AnnotationEditorComponent::paint(juce::Graphics& g)
     g.fillAll(juce::Colour(0xff171a1f));
     drawTimeline(g, getTimelineBounds());
     drawPianoKeyboard(g, getKeyboardBounds());
-    drawWaveform(g, getEditorBounds());
-    drawNotes(g, getEditorBounds());
-    drawBoundaries(g, getEditorBounds());
-    drawSplitPreview(g, getEditorBounds());
+    drawWaveform(g, getVocalEditorBounds());
+    drawNotes(g, getVocalEditorBounds());
+    drawBoundaries(g, getVocalEditorBounds());
+    drawSplitPreview(g, getVocalEditorBounds());
+    drawInstrumentalTrack(g, getInstrumentalTrackBounds());
+    drawInstrumentalHeader(g, getInstrumentalHeaderBounds());
     drawLyrics(g, getLyricsBounds());
 }
 
@@ -756,6 +828,8 @@ juce::Rectangle<int> AnnotationEditorComponent::getKeyboardBounds() const
     auto bounds = getLocalBounds();
     bounds.removeFromTop(kTimelineHeight);
     bounds.removeFromBottom(kLyricsHeight);
+    if (document_.instrumentalFile.existsAsFile())
+        bounds.removeFromTop(instrumentalTrackHeight(document_));
     return bounds.removeFromLeft(kKeyboardWidth);
 }
 
@@ -765,7 +839,38 @@ juce::Rectangle<int> AnnotationEditorComponent::getEditorBounds() const
     bounds.removeFromTop(kTimelineHeight);
     bounds.removeFromBottom(kLyricsHeight);
     bounds.removeFromLeft(kKeyboardWidth);
+    if (document_.instrumentalFile.existsAsFile())
+        bounds.removeFromTop(instrumentalTrackHeight(document_));
     return bounds;
+}
+
+juce::Rectangle<int> AnnotationEditorComponent::getVocalEditorBounds() const
+{
+    return getEditorBounds();
+}
+
+juce::Rectangle<int> AnnotationEditorComponent::getInstrumentalHeaderBounds() const
+{
+    if (! document_.instrumentalFile.existsAsFile())
+        return {};
+
+    auto bounds = getLocalBounds();
+    bounds.removeFromTop(kTimelineHeight);
+    bounds.removeFromBottom(kLyricsHeight);
+    auto header = bounds.removeFromLeft(kKeyboardWidth);
+    return header.removeFromTop(instrumentalTrackHeight(document_));
+}
+
+juce::Rectangle<int> AnnotationEditorComponent::getInstrumentalTrackBounds() const
+{
+    if (! document_.instrumentalFile.existsAsFile())
+        return {};
+
+    auto bounds = getLocalBounds();
+    bounds.removeFromTop(kTimelineHeight);
+    bounds.removeFromBottom(kLyricsHeight);
+    bounds.removeFromLeft(kKeyboardWidth);
+    return bounds.removeFromTop(instrumentalTrackHeight(document_));
 }
 
 juce::Rectangle<int> AnnotationEditorComponent::getLyricsBounds() const
@@ -939,7 +1044,7 @@ std::optional<int> AnnotationEditorComponent::waveformPartNoteAt(juce::Point<flo
 
 bool AnnotationEditorComponent::waveformContains(juce::Point<float> position) const
 {
-    const auto bounds = getEditorBounds();
+    const auto bounds = getVocalEditorBounds();
     const auto waveformBounds = bounds.reduced(0, 8).toFloat();
     if (! waveformBounds.contains(position) || ! document_.audioFile.existsAsFile())
         return false;
@@ -1343,6 +1448,142 @@ void AnnotationEditorComponent::drawTimeline(juce::Graphics& g, juce::Rectangle<
     }
 }
 
+void AnnotationEditorComponent::drawInstrumentalHeader(juce::Graphics& g, juce::Rectangle<int> bounds) const
+{
+    if (bounds.isEmpty())
+        return;
+
+    g.setColour(juce::Colour(0xff101318));
+    g.fillRect(bounds);
+    g.setColour(juce::Colour(0xff303846));
+    g.drawRect(bounds);
+
+    auto area = bounds;
+    if (! document_.tempoSegments.empty() || ! document_.timeSignatures.empty() || ! document_.chords.empty())
+    {
+        auto tempoRow = area.removeFromTop(36);
+        auto signatureRow = area.removeFromTop(32);
+        auto chordRow = area.removeFromTop(kMusicalContextHeight - 68);
+
+        const auto drawLabel = [&g](juce::Rectangle<int> row, const juce::String& text)
+        {
+            g.setFont(13.0f);
+            g.setColour(juce::Colour(0xffe5e7eb).withAlpha(0.92f));
+            g.drawText(text, row.reduced(8, 0), juce::Justification::centredLeft);
+        };
+
+        g.setColour(juce::Colour(0xff111827));
+        g.fillRect(tempoRow);
+        g.setColour(juce::Colour(0xff1f2937));
+        g.fillRect(signatureRow);
+        g.setColour(juce::Colour(0xff111827));
+        g.fillRect(chordRow);
+
+        drawLabel(tempoRow, "Tempo");
+        drawLabel(signatureRow, "Signature");
+        drawLabel(chordRow, "Chord");
+
+        g.setColour(juce::Colour(0xff334155));
+        g.drawHorizontalLine(tempoRow.getBottom(), static_cast<float>(bounds.getX()), static_cast<float>(bounds.getRight()));
+        g.drawHorizontalLine(signatureRow.getBottom(), static_cast<float>(bounds.getX()), static_cast<float>(bounds.getRight()));
+    }
+
+    g.setFont(13.0f);
+    g.setColour(juce::Colour(0xffe5e7eb).withAlpha(0.86f));
+    g.drawText("Inst", area.reduced(8, 0), juce::Justification::centredLeft);
+}
+
+void AnnotationEditorComponent::drawMusicalGrid(juce::Graphics& g, juce::Rectangle<int> bounds) const
+{
+    if (bounds.isEmpty())
+        return;
+
+    const auto beats = beatTimesFor(document_, visibleStart_, visibleEnd_);
+    for (size_t i = 0; i < beats.size(); ++i)
+    {
+        const auto time = beats[i];
+        const auto x = juce::roundToInt(timeToX(time));
+        const auto numerator = numeratorAtTime(document_, time);
+        const auto isBar = numerator > 0 && static_cast<int>(i) % numerator == 0;
+        g.setColour(isBar ? juce::Colour(0xffa78bfa).withAlpha(0.30f)
+                          : juce::Colour(0xffcbd5e1).withAlpha(0.13f));
+        g.drawVerticalLine(x, static_cast<float>(bounds.getY()), static_cast<float>(bounds.getBottom()));
+    }
+}
+
+void AnnotationEditorComponent::drawMusicalContext(juce::Graphics& g, juce::Rectangle<int> bounds) const
+{
+    if (bounds.isEmpty())
+        return;
+
+    auto rows = bounds;
+    auto tempoRow = rows.removeFromTop(36);
+    auto signatureRow = rows.removeFromTop(32);
+    auto chordRow = rows;
+
+    g.setColour(juce::Colour(0xff111827));
+    g.fillRect(bounds);
+    g.setColour(juce::Colour(0xff334155));
+    g.drawHorizontalLine(tempoRow.getBottom(), static_cast<float>(bounds.getX()), static_cast<float>(bounds.getRight()));
+    g.drawHorizontalLine(signatureRow.getBottom(), static_cast<float>(bounds.getX()), static_cast<float>(bounds.getRight()));
+
+    for (const auto& tempo : document_.tempoSegments)
+    {
+        if (tempo.end <= visibleStart_ || tempo.start >= visibleEnd_)
+            continue;
+
+        const auto x = juce::roundToInt(timeToX(juce::jmax(tempo.start, visibleStart_)));
+        const auto right = juce::roundToInt(timeToX(juce::jmin(tempo.end, visibleEnd_)));
+        if (right <= x)
+            continue;
+
+        const auto rect = juce::Rectangle<int>(x, tempoRow.getY() + 7, right - x, tempoRow.getHeight() - 12);
+        g.setColour(juce::Colour(0xff2563eb).withAlpha(0.26f));
+        g.fillRect(rect);
+        g.setColour(juce::Colour(0xff60a5fa).withAlpha(0.9f));
+        g.drawRect(rect);
+        g.drawText(juce::String(tempo.bpm, 0), rect.reduced(5, 0), juce::Justification::centredLeft);
+    }
+
+    for (const auto& signature : document_.timeSignatures)
+    {
+        if (signature.end <= visibleStart_ || signature.start >= visibleEnd_)
+            continue;
+
+        const auto x = juce::roundToInt(timeToX(juce::jmax(signature.start, visibleStart_)));
+        const auto right = juce::roundToInt(timeToX(juce::jmin(signature.end, visibleEnd_)));
+        if (right <= x)
+            continue;
+
+        const auto rect = juce::Rectangle<int>(x, signatureRow.getY(), right - x, signatureRow.getHeight());
+        g.setColour(juce::Colour(0xff475569).withAlpha(0.55f));
+        g.fillRect(rect);
+        g.setColour(juce::Colour(0xffe5e7eb));
+        g.drawText(juce::String(signature.numerator) + "/" + juce::String(signature.denominator),
+                   rect.reduced(6, 0),
+                   juce::Justification::centredLeft);
+    }
+
+    for (const auto& chord : document_.chords)
+    {
+        if (chord.end <= visibleStart_ || chord.start >= visibleEnd_)
+            continue;
+
+        const auto x = juce::roundToInt(timeToX(juce::jmax(chord.start, visibleStart_)));
+        const auto right = juce::roundToInt(timeToX(juce::jmin(chord.end, visibleEnd_)));
+        if (right <= x)
+            continue;
+
+        const auto rect = juce::Rectangle<int>(x, chordRow.getY() + 4, right - x, chordRow.getHeight() - 8);
+        g.setColour(juce::Colour(0xfff8fafc).withAlpha(0.70f));
+        g.fillRoundedRectangle(rect.toFloat(), 3.0f);
+        g.setColour(juce::Colour(0xff1f2937));
+        g.drawText(chord.name, rect.reduced(7, 0), juce::Justification::centredLeft);
+    }
+
+    drawMusicalGrid(g, bounds);
+}
+
 void AnnotationEditorComponent::drawWaveform(juce::Graphics& g, juce::Rectangle<int> bounds)
 {
     g.setColour(juce::Colour(0xff1d222b));
@@ -1365,6 +1606,8 @@ void AnnotationEditorComponent::drawWaveform(juce::Graphics& g, juce::Rectangle<
                              static_cast<float>(bounds.getX()),
                              static_cast<float>(bounds.getRight()));
     }
+
+    drawMusicalGrid(g, bounds);
 
     if (document_.audioFile.existsAsFile())
     {
@@ -1411,6 +1654,29 @@ void AnnotationEditorComponent::drawWaveform(juce::Graphics& g, juce::Rectangle<
 
     g.setColour(juce::Colours::white.withAlpha(0.8f));
     g.drawVerticalLine(juce::roundToInt(timeToX(playheadTime_)), static_cast<float>(bounds.getY()), static_cast<float>(bounds.getBottom()));
+}
+
+void AnnotationEditorComponent::drawInstrumentalTrack(juce::Graphics& g, juce::Rectangle<int> bounds)
+{
+    if (bounds.isEmpty())
+        return;
+
+    g.setColour(juce::Colour(0xff111821));
+    g.fillRect(bounds);
+    g.setColour(juce::Colour(0xff303846));
+    g.drawHorizontalLine(bounds.getY(), static_cast<float>(bounds.getX()), static_cast<float>(bounds.getRight()));
+
+    auto trackArea = bounds;
+    if (! document_.tempoSegments.empty() || ! document_.timeSignatures.empty() || ! document_.chords.empty())
+        drawMusicalContext(g, trackArea.removeFromTop(kMusicalContextHeight));
+
+    auto trackBounds = trackArea.reduced(0, 7);
+    g.setColour(juce::Colour(0xff9aa4b2).withAlpha(0.12f));
+    g.fillRect(trackBounds);
+    drawMusicalGrid(g, trackBounds);
+    g.setColour(juce::Colour(0xffd1d5db).withAlpha(0.44f));
+    instrumentalThumbnail_.drawChannels(g, trackBounds, visibleStart_, visibleEnd_, 0.82f);
+
 }
 
 void AnnotationEditorComponent::drawSelectedWaveformBorder(juce::Graphics& g, juce::Rectangle<int> waveformBounds)

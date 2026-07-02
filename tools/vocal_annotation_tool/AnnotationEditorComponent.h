@@ -24,6 +24,7 @@ public:
 
     void setListener(Listener* newListener);
     void setAudioFile(const juce::File& file);
+    void setInstrumentalFile(const juce::File& file);
     void fitToClip();
     void setPlayheadTime(double seconds);
     void setHorizontalZoom(double zoom);
@@ -70,6 +71,9 @@ private:
     juce::Rectangle<int> getTimelineBounds() const;
     juce::Rectangle<int> getKeyboardBounds() const;
     juce::Rectangle<int> getEditorBounds() const;
+    juce::Rectangle<int> getVocalEditorBounds() const;
+    juce::Rectangle<int> getInstrumentalHeaderBounds() const;
+    juce::Rectangle<int> getInstrumentalTrackBounds() const;
     juce::Rectangle<int> getLyricsBounds() const;
 
     double xToTime(float x) const;
@@ -100,7 +104,11 @@ private:
     static void recalculateNotePitchFromCurve(NoteBlock& note);
     void drawPianoKeyboard(juce::Graphics& g, juce::Rectangle<int> bounds) const;
     void drawTimeline(juce::Graphics& g, juce::Rectangle<int> bounds) const;
+    void drawInstrumentalHeader(juce::Graphics& g, juce::Rectangle<int> bounds) const;
+    void drawMusicalGrid(juce::Graphics& g, juce::Rectangle<int> bounds) const;
+    void drawMusicalContext(juce::Graphics& g, juce::Rectangle<int> bounds) const;
     void drawWaveform(juce::Graphics& g, juce::Rectangle<int> bounds);
+    void drawInstrumentalTrack(juce::Graphics& g, juce::Rectangle<int> bounds);
     void drawSelectedWaveformBorder(juce::Graphics& g, juce::Rectangle<int> waveformBounds);
     void drawNotes(juce::Graphics& g, juce::Rectangle<int> bounds) const;
     void drawBoundaries(juce::Graphics& g, juce::Rectangle<int> bounds) const;
@@ -112,6 +120,7 @@ private:
     juce::AudioFormatManager& formatManager_;
     juce::AudioThumbnailCache thumbnailCache_;
     juce::AudioThumbnail thumbnail_;
+    juce::AudioThumbnail instrumentalThumbnail_;
     Listener* listener_ = nullptr;
 
     double visibleStart_ = 0.0;

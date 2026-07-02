@@ -95,6 +95,37 @@ juce::var makeRegionVar(const AnnotationRegion& region)
     return object;
 }
 
+juce::var makeTempoVar(const TempoSegment& tempo)
+{
+    auto* object = new juce::DynamicObject();
+    object->setProperty("start", tempo.start);
+    object->setProperty("end", tempo.end);
+    object->setProperty("bpm", tempo.bpm);
+    object->setProperty("confidence", tempo.confidence);
+    return object;
+}
+
+juce::var makeTimeSignatureVar(const TimeSignatureSegment& signature)
+{
+    auto* object = new juce::DynamicObject();
+    object->setProperty("start", signature.start);
+    object->setProperty("end", signature.end);
+    object->setProperty("numerator", signature.numerator);
+    object->setProperty("denominator", signature.denominator);
+    object->setProperty("confidence", signature.confidence);
+    return object;
+}
+
+juce::var makeChordVar(const ChordSegment& chord)
+{
+    auto* object = new juce::DynamicObject();
+    object->setProperty("start", chord.start);
+    object->setProperty("end", chord.end);
+    object->setProperty("name", chord.name);
+    object->setProperty("confidence", chord.confidence);
+    return object;
+}
+
 void addPitchBendRangeSetup(juce::MidiMessageSequence& sequence, int channel, int semitones)
 {
     sequence.addEvent(juce::MidiMessage::controllerEvent(channel, 101, 0), 0);
@@ -124,6 +155,10 @@ juce::Result AnnotationJson::load(const juce::File& jsonFile, AnnotationDocument
     loaded.version = static_cast<int>(numberProperty(*root, "version", 1.0));
     const auto audioPath = stringProperty(*root, "audio");
     loaded.audioFile = juce::File::isAbsolutePath(audioPath) ? juce::File(audioPath) : jsonFile.getSiblingFile(audioPath);
+    const auto instrumentalPath = stringProperty(*root, "instrumental");
+    loaded.instrumentalFile = instrumentalPath.isEmpty()
+        ? juce::File()
+        : (juce::File::isAbsolutePath(instrumentalPath) ? juce::File(instrumentalPath) : jsonFile.getSiblingFile(instrumentalPath));
     loaded.sampleRate = static_cast<int>(numberProperty(*root, "sample_rate", 0.0));
     loaded.duration = numberProperty(*root, "duration", 0.0);
     loaded.bpm = numberProperty(*root, "bpm", 120.0);
@@ -208,6 +243,58 @@ juce::Result AnnotationJson::load(const juce::File& jsonFile, AnnotationDocument
         }
     }
 
+    if (auto* tempos = root->getProperty("tempo_segments").getArray())
+    {
+        for (const auto& value : *tempos)
+        {
+            auto* tempoObject = value.getDynamicObject();
+            if (tempoObject == nullptr)
+                continue;
+
+            loaded.tempoSegments.push_back({
+                numberProperty(*tempoObject, "start", 0.0),
+                numberProperty(*tempoObject, "end", loaded.duration),
+                numberProperty(*tempoObject, "bpm", loaded.bpm),
+                numberProperty(*tempoObject, "confidence", 0.0)
+            });
+        }
+    }
+
+    if (auto* signatures = root->getProperty("time_signatures").getArray())
+    {
+        for (const auto& value : *signatures)
+        {
+            auto* signatureObject = value.getDynamicObject();
+            if (signatureObject == nullptr)
+                continue;
+
+            loaded.timeSignatures.push_back({
+                numberProperty(*signatureObject, "start", 0.0),
+                numberProperty(*signatureObject, "end", loaded.duration),
+                static_cast<int>(numberProperty(*signatureObject, "numerator", 4.0)),
+                static_cast<int>(numberProperty(*signatureObject, "denominator", 4.0)),
+                numberProperty(*signatureObject, "confidence", 0.0)
+            });
+        }
+    }
+
+    if (auto* chords = root->getProperty("chords").getArray())
+    {
+        for (const auto& value : *chords)
+        {
+            auto* chordObject = value.getDynamicObject();
+            if (chordObject == nullptr)
+                continue;
+
+            loaded.chords.push_back({
+                numberProperty(*chordObject, "start", 0.0),
+                numberProperty(*chordObject, "end", loaded.duration),
+                stringProperty(*chordObject, "name"),
+                numberProperty(*chordObject, "confidence", 0.0)
+            });
+        }
+    }
+
     document = std::move(loaded);
     return juce::Result::ok();
 }
@@ -217,6 +304,7 @@ juce::Result AnnotationJson::save(const AnnotationDocument& document, const juce
     auto* root = new juce::DynamicObject();
     root->setProperty("version", document.version);
     root->setProperty("audio", document.audioFile.existsAsFile() ? document.audioFile.getFileName() : juce::String());
+    root->setProperty("instrumental", document.instrumentalFile.existsAsFile() ? document.instrumentalFile.getFileName() : juce::String());
     root->setProperty("sample_rate", document.sampleRate);
     root->setProperty("duration", document.duration);
     root->setProperty("bpm", document.bpm);
@@ -236,6 +324,21 @@ juce::Result AnnotationJson::save(const AnnotationDocument& document, const juce
     for (const auto& region : document.regions)
         regions.add(makeRegionVar(region));
     root->setProperty("regions", regions);
+
+    juce::Array<juce::var> tempos;
+    for (const auto& tempo : document.tempoSegments)
+        tempos.add(makeTempoVar(tempo));
+    root->setProperty("tempo_segments", tempos);
+
+    juce::Array<juce::var> signatures;
+    for (const auto& signature : document.timeSignatures)
+        signatures.add(makeTimeSignatureVar(signature));
+    root->setProperty("time_signatures", signatures);
+
+    juce::Array<juce::var> chords;
+    for (const auto& chord : document.chords)
+        chords.add(makeChordVar(chord));
+    root->setProperty("chords", chords);
 
     if (auto stream = jsonFile.createOutputStream())
     {

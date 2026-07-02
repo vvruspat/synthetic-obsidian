@@ -547,6 +547,7 @@ public:
         editor_.setListener(this);
 
         addToolbarButton(openAudioButton_, "Open Audio", [this] { chooseAudioFile(); });
+        addToolbarButton(openInstrumentalButton_, "Open Inst", [this] { chooseInstrumentalFile(); });
         addToolbarButton(loadJsonButton_, "Load JSON", [this] { chooseJsonFile(); });
         addToolbarButton(loadLyricsButton_, "Lyrics", [this] { chooseLyricsFile(); });
         addToolbarButton(analyzeButton_, "Analyze", [this] { runCombinedAnalysis(); });
@@ -606,7 +607,7 @@ public:
 
         addAndMakeVisible(editor_);
         setWantsKeyboardFocus(true);
-        setSize(1180, 720);
+        setSize(1280, 720);
         resetHistory();
         updatePlaybackNotes();
         startTimerHz(30);
@@ -617,16 +618,21 @@ public:
     {
         stopTimer();
         transport_.stop();
+        instrumentalTransport_.stop();
         transport_.setSource(nullptr);
+        instrumentalTransport_.setSource(nullptr);
         activeNoteState_.store(nullptr);
         readerSource_.reset();
+        instrumentalReaderSource_.reset();
         shutdownAudio();
     }
 
     void prepareToPlay(int samplesPerBlockExpected, double sampleRate) override
     {
         audioSampleRate_.store(sampleRate);
+        instrumentalMixBuffer_.setSize(2, samplesPerBlockExpected, false, false, true);
         transport_.prepareToPlay(samplesPerBlockExpected, sampleRate);
+        instrumentalTransport_.prepareToPlay(samplesPerBlockExpected, sampleRate);
     }
 
     void getNextAudioBlock(const juce::AudioSourceChannelInfo& bufferToFill) override
@@ -645,12 +651,39 @@ public:
         if (transport_.isPlaying() && (mode == PlaybackMode::notesOnly || mode == PlaybackMode::notesAndSound))
             renderTimelineNotes(bufferToFill, playheadStart);
 
+        if (mode == PlaybackMode::notesAndSound)
+            mixInstrumentalTrack(bufferToFill);
+
         renderClickedNoteTone(bufferToFill);
     }
 
     void releaseResources() override
     {
         transport_.releaseResources();
+        instrumentalTransport_.releaseResources();
+    }
+
+    void mixInstrumentalTrack(const juce::AudioSourceChannelInfo& bufferToFill)
+    {
+        if (instrumentalReaderSource_ == nullptr || ! instrumentalTransport_.isPlaying() || bufferToFill.buffer == nullptr)
+            return;
+
+        const auto channels = bufferToFill.buffer->getNumChannels();
+        if (instrumentalMixBuffer_.getNumChannels() < channels || instrumentalMixBuffer_.getNumSamples() < bufferToFill.numSamples)
+            return;
+
+        instrumentalMixBuffer_.clear();
+        juce::AudioSourceChannelInfo instrumentalInfo(&instrumentalMixBuffer_, 0, bufferToFill.numSamples);
+        instrumentalTransport_.getNextAudioBlock(instrumentalInfo);
+
+        for (int channel = 0; channel < channels; ++channel)
+            bufferToFill.buffer->addFrom(channel,
+                                         bufferToFill.startSample,
+                                         instrumentalMixBuffer_,
+                                         channel,
+                                         0,
+                                         bufferToFill.numSamples,
+                                         0.7f);
     }
 
     void renderTimelineNotes(const juce::AudioSourceChannelInfo& bufferToFill, double playheadStart)
@@ -966,9 +999,28 @@ private:
         editor_.clearSelection();
         if (document_.audioFile.existsAsFile())
             editor_.setAudioFile(document_.audioFile);
+        if (document_.instrumentalFile.existsAsFile())
+        {
+            editor_.setInstrumentalFile(document_.instrumentalFile);
+            configureInstrumentalTransportForFile(document_.instrumentalFile);
+            if (document_.tempoSegments.empty() && document_.timeSignatures.empty() && document_.chords.empty())
+                runMusicalContextAnalysis();
+        }
+        else
+        {
+            clearInstrumentalTrack();
+        }
         updatePlaybackNotes();
         syncInspector();
         setStatus("History restored.");
+    }
+
+    void clearInstrumentalTrack()
+    {
+        instrumentalTransport_.stop();
+        instrumentalTransport_.setSource(nullptr);
+        instrumentalReaderSource_.reset();
+        editor_.setInstrumentalFile({});
     }
 
     void configureTransportForFile(const juce::File& file)
@@ -996,17 +1048,42 @@ private:
         playButton_.setButtonText("Play");
     }
 
+    void configureInstrumentalTransportForFile(const juce::File& file)
+    {
+        std::unique_ptr<juce::AudioFormatReader> reader(formatManager_.createReaderFor(file));
+        if (reader == nullptr)
+        {
+            deviceManager.closeAudioDevice();
+            instrumentalTransport_.stop();
+            instrumentalTransport_.setSource(nullptr);
+            instrumentalReaderSource_.reset();
+            deviceManager.restartLastAudioDevice();
+            return;
+        }
+
+        const auto sampleRate = reader->sampleRate;
+        auto nextReaderSource = std::make_unique<juce::AudioFormatReaderSource>(reader.release(), true);
+
+        deviceManager.closeAudioDevice();
+        instrumentalTransport_.stop();
+        instrumentalTransport_.setSource(nullptr);
+        instrumentalReaderSource_ = std::move(nextReaderSource);
+        instrumentalTransport_.setSource(instrumentalReaderSource_.get(), 0, nullptr, sampleRate);
+        deviceManager.restartLastAudioDevice();
+    }
+
     void togglePlayback()
     {
-        if (readerSource_ == nullptr)
+        if (readerSource_ == nullptr && instrumentalReaderSource_ == nullptr)
         {
             setStatus("Open an audio file before playback.");
             return;
         }
 
-        if (transport_.isPlaying())
+        if (transport_.isPlaying() || instrumentalTransport_.isPlaying())
         {
             transport_.stop();
+            instrumentalTransport_.stop();
             loopAuditionActive_ = false;
             playButton_.setButtonText("Play");
         }
@@ -1015,7 +1092,11 @@ private:
             loopAuditionActive_ = false;
             if (transport_.getCurrentPosition() >= juce::jmax(0.0, document_.duration - 0.01))
                 transport_.setPosition(0.0);
-            transport_.start();
+            instrumentalTransport_.setPosition(transport_.getCurrentPosition());
+            if (readerSource_ != nullptr)
+                transport_.start();
+            if (instrumentalReaderSource_ != nullptr)
+                instrumentalTransport_.start();
             playButton_.setButtonText("Stop");
         }
     }
@@ -1025,6 +1106,8 @@ private:
         loopAuditionActive_ = false;
         if (transport_.isPlaying())
             transport_.stop();
+        if (instrumentalTransport_.isPlaying())
+            instrumentalTransport_.stop();
 
         clickedToneFrequency_.store(midiNoteToFrequency(note.pitchExact));
         const auto totalSamples = juce::jmax(1, static_cast<int>(audioSampleRate_.load() * 0.55));
@@ -1049,24 +1132,33 @@ private:
             loopEndTime_ = juce::jmin(document_.duration, loopStartTime_ + 0.02);
         loopAuditionActive_ = true;
         transport_.setPosition(loopStartTime_);
-        transport_.start();
+        instrumentalTransport_.setPosition(loopStartTime_);
+        if (readerSource_ != nullptr)
+            transport_.start();
+        if (instrumentalReaderSource_ != nullptr)
+            instrumentalTransport_.start();
         playButton_.setButtonText("Stop");
         setStatus("Looping selected part from " + juce::String(loopStartTime_, 3) + "s to " + juce::String(loopEndTime_, 3) + "s.");
     }
 
     void timerCallback() override
     {
-        const auto playhead = juce::jlimit(0.0, juce::jmax(0.0, document_.duration), transport_.getCurrentPosition());
+        const auto transportPosition = readerSource_ != nullptr ? transport_.getCurrentPosition() : instrumentalTransport_.getCurrentPosition();
+        const auto playhead = juce::jlimit(0.0, juce::jmax(0.0, document_.duration), transportPosition);
         editor_.setPlayheadTime(playhead);
 
         if (transport_.isPlaying() && loopAuditionActive_)
         {
             if (playhead >= loopEndTime_ - 0.004)
+            {
                 transport_.setPosition(loopStartTime_);
+                instrumentalTransport_.setPosition(loopStartTime_);
+            }
         }
         else if (transport_.isPlaying() && document_.duration > 0.0 && playhead >= document_.duration - 0.005)
         {
             transport_.stop();
+            instrumentalTransport_.stop();
             playButton_.setButtonText("Play");
         }
 
@@ -1107,6 +1199,18 @@ private:
                               });
     }
 
+    void chooseInstrumentalFile()
+    {
+        chooser_ = std::make_unique<juce::FileChooser>("Open instrumental audio", juce::File(), "*.wav;*.aiff;*.aif;*.flac");
+        chooser_->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
+                              [this](const juce::FileChooser& chooser)
+                              {
+                                  const auto file = chooser.getResult();
+                                  if (file.existsAsFile())
+                                      loadInstrumental(file);
+                              });
+    }
+
     void chooseJsonFile()
     {
         chooser_ = std::make_unique<juce::FileChooser>("Open annotation JSON", juce::File(), "*.json");
@@ -1140,8 +1244,17 @@ private:
             return;
         }
 
+        const auto previousInstrumentalFile = document_.instrumentalFile;
+        auto previousTempoSegments = std::move(document_.tempoSegments);
+        auto previousTimeSignatures = std::move(document_.timeSignatures);
+        auto previousChords = std::move(document_.chords);
+
         document_.clear();
         document_.audioFile = file;
+        document_.instrumentalFile = previousInstrumentalFile;
+        document_.tempoSegments = std::move(previousTempoSegments);
+        document_.timeSignatures = std::move(previousTimeSignatures);
+        document_.chords = std::move(previousChords);
         document_.sampleRate = static_cast<int>(reader->sampleRate);
         document_.duration = static_cast<double>(reader->lengthInSamples) / reader->sampleRate;
         currentJsonFile_ = file.withFileExtension(".annotation.json");
@@ -1149,11 +1262,31 @@ private:
         configureTransportForFile(file);
 
         editor_.setAudioFile(file);
+        if (document_.instrumentalFile.existsAsFile())
+            editor_.setInstrumentalFile(document_.instrumentalFile);
         updatePlaybackNotes();
         syncInspector();
         markChanged();
         resetHistory();
         setStatus("Loaded audio. Run AI Parts or Analyze to create annotation.");
+    }
+
+    void loadInstrumental(const juce::File& file)
+    {
+        std::unique_ptr<juce::AudioFormatReader> reader(formatManager_.createReaderFor(file));
+        if (reader == nullptr)
+        {
+            setStatus("Could not read instrumental file.");
+            return;
+        }
+
+        beginUndoableAction();
+        document_.instrumentalFile = file;
+        editor_.setInstrumentalFile(file);
+        configureInstrumentalTransportForFile(file);
+        markChanged();
+        setStatus("Loaded instrumental track: " + file.getFileName());
+        runMusicalContextAnalysis();
     }
 
     void loadLyrics(const juce::File& file)
@@ -2345,6 +2478,174 @@ private:
         runAiPartsAnalysis();
     }
 
+    void runMusicalContextAnalysis()
+    {
+        if (! document_.instrumentalFile.existsAsFile())
+            return;
+
+        if (musicalContextAnalysisRunning_)
+            return;
+
+        musicalContextAnalysisRunning_ = true;
+        setStatus("Analyzing instrumental tempo, signature, and chords...");
+
+        juce::WeakReference<MainComponent> safeThis(this);
+        const auto instrumentalFile = document_.instrumentalFile;
+        juce::Thread::launch([safeThis, instrumentalFile]
+        {
+            const auto script = juce::File(SYNTHETIC_OBSIDIAN_ROOT)
+                                    .getChildFile("tools")
+                                    .getChildFile("vocal_annotation_tool")
+                                    .getChildFile("analyze_musical_context.py");
+            juce::String output;
+            juce::String error;
+
+            juce::ChildProcess process;
+            juce::StringArray args;
+            args.add(analysisPythonExecutable());
+            args.add(script.getFullPathName());
+            args.add(instrumentalFile.getFullPathName());
+
+            if (! script.existsAsFile())
+                error = "Musical context script not found: " + script.getFullPathName();
+            else if (! process.start(args))
+                error = "Could not start musical context subprocess.";
+            else
+            {
+                while (process.isRunning())
+                {
+                    output += process.readAllProcessOutput();
+                    juce::Thread::sleep(40);
+                }
+
+                output += process.readAllProcessOutput();
+                const auto exitCode = process.getExitCode();
+                if (exitCode != 0)
+                    error = "Musical context analysis failed with exit code " + juce::String(exitCode) + ": " + output;
+            }
+
+            juce::MessageManager::callAsync([safeThis, output, error, instrumentalFile]
+            {
+                if (safeThis != nullptr)
+                    safeThis->applyMusicalContextAnalysis(output, error, instrumentalFile);
+            });
+        });
+    }
+
+    void applyMusicalContextAnalysis(const juce::String& output,
+                                     const juce::String& error,
+                                     const juce::File& expectedInstrumentalFile)
+    {
+        musicalContextAnalysisRunning_ = false;
+        if (document_.instrumentalFile != expectedInstrumentalFile)
+        {
+            setStatus("Discarded stale musical context result because the instrumental track changed.");
+            return;
+        }
+
+        if (error.isNotEmpty())
+        {
+            setStatus(error);
+            return;
+        }
+
+        auto parsed = juce::JSON::parse(output);
+        auto* root = parsed.getDynamicObject();
+        if (root == nullptr)
+        {
+            setStatus("Musical context analysis returned invalid JSON.");
+            return;
+        }
+
+        const auto numberProperty = [](const juce::DynamicObject& object, const juce::Identifier& name, double fallback)
+        {
+            const auto value = object.getProperty(name);
+            return value.isDouble() || value.isInt() ? static_cast<double>(value) : fallback;
+        };
+        const auto stringProperty = [](const juce::DynamicObject& object, const juce::Identifier& name, const juce::String& fallback = {})
+        {
+            const auto value = object.getProperty(name);
+            return value.isString() ? value.toString() : fallback;
+        };
+
+        document_.tempoSegments.clear();
+        document_.timeSignatures.clear();
+        document_.chords.clear();
+
+        document_.bpm = juce::jlimit(20.0, 300.0, numberProperty(*root, "bpm", document_.bpm));
+
+        if (auto* tempos = root->getProperty("tempo_segments").getArray())
+        {
+            for (const auto& value : *tempos)
+            {
+                auto* object = value.getDynamicObject();
+                if (object == nullptr)
+                    continue;
+
+                document_.tempoSegments.push_back({
+                    numberProperty(*object, "start", 0.0),
+                    numberProperty(*object, "end", document_.duration),
+                    juce::jlimit(20.0, 300.0, numberProperty(*object, "bpm", document_.bpm)),
+                    numberProperty(*object, "confidence", 0.0)
+                });
+            }
+        }
+
+        if (auto* signatures = root->getProperty("time_signatures").getArray())
+        {
+            for (const auto& value : *signatures)
+            {
+                auto* object = value.getDynamicObject();
+                if (object == nullptr)
+                    continue;
+
+                document_.timeSignatures.push_back({
+                    numberProperty(*object, "start", 0.0),
+                    numberProperty(*object, "end", document_.duration),
+                    juce::jlimit(1, 12, static_cast<int>(numberProperty(*object, "numerator", 4.0))),
+                    juce::jlimit(1, 16, static_cast<int>(numberProperty(*object, "denominator", 4.0))),
+                    numberProperty(*object, "confidence", 0.0)
+                });
+            }
+        }
+
+        if (auto* chords = root->getProperty("chords").getArray())
+        {
+            for (const auto& value : *chords)
+            {
+                auto* object = value.getDynamicObject();
+                if (object == nullptr)
+                    continue;
+
+                const auto name = stringProperty(*object, "name", "N");
+                if (name.isEmpty())
+                    continue;
+
+                document_.chords.push_back({
+                    numberProperty(*object, "start", 0.0),
+                    numberProperty(*object, "end", document_.duration),
+                    name,
+                    numberProperty(*object, "confidence", 0.0)
+                });
+            }
+        }
+
+        if (document_.tempoSegments.empty())
+            document_.tempoSegments.push_back({ 0.0, document_.duration, document_.bpm, 0.2 });
+        if (document_.timeSignatures.empty())
+            document_.timeSignatures.push_back({ 0.0, document_.duration, 4, 4, 0.2 });
+
+        markChanged();
+        syncInspector();
+        editor_.repaint();
+        setStatus("Detected " + juce::String(static_cast<int>(document_.tempoSegments.size()))
+            + " tempo segment"
+            + (document_.tempoSegments.size() == 1 ? ", " : "s, ")
+            + juce::String(static_cast<int>(document_.chords.size()))
+            + " chord"
+            + (document_.chords.size() == 1 ? "." : "s."));
+    }
+
     void runPyinAnalysis()
     {
         if (! document_.audioFile.existsAsFile())
@@ -3044,6 +3345,15 @@ private:
             editor_.setAudioFile(document_.audioFile);
             configureTransportForFile(document_.audioFile);
         }
+        if (document_.instrumentalFile.existsAsFile())
+        {
+            editor_.setInstrumentalFile(document_.instrumentalFile);
+            configureInstrumentalTransportForFile(document_.instrumentalFile);
+        }
+        else
+        {
+            clearInstrumentalTrack();
+        }
         updatePlaybackNotes();
         syncInspector();
         resetHistory();
@@ -3498,7 +3808,7 @@ private:
 
     void syncInspector()
     {
-        bpmEditor_.setText(juce::String(document_.bpm, 2), false);
+        bpmEditor_.setText(juce::String(document_.bpm, 0), false);
         keyEditor_.setText(document_.key, false);
         updateInfoText();
         repaint();
@@ -3509,9 +3819,12 @@ private:
         juce::String info;
         info << (dirty_ ? "Unsaved changes\n" : "Saved\n")
              << "Audio: " << (document_.audioFile.existsAsFile() ? document_.audioFile.getFileName() : "none") << "\n"
+             << "Instrumental: " << (document_.instrumentalFile.existsAsFile() ? document_.instrumentalFile.getFileName() : "none") << "\n"
              << "Duration: " << juce::String(document_.duration, 2) << "s\n"
              << "Notes: " << static_cast<int>(document_.notes.size()) << "\n"
-             << "Boundaries: " << static_cast<int>(document_.boundaries.size());
+             << "Boundaries: " << static_cast<int>(document_.boundaries.size()) << "\n"
+             << "Tempo/Chords: " << static_cast<int>(document_.tempoSegments.size())
+             << " / " << static_cast<int>(document_.chords.size());
         if (editor_.getSelectedNoteId().isEmpty() && editor_.getSelectedBoundaryId().isEmpty())
             infoLabel_.setText(info, juce::dontSendNotification);
     }
@@ -3531,7 +3844,10 @@ private:
     AnnotationDocument document_;
     AnnotationEditorComponent editor_;
     juce::AudioTransportSource transport_;
+    juce::AudioTransportSource instrumentalTransport_;
     std::unique_ptr<juce::AudioFormatReaderSource> readerSource_;
+    std::unique_ptr<juce::AudioFormatReaderSource> instrumentalReaderSource_;
+    juce::AudioBuffer<float> instrumentalMixBuffer_;
     std::array<PlaybackNoteState, 2> noteStates_;
     std::atomic<PlaybackNoteState*> activeNoteState_ { nullptr };
     int writeNoteStateIndex_ = 0;
@@ -3555,6 +3871,7 @@ private:
     bool dirty_ = false;
     bool analysisRunning_ = false;
     bool aiPartsAnalysisRunning_ = false;
+    bool musicalContextAnalysisRunning_ = false;
     bool analyzeAfterAiParts_ = false;
     bool lyricsAlignmentRunning_ = false;
     bool noteRecalculationRunning_ = false;
@@ -3563,6 +3880,7 @@ private:
     double lastDirtyTimeMs_ = 0.0;
 
     juce::TextButton openAudioButton_;
+    juce::TextButton openInstrumentalButton_;
     juce::TextButton loadJsonButton_;
     juce::TextButton loadLyricsButton_;
     juce::TextButton analyzeButton_;

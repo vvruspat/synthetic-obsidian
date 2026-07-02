@@ -59,10 +59,36 @@ struct AnnotationRegion
     juce::String noteId;
 };
 
+struct TempoSegment
+{
+    double start = 0.0;
+    double end = 0.0;
+    double bpm = 120.0;
+    double confidence = 0.0;
+};
+
+struct TimeSignatureSegment
+{
+    double start = 0.0;
+    double end = 0.0;
+    int numerator = 4;
+    int denominator = 4;
+    double confidence = 0.0;
+};
+
+struct ChordSegment
+{
+    double start = 0.0;
+    double end = 0.0;
+    juce::String name;
+    double confidence = 0.0;
+};
+
 struct AnnotationDocument
 {
     int version = 1;
     juce::File audioFile;
+    juce::File instrumentalFile;
     int sampleRate = 0;
     double duration = 0.0;
     double bpm = 120.0;
@@ -70,6 +96,9 @@ struct AnnotationDocument
     std::vector<NoteBlock> notes;
     std::vector<BoundaryMarker> boundaries;
     std::vector<AnnotationRegion> regions;
+    std::vector<TempoSegment> tempoSegments;
+    std::vector<TimeSignatureSegment> timeSignatures;
+    std::vector<ChordSegment> chords;
 
     void clear();
     juce::String nextNoteId() const;

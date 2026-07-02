@@ -14,6 +14,7 @@ juce::String idWithPrefix(const char* prefix, int index)
 void AnnotationDocument::clear()
 {
     audioFile = juce::File();
+    instrumentalFile = juce::File();
     sampleRate = 0;
     duration = 0.0;
     bpm = 120.0;
@@ -21,6 +22,9 @@ void AnnotationDocument::clear()
     notes.clear();
     boundaries.clear();
     regions.clear();
+    tempoSegments.clear();
+    timeSignatures.clear();
+    chords.clear();
 }
 
 juce::String AnnotationDocument::nextNoteId() const

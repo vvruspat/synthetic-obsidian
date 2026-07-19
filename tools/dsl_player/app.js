@@ -93,6 +93,21 @@ els.syncSlider.addEventListener("input", () => {
 
 window.addEventListener("resize", render);
 renderTrackControls();
+loadSongFromUrlParam();
+
+async function loadSongFromUrlParam() {
+  const params = new URLSearchParams(window.location.search);
+  const file = params.get("file");
+  if (!file) return;
+  try {
+    const response = await fetch(file, { cache: "no-store" });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const text = await response.text();
+    loadSong(parseDslYaml(text), file.split("/").pop() || file);
+  } catch (error) {
+    els.metadata.innerHTML = `<div class="empty-state">Could not auto-load ${escapeHtml(file)}: ${escapeHtml(error.message)}</div>`;
+  }
+}
 
 function parseDslYaml(text) {
   const song = {

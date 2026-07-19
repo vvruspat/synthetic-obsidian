@@ -72,6 +72,46 @@ juce::var makeNoteVar(const NoteBlock& note)
     return object;
 }
 
+std::optional<NoteBlock> readNoteBlock(const juce::var& value, AnnotationDocument& loaded)
+{
+    auto* noteObject = value.getDynamicObject();
+    if (noteObject == nullptr)
+        return std::nullopt;
+
+    NoteBlock note;
+    note.id = stringProperty(*noteObject, "id", loaded.nextNoteId());
+    note.start = numberProperty(*noteObject, "start", 0.0);
+    note.end = numberProperty(*noteObject, "end", note.start + 0.25);
+    note.pitch = static_cast<int>(numberProperty(*noteObject, "pitch", 60.0));
+    note.voicedStart = numberProperty(*noteObject, "voiced_start", note.start);
+    note.voicedEnd = numberProperty(*noteObject, "voiced_end", note.end);
+    note.lyric = stringProperty(*noteObject, "lyric");
+    note.syllableId = stringProperty(*noteObject, "syllable_id");
+
+    if (auto* flags = noteObject->getProperty("flags").getArray())
+        for (const auto& flag : *flags)
+            note.flags.add(flag.toString());
+
+    if (auto* curve = noteObject->getProperty("curve").getArray())
+    {
+        for (const auto& pointValue : *curve)
+        {
+            auto* pointObject = pointValue.getDynamicObject();
+            if (pointObject == nullptr)
+                continue;
+
+            note.curve.push_back({
+                numberProperty(*pointObject, "time", note.start),
+                numberProperty(*pointObject, "midi", static_cast<double>(note.pitch)),
+                numberProperty(*pointObject, "confidence", 1.0)
+            });
+        }
+    }
+
+    note.pitchExact = numberProperty(*noteObject, "pitch_exact", representativePitchExact(note));
+    return note;
+}
+
 juce::var makeBoundaryVar(const BoundaryMarker& boundary)
 {
     auto* object = new juce::DynamicObject();
@@ -159,52 +199,29 @@ juce::Result AnnotationJson::load(const juce::File& jsonFile, AnnotationDocument
     loaded.instrumentalFile = instrumentalPath.isEmpty()
         ? juce::File()
         : (juce::File::isAbsolutePath(instrumentalPath) ? juce::File(instrumentalPath) : jsonFile.getSiblingFile(instrumentalPath));
+    const auto backingAudioPath = stringProperty(*root, "backing_audio");
+    loaded.backingAudioFile = backingAudioPath.isEmpty()
+        ? juce::File()
+        : (juce::File::isAbsolutePath(backingAudioPath) ? juce::File(backingAudioPath) : jsonFile.getSiblingFile(backingAudioPath));
     loaded.sampleRate = static_cast<int>(numberProperty(*root, "sample_rate", 0.0));
     loaded.duration = numberProperty(*root, "duration", 0.0);
     loaded.bpm = numberProperty(*root, "bpm", 120.0);
     loaded.key = stringProperty(*root, "key", "C major");
+    loaded.backingStyleId = stringProperty(*root, "backing_style_id");
+    loaded.backingStyleName = stringProperty(*root, "backing_style_name");
 
     if (auto* notes = root->getProperty("notes").getArray())
     {
         for (const auto& value : *notes)
-        {
-            auto* noteObject = value.getDynamicObject();
-            if (noteObject == nullptr)
-                continue;
+            if (auto note = readNoteBlock(value, loaded))
+                loaded.notes.push_back(std::move(*note));
+    }
 
-            NoteBlock note;
-            note.id = stringProperty(*noteObject, "id", loaded.nextNoteId());
-            note.start = numberProperty(*noteObject, "start", 0.0);
-            note.end = numberProperty(*noteObject, "end", note.start + 0.25);
-            note.pitch = static_cast<int>(numberProperty(*noteObject, "pitch", 60.0));
-            note.voicedStart = numberProperty(*noteObject, "voiced_start", note.start);
-            note.voicedEnd = numberProperty(*noteObject, "voiced_end", note.end);
-            note.lyric = stringProperty(*noteObject, "lyric");
-            note.syllableId = stringProperty(*noteObject, "syllable_id");
-
-            if (auto* flags = noteObject->getProperty("flags").getArray())
-                for (const auto& flag : *flags)
-                    note.flags.add(flag.toString());
-
-            if (auto* curve = noteObject->getProperty("curve").getArray())
-            {
-                for (const auto& pointValue : *curve)
-                {
-                    auto* pointObject = pointValue.getDynamicObject();
-                    if (pointObject == nullptr)
-                        continue;
-
-                    note.curve.push_back({
-                        numberProperty(*pointObject, "time", note.start),
-                        numberProperty(*pointObject, "midi", static_cast<double>(note.pitch)),
-                        numberProperty(*pointObject, "confidence", 1.0)
-                    });
-                }
-            }
-
-            note.pitchExact = numberProperty(*noteObject, "pitch_exact", representativePitchExact(note));
-            loaded.notes.push_back(std::move(note));
-        }
+    if (auto* backingNotes = root->getProperty("backing_notes").getArray())
+    {
+        for (const auto& value : *backingNotes)
+            if (auto note = readNoteBlock(value, loaded))
+                loaded.backingNotes.push_back(std::move(*note));
     }
 
     if (auto* boundaries = root->getProperty("boundaries").getArray())
@@ -305,15 +322,23 @@ juce::Result AnnotationJson::save(const AnnotationDocument& document, const juce
     root->setProperty("version", document.version);
     root->setProperty("audio", document.audioFile.existsAsFile() ? document.audioFile.getFileName() : juce::String());
     root->setProperty("instrumental", document.instrumentalFile.existsAsFile() ? document.instrumentalFile.getFileName() : juce::String());
+    root->setProperty("backing_audio", document.backingAudioFile.existsAsFile() ? document.backingAudioFile.getFileName() : juce::String());
     root->setProperty("sample_rate", document.sampleRate);
     root->setProperty("duration", document.duration);
     root->setProperty("bpm", document.bpm);
     root->setProperty("key", document.key);
+    root->setProperty("backing_style_id", document.backingStyleId);
+    root->setProperty("backing_style_name", document.backingStyleName);
 
     juce::Array<juce::var> notes;
     for (const auto& note : document.notes)
         notes.add(makeNoteVar(note));
     root->setProperty("notes", notes);
+
+    juce::Array<juce::var> backingNotes;
+    for (const auto& note : document.backingNotes)
+        backingNotes.add(makeNoteVar(note));
+    root->setProperty("backing_notes", backingNotes);
 
     juce::Array<juce::var> boundaries;
     for (const auto& boundary : document.boundaries)
@@ -354,10 +379,12 @@ juce::Result AnnotationJson::save(const AnnotationDocument& document, const juce
 juce::Result AnnotationJson::exportMidi(const AnnotationDocument& document, const juce::File& midiFile)
 {
     constexpr int ticksPerQuarterNote = 960;
-    constexpr int channel = 1;
+    constexpr int leadChannel = 1;
+    constexpr int backingChannel = 2;
     constexpr int pitchBendRangeSemitones = 12;
     juce::MidiMessageSequence sequence;
-    addPitchBendRangeSetup(sequence, channel, pitchBendRangeSemitones);
+    addPitchBendRangeSetup(sequence, leadChannel, pitchBendRangeSemitones);
+    addPitchBendRangeSetup(sequence, backingChannel, pitchBendRangeSemitones);
 
     const auto secondsToTicks = [bpm = document.bpm](double seconds)
     {
@@ -369,8 +396,8 @@ juce::Result AnnotationJson::exportMidi(const AnnotationDocument& document, cons
         const auto startTick = secondsToTicks(note.start);
         const auto endTick = juce::jmax(startTick + 1, secondsToTicks(note.end));
         const auto pitch = juce::jlimit(0, 127, note.pitch);
-        sequence.addEvent(juce::MidiMessage::pitchWheel(channel, 8192), startTick);
-        sequence.addEvent(juce::MidiMessage::noteOn(channel, pitch, juce::uint8(96)), startTick);
+        sequence.addEvent(juce::MidiMessage::pitchWheel(leadChannel, 8192), startTick);
+        sequence.addEvent(juce::MidiMessage::noteOn(leadChannel, pitch, juce::uint8(96)), startTick);
 
         auto curve = note.curve;
         if (curve.empty())
@@ -384,11 +411,23 @@ juce::Result AnnotationJson::exportMidi(const AnnotationDocument& document, cons
             const auto tick = secondsToTicks(point.time);
             const auto wheel = pitchWheelForSemitoneOffset(point.midi - static_cast<double>(pitch),
                                                            static_cast<double>(pitchBendRangeSemitones));
-            sequence.addEvent(juce::MidiMessage::pitchWheel(channel, wheel), tick);
+            sequence.addEvent(juce::MidiMessage::pitchWheel(leadChannel, wheel), tick);
         }
 
-        sequence.addEvent(juce::MidiMessage::noteOff(channel, pitch), endTick);
-        sequence.addEvent(juce::MidiMessage::pitchWheel(channel, 8192), endTick + 1);
+        sequence.addEvent(juce::MidiMessage::noteOff(leadChannel, pitch), endTick);
+        sequence.addEvent(juce::MidiMessage::pitchWheel(leadChannel, 8192), endTick + 1);
+    }
+
+    for (const auto& note : document.backingNotes)
+    {
+        if (note.end <= note.start)
+            continue;
+
+        const auto startTick = secondsToTicks(note.start);
+        const auto endTick = juce::jmax(startTick + 1, secondsToTicks(note.end));
+        const auto pitch = juce::jlimit(0, 127, note.pitch);
+        sequence.addEvent(juce::MidiMessage::noteOn(backingChannel, pitch, juce::uint8(84)), startTick);
+        sequence.addEvent(juce::MidiMessage::noteOff(backingChannel, pitch), endTick);
     }
 
     sequence.updateMatchedPairs();

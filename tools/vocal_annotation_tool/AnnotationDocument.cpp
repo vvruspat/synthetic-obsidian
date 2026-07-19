@@ -15,11 +15,15 @@ void AnnotationDocument::clear()
 {
     audioFile = juce::File();
     instrumentalFile = juce::File();
+    backingAudioFile = juce::File();
     sampleRate = 0;
     duration = 0.0;
     bpm = 120.0;
     key = "C major";
     notes.clear();
+    backingNotes.clear();
+    backingStyleId.clear();
+    backingStyleName.clear();
     boundaries.clear();
     regions.clear();
     tempoSegments.clear();

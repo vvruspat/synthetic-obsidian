@@ -47,10 +47,33 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-lead-notes", type=int, default=12)
     parser.add_argument("--min-lead-notes", type=int, default=1)
     parser.add_argument("--max-gap-beats", type=float, default=2.0)
+    parser.add_argument(
+        "--window-duration-beats",
+        type=float,
+        default=0.0,
+        help=(
+            "Build phrase-scale fixed-duration windows instead of note-count chunks. "
+            "Use about 8 beats for ~5 seconds at 94 BPM. 0 keeps the legacy note-count windowing."
+        ),
+    )
+    parser.add_argument(
+        "--window-hop-beats",
+        type=float,
+        default=0.0,
+        help="Hop size for --window-duration-beats. Defaults to half the window duration.",
+    )
+    parser.add_argument(
+        "--min-window-duration-beats",
+        type=float,
+        default=0.0,
+        help="Drop short fixed-duration windows. Defaults to half the window duration.",
+    )
     parser.add_argument("--chord-padding-beats", type=float, default=2.0)
     parser.add_argument("--valid-ratio", type=float, default=0.05)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--stream", action="store_true", help="Write rows while scanning to keep memory bounded.")
+    parser.add_argument("--start-file-index", type=int, default=1, help="1-based source file index to start from when resuming a streaming run.")
+    parser.add_argument("--append", action="store_true", help="Append to existing train/valid JSONL files instead of overwriting them.")
     parser.add_argument("--progress-every", type=int, default=1000)
     return parser.parse_args()
 
@@ -61,9 +84,12 @@ def main() -> None:
     output_root = args.output_root.expanduser().resolve()
     output_root.mkdir(parents=True, exist_ok=True)
 
-    files = sorted(input_root.rglob("*.yaml"))
+    all_files = sorted(input_root.rglob("*.yaml"))
+    files = all_files
     if args.limit > 0:
         files = files[: args.limit]
+    if args.start_file_index > 1:
+        files = files[args.start_file_index - 1 :]
 
     if args.stream:
         train_count, valid_count = write_streaming(files, input_root, output_root, args)
@@ -81,12 +107,18 @@ def main() -> None:
         "train_examples": train_count,
         "valid_examples": valid_count,
         "source_files": len(files),
+        "total_source_files": len(all_files),
+        "start_file_index": args.start_file_index,
         "limit": args.limit,
         "max_lead_notes": args.max_lead_notes,
         "min_lead_notes": args.min_lead_notes,
         "max_gap_beats": args.max_gap_beats,
+        "window_duration_beats": args.window_duration_beats,
+        "window_hop_beats": args.window_hop_beats,
+        "min_window_duration_beats": args.min_window_duration_beats,
         "chord_padding_beats": args.chord_padding_beats,
         "stream": args.stream,
+        "append": args.append,
     }
     (output_root / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     print(json.dumps(manifest, indent=2))
@@ -96,8 +128,9 @@ def write_streaming(files: list[Path], input_root: Path, output_root: Path, args
     train_count = 0
     valid_count = 0
     rng = random.Random(args.seed)
-    with (output_root / "train.jsonl").open("w", encoding="utf-8") as train, (output_root / "valid.jsonl").open("w", encoding="utf-8") as valid:
-        for file_index, path in enumerate(files, start=1):
+    mode = "a" if args.append else "w"
+    with (output_root / "train.jsonl").open(mode, encoding="utf-8") as train, (output_root / "valid.jsonl").open(mode, encoding="utf-8") as valid:
+        for file_index, path in enumerate(files, start=args.start_file_index):
             rows = build_rows_for_file(path, input_root, args, file_index)
             for row in rows:
                 if rng.random() < args.valid_ratio:
@@ -133,7 +166,15 @@ def build_rows_for_file(path: Path, input_root: Path, args: argparse.Namespace, 
         return []
 
     backing = backing_sets[0]
-    windows = build_vocal_windows(lead, args.max_lead_notes, args.min_lead_notes, args.max_gap_beats)
+    windows = build_vocal_windows(
+        lead,
+        args.max_lead_notes,
+        args.min_lead_notes,
+        args.max_gap_beats,
+        args.window_duration_beats,
+        args.window_hop_beats,
+        args.min_window_duration_beats,
+    )
     rows: list[dict[str, object]] = []
     for window_index, window in enumerate(windows, start=1):
         lead_refs = {note.id for note in window.lead}
@@ -177,9 +218,28 @@ def build_rows_for_file(path: Path, input_root: Path, args: argparse.Namespace, 
     return rows
 
 
-def build_vocal_windows(lead: list[ItemBlock], max_lead_notes: int, min_lead_notes: int, max_gap: float) -> list[Window]:
+def build_vocal_windows(
+    lead: list[ItemBlock],
+    max_lead_notes: int,
+    min_lead_notes: int,
+    max_gap: float,
+    window_duration: float = 0.0,
+    window_hop: float = 0.0,
+    min_window_duration: float = 0.0,
+) -> list[Window]:
     if not lead:
         return []
+    if window_duration > 0.0:
+        return build_fixed_duration_vocal_windows(
+            lead,
+            max_lead_notes,
+            min_lead_notes,
+            max_gap,
+            window_duration,
+            window_hop if window_hop > 0.0 else window_duration * 0.5,
+            min_window_duration if min_window_duration > 0.0 else window_duration * 0.5,
+        )
+
     phrases: list[list[ItemBlock]] = []
     current: list[ItemBlock] = []
     for note in lead:
@@ -201,6 +261,81 @@ def build_vocal_windows(lead: list[ItemBlock], max_lead_notes: int, min_lead_not
                 continue
             windows.append(Window(start=chunk[0].start, end=max(note.end for note in chunk), lead=chunk))
     return windows
+
+
+def build_fixed_duration_vocal_windows(
+    lead: list[ItemBlock],
+    max_lead_notes: int,
+    min_lead_notes: int,
+    max_gap: float,
+    window_duration: float,
+    window_hop: float,
+    min_window_duration: float,
+) -> list[Window]:
+    """Build longer overlapping windows so the model can learn phrase contour.
+
+    The original note-count chunking is good for structural correctness, but it
+    can create many 1-2 note examples. Those teach the model local interval
+    mapping instead of musical phrase motion. This mode keeps phrase/gap
+    boundaries, then slides fixed beat windows over each phrase.
+    """
+
+    phrases: list[list[ItemBlock]] = []
+    current: list[ItemBlock] = []
+    for note in lead:
+        previous = current[-1] if current else None
+        phrase_changed = bool(previous and note.phrase_id and previous.phrase_id and note.phrase_id != previous.phrase_id)
+        gap_changed = bool(previous and note.start - previous.end > max_gap)
+        if current and (phrase_changed or gap_changed):
+            phrases.append(current)
+            current = []
+        current.append(note)
+    if current:
+        phrases.append(current)
+
+    windows: list[Window] = []
+    seen: set[tuple[str, ...]] = set()
+    for phrase in phrases:
+        phrase_start = phrase[0].start
+        phrase_end = max(note.end for note in phrase)
+        phrase_duration = phrase_end - phrase_start
+        if phrase_duration < min_window_duration and len(phrase) < min_lead_notes:
+            continue
+
+        starts = [phrase_start]
+        if phrase_duration > window_duration:
+            cursor = phrase_start + window_hop
+            latest_start = max(phrase_start, phrase_end - window_duration)
+            while cursor < latest_start:
+                starts.append(cursor)
+                cursor += window_hop
+            if latest_start > starts[-1] + 1e-6:
+                starts.append(latest_start)
+
+        for start in starts:
+            end = min(phrase_end, start + window_duration)
+            selected = [note for note in phrase if note.start < end and note.end > start]
+            if len(selected) < min_lead_notes:
+                continue
+            if max(note.end for note in selected) - selected[0].start < min_window_duration:
+                continue
+            if max_lead_notes > 0 and len(selected) > max_lead_notes:
+                for index in range(0, len(selected), max_lead_notes):
+                    chunk = selected[index : index + max_lead_notes]
+                    if len(chunk) < min_lead_notes:
+                        continue
+                    add_unique_window(windows, seen, chunk)
+            else:
+                add_unique_window(windows, seen, selected)
+    return windows
+
+
+def add_unique_window(windows: list[Window], seen: set[tuple[str, ...]], notes: list[ItemBlock]) -> None:
+    key = tuple(note.id for note in notes)
+    if not key or key in seen:
+        return
+    seen.add(key)
+    windows.append(Window(start=notes[0].start, end=max(note.end for note in notes), lead=notes))
 
 
 def extract_top_level_block(lines: list[str], header: str) -> list[str]:

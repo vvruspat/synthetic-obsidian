@@ -89,11 +89,15 @@ struct AnnotationDocument
     int version = 1;
     juce::File audioFile;
     juce::File instrumentalFile;
+    juce::File backingAudioFile;
     int sampleRate = 0;
     double duration = 0.0;
     double bpm = 120.0;
     juce::String key = "C major";
     std::vector<NoteBlock> notes;
+    std::vector<NoteBlock> backingNotes;
+    juce::String backingStyleId;
+    juce::String backingStyleName;
     std::vector<BoundaryMarker> boundaries;
     std::vector<AnnotationRegion> regions;
     std::vector<TempoSegment> tempoSegments;

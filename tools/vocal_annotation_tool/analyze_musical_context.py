@@ -158,10 +158,6 @@ def tempo_segments(beat_times: np.ndarray, duration: float, global_bpm: float, f
 
 
 def infer_time_signature(beat_times: np.ndarray, onset_envelope: np.ndarray, sr: int, hop_length: int, duration: float) -> list[dict[str, object]]:
-    # Keep the first pass conservative. False 3/4 is more damaging to the UI
-    # grid than a 4/4 fallback, and most source exports currently follow 4/4.
-    return [{"start": 0.0, "end": duration, "numerator": 4, "denominator": 4, "confidence": 0.55}]
-
     if beat_times.size < 8:
         return [{"start": 0.0, "end": duration, "numerator": 4, "denominator": 4, "confidence": 0.2}]
 
@@ -170,17 +166,17 @@ def infer_time_signature(beat_times: np.ndarray, onset_envelope: np.ndarray, sr:
 
     scores: dict[int, float] = {}
     for meter in (3, 4):
-        accents = []
-        non_accents = []
-        for index, strength in enumerate(strengths):
-            if index % meter == 0:
-                accents.append(strength)
-            else:
-                non_accents.append(strength)
-        scores[meter] = float(np.mean(accents) - np.mean(non_accents)) if accents and non_accents else 0.0
+        phase_scores = []
+        for phase in range(meter):
+            accents = strengths[np.arange(strengths.size) % meter == phase]
+            non_accents = strengths[np.arange(strengths.size) % meter != phase]
+            if accents.size and non_accents.size:
+                phase_scores.append(float(np.mean(accents) - np.mean(non_accents)))
+        scores[meter] = max(phase_scores, default=0.0)
 
-    numerator = 3 if scores[3] > scores[4] * 1.12 else 4
-    confidence = float(np.clip(abs(scores[numerator]) / (np.mean(strengths) + 1e-6), 0.2, 0.75))
+    mean_strength = float(np.mean(strengths))
+    numerator = 3 if scores[3] > max(0.0, scores[4]) * 1.12 and scores[3] > mean_strength * 0.08 else 4
+    confidence = float(np.clip(max(0.0, scores[numerator]) / (mean_strength + 1e-6), 0.2, 0.8))
     return [{"start": 0.0, "end": duration, "numerator": numerator, "denominator": 4, "confidence": round(confidence, 3)}]
 
 
@@ -293,11 +289,11 @@ def analyze(path: Path) -> dict[str, object]:
         raise RuntimeError("audio file is empty")
     duration = float(librosa.get_duration(y=y, sr=sr))
     hop_length = 512
-    _, _, onset_envelope = estimate_beats(y, sr, hop_length)
+    _, detected_beat_times, onset_envelope = estimate_beats(y, sr, hop_length)
     global_bpm = rounded_bpm(estimate_consensus_tempo(y, sr))
     beat_times = regular_beat_times(duration, global_bpm)
     tempos = tempo_segments(beat_times, duration, global_bpm, force_constant=True)
-    signatures = infer_time_signature(beat_times, onset_envelope, sr, hop_length, duration)
+    signatures = infer_time_signature(detected_beat_times, onset_envelope, sr, hop_length, duration)
     chords = estimate_chords(y, sr, hop_length, beat_times, duration)
     return {
         "duration": round(duration, 4),

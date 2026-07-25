@@ -5,6 +5,8 @@ juce_add_gui_app(VocalAnnotationTool
     BUNDLE_ID           "com.syntheticobsidian.vocalannotationtool"
     PRODUCT_NAME        "Vocal Annotation Tool"
     VERSION             "0.1.0"
+    NEEDS_WEB_BROWSER   TRUE
+    NEEDS_WEBVIEW2      TRUE
 )
 
 juce_generate_juce_header(VocalAnnotationTool)
@@ -16,17 +18,20 @@ target_sources(VocalAnnotationTool
         AnnotationJson.cpp
         AnnotationValidator.cpp
         AnnotationEditorComponent.cpp
+        ${CMAKE_SOURCE_DIR}/Source/web/SyntheticObsidianWebView.cpp
 )
 
 target_include_directories(VocalAnnotationTool
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_SOURCE_DIR}/Source
 )
 
 target_compile_definitions(VocalAnnotationTool
     PUBLIC
-        JUCE_WEB_BROWSER=0
+        JUCE_WEB_BROWSER=1
         JUCE_USE_CURL=0
+        JUCE_USE_WIN_WEBVIEW2=1
         SYNTHETIC_OBSIDIAN_ROOT="${CMAKE_SOURCE_DIR}"
 )
 
@@ -42,6 +47,7 @@ target_link_libraries(VocalAnnotationTool
         juce::juce_graphics
         juce::juce_gui_basics
         juce::juce_gui_extra
+        SyntheticObsidianFrontendData
     PUBLIC
         juce::juce_recommended_config_flags
         juce::juce_recommended_lto_flags

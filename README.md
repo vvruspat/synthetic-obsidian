@@ -5,7 +5,9 @@ Synthetic Obsidian is a JUCE 8 / CMake audio project for vocal processing and vo
 The repository currently contains two connected pieces of work:
 
 - a JUCE VST3/Standalone plugin scaffold for vocal processing experiments;
-- a standalone Vocal Annotation Tool for building and validating note, syllable, breath, pause, and pitch-curve annotations.
+- a standalone Vocal Annotation Tool with a React/TypeScript interface and a
+  C++/Python backend for building and validating note, syllable, breath, pause,
+  and pitch-curve annotations.
 
 The most mature part right now is the annotation tool. It includes an offline ML-assisted boundary detector and a small breath-detection checkpoint trained from paired `vox` / `breath` stems.
 
@@ -27,7 +29,9 @@ Source/                       JUCE plugin source
   dsp/                        DSP modules
   state/                      Project/session state models
   ui/                         Plugin UI components
+  web/                        JUCE WebView host for the embedded React UI
 
+frontend/                     React/TypeScript application UI
 tools/vocal_annotation_tool/  Standalone annotation app
 research/gtsinger_alignment/  Boundary model training/inference utilities
 docs/                         Product, design, and architecture notes
@@ -35,6 +39,17 @@ data/gtsinger_alignment/      Lightweight runtime checkpoint only
 ```
 
 ## Build the Vocal Annotation Tool
+
+The checked-in `frontend/dist` bundle is embedded into the native app, so a
+normal C++ build does not require Node.js and the app does not start a local web
+server. When the frontend source changes, refresh the bundle first:
+
+```bash
+cd frontend
+npm ci
+npm run check
+cd ..
+```
 
 ```bash
 cmake -S . -B build-vocal-tool2 -DCMAKE_BUILD_TYPE=Debug
@@ -66,6 +81,7 @@ For more platform-specific build notes, see [BUILD.md](BUILD.md).
 
 The tool is designed for offline vocal annotation and review. It can:
 
+- run its entire visible UI in an embedded React WebView;
 - load audio and annotation JSON;
 - create and edit note blocks, syllable splits, breaths, pauses, noise regions, and legato/rearticulation boundaries;
 - draw pitch curves and export MIDI with pitch-bend events;
@@ -135,3 +151,6 @@ If a future model checkpoint is required at runtime and is small enough for Git,
 
 The plugin and tool share some research code, but the ML-heavy workflows are offline/background tasks. ONNX/Python/model inference must not run from realtime audio processing code.
 
+The JS/native bridge is message-thread-only. It updates atomics used by
+playback, while analysis, backing-vocal generation, rendering, and Python model
+calls remain on their existing background workers.

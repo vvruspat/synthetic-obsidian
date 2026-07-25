@@ -24,6 +24,7 @@ void AnnotationDocument::clear()
     backingNotes.clear();
     backingStyleId.clear();
     backingStyleName.clear();
+    backingTracks.clear();
     boundaries.clear();
     regions.clear();
     tempoSegments.clear();

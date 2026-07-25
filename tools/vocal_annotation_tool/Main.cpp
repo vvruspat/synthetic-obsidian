@@ -1,6 +1,7 @@
 #include "AnnotationEditorComponent.h"
 #include "AnnotationJson.h"
 #include "AnnotationValidator.h"
+#include "web/SyntheticObsidianWebView.h"
 
 #include <JuceHeader.h>
 
@@ -8,10 +9,13 @@
 #include <array>
 #include <atomic>
 #include <cctype>
+#include <cstdint>
 #include <cstdlib>
 #include <cmath>
 #include <limits>
 #include <map>
+#include <memory>
+#include <vector>
 
 namespace vocal_annotation
 {
@@ -25,6 +29,121 @@ constexpr double kAutosaveDelayMs = 5000.0;
 constexpr double kTwoPi = juce::MathConstants<double>::twoPi;
 constexpr int kMaxPlaybackNotes = 4096;
 constexpr int kMaxPlaybackCurvePoints = 24;
+constexpr size_t kMaxBackingTracks = 36;
+constexpr int kWaveformPointCount = 65536;
+constexpr int kWaveformReadBlockSize = 32768;
+
+struct WaveformPoint
+{
+    float minimum = 0.0f;
+    float maximum = 0.0f;
+};
+
+using WaveformData = std::vector<WaveformPoint>;
+
+struct BackingWaveformCache
+{
+    juce::File file;
+    WaveformData waveform;
+    juce::String packedWaveform;
+    double durationSeconds = 0.0;
+    unsigned int requestRevision = 0;
+    bool loading = false;
+};
+
+enum class WaveformTrack
+{
+    vocal,
+    instrumental,
+    backing
+};
+
+struct WaveformReadResult
+{
+    WaveformData waveform;
+    juce::String packedWaveform;
+    double durationSeconds = 0.0;
+};
+
+juce::String packWaveformData(const WaveformData& waveform)
+{
+    std::vector<std::uint8_t> bytes(waveform.size() * 4);
+    for (size_t index = 0; index < waveform.size(); ++index)
+    {
+        const auto writeValue = [&bytes, index](float value, size_t valueOffset)
+        {
+            const auto quantized = static_cast<std::int16_t>(
+                std::lround(juce::jlimit(-1.0f, 1.0f, value) * 32767.0f));
+            const auto bits = static_cast<std::uint16_t>(quantized);
+            const auto offset = index * 4 + valueOffset;
+            bytes[offset] = static_cast<std::uint8_t>(bits & 0xffu);
+            bytes[offset + 1] = static_cast<std::uint8_t>((bits >> 8u) & 0xffu);
+        };
+        writeValue(waveform[index].minimum, 0);
+        writeValue(waveform[index].maximum, 2);
+    }
+
+    return bytes.empty()
+        ? juce::String()
+        : juce::Base64::toBase64(bytes.data(), bytes.size());
+}
+
+WaveformReadResult readWaveformData(const juce::File& file)
+{
+    juce::AudioFormatManager formatManager;
+    formatManager.registerBasicFormats();
+    std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(file));
+    if (reader == nullptr || reader->lengthInSamples <= 0 || reader->numChannels == 0)
+        return {};
+
+    const auto durationSeconds = reader->sampleRate > 0.0
+        ? static_cast<double>(reader->lengthInSamples) / reader->sampleRate
+        : 0.0;
+    const auto pointCount = static_cast<int>(
+        juce::jmin<juce::int64>(kWaveformPointCount, reader->lengthInSamples));
+    const auto channelsToRead = static_cast<int>(juce::jmin(2u, reader->numChannels));
+    juce::AudioBuffer<float> buffer(channelsToRead, kWaveformReadBlockSize);
+    WaveformData result(static_cast<size_t>(pointCount));
+
+    for (juce::int64 readPosition = 0;
+         readPosition < reader->lengthInSamples;
+         readPosition += kWaveformReadBlockSize)
+    {
+        const auto samplesToRead = static_cast<int>(
+            juce::jmin<juce::int64>(
+                kWaveformReadBlockSize,
+                reader->lengthInSamples - readPosition));
+        if (! reader->read(&buffer, 0, samplesToRead, readPosition, true, true))
+            break;
+
+        const auto blockEnd = readPosition + samplesToRead;
+        auto pointIndex = static_cast<int>(
+            readPosition * pointCount / reader->lengthInSamples);
+        while (pointIndex < pointCount)
+        {
+            const auto pointStart = reader->lengthInSamples * pointIndex / pointCount;
+            const auto pointEnd = reader->lengthInSamples * (pointIndex + 1) / pointCount;
+            const auto segmentStart = juce::jmax(readPosition, pointStart);
+            const auto segmentEnd = juce::jmin(blockEnd, pointEnd);
+            auto& point = result[static_cast<size_t>(pointIndex)];
+            for (int channel = 0; channel < channelsToRead; ++channel)
+            {
+                const auto range = buffer.findMinMax(
+                    channel,
+                    static_cast<int>(segmentStart - readPosition),
+                    static_cast<int>(segmentEnd - segmentStart));
+                point.minimum = juce::jmin(point.minimum, range.getStart());
+                point.maximum = juce::jmax(point.maximum, range.getEnd());
+            }
+            if (pointEnd >= blockEnd)
+                break;
+            ++pointIndex;
+        }
+    }
+
+    auto packedWaveform = packWaveformData(result);
+    return { std::move(result), std::move(packedWaveform), durationSeconds };
+}
 
 enum class PlaybackMode
 {
@@ -39,6 +158,7 @@ struct PlaybackNote
     double end = 0.0;
     double frequency = 440.0;
     bool isBacking = false;
+    int backingTrackIndex = -1;
     bool legatoFromPrevious = false;
     bool legatoToNext = false;
     std::array<PitchCurvePoint, kMaxPlaybackCurvePoints> curve {};
@@ -57,7 +177,7 @@ struct BackingStyleDefinition
     const char* name = "";
 };
 
-constexpr std::array<BackingStyleDefinition, 36> kBackingStyles {{
+constexpr std::array<BackingStyleDefinition, kMaxBackingTracks> kBackingStyles {{
     { "UNISON", "Unison Double" },
     { "OCT_UP", "Octave Above" },
     { "OCT_DOWN", "Octave Below" },
@@ -95,6 +215,19 @@ constexpr std::array<BackingStyleDefinition, 36> kBackingStyles {{
     { "TENSION_RES", "Tension-Resolution Harmony" },
     { "DYNAMIC_CP", "Dynamic Counterpoint" },
 }};
+
+int backingStyleIndex(const juce::String& styleId, const juce::String& styleName)
+{
+    for (size_t i = 0; i < kBackingStyles.size(); ++i)
+    {
+        if ((styleId.isNotEmpty() && styleId == kBackingStyles[i].id)
+            || (styleName.isNotEmpty() && styleName == kBackingStyles[i].name))
+        {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
 
 std::optional<BackingStyleDefinition> backingStyleForComboId(int comboId)
 {
@@ -728,21 +861,23 @@ class MainComponent final : public juce::AudioAppComponent,
 {
 public:
     MainComponent()
-        : editor_(formatManager_, document_)
+        : editor_(formatManager_, document_),
+          webView_([this](const juce::var& command) { handleWebCommand(command); })
     {
         formatManager_.registerBasicFormats();
         editor_.setListener(this);
 
         addToolbarButton(openAudioButton_, "Open Audio", [this] { chooseAudioFile(); });
+        openAudioButton_.setEnabled(false);
         addToolbarButton(openInstrumentalButton_, "Open Inst", [this] { chooseInstrumentalFile(); });
-        addToolbarButton(loadJsonButton_, "Load JSON", [this] { chooseJsonFile(); });
+        addToolbarButton(loadJsonButton_, "Open Project", [this] { chooseProject(); });
         addToolbarButton(loadLyricsButton_, "Lyrics", [this] { chooseLyricsFile(); });
         addToolbarButton(analyzeButton_, "Analyze", [this] { runCombinedAnalysis(); });
         addToolbarButton(aiPartsButton_, "AI Parts", [this] { runAiPartsAnalysis(); });
         addToolbarButton(addBackingVocalButton_, "Add BV", [this] { runBackingVocalGeneration(); });
         addToolbarButton(renderBackingAudioButton_, "Render BV", [this] { runBackingAudioRender(); });
         addToolbarButton(playButton_, "Play", [this] { togglePlayback(); });
-        addToolbarButton(saveJsonButton_, "Save JSON", [this] { saveJson(); });
+        addToolbarButton(saveJsonButton_, "Save Project", [this] { saveProject(); });
         addToolbarButton(undoButton_, "Undo", [this] { undo(); });
         addToolbarButton(redoButton_, "Redo", [this] { redo(); });
         addToolbarButton(exportMidiButton_, "Export MIDI", [this] { exportMidi(); });
@@ -758,7 +893,21 @@ public:
         playbackModeBox_.setSelectedId(static_cast<int>(PlaybackMode::notesAndSound), juce::dontSendNotification);
         playbackModeBox_.onChange = [this]
         {
-            playbackMode_.store(playbackModeBox_.getSelectedId());
+            const auto mode = static_cast<PlaybackMode>(playbackModeBox_.getSelectedId());
+            const auto audioMuted = mode == PlaybackMode::notesOnly;
+            const auto notesMuted = mode == PlaybackMode::soundOnly;
+            leadAudioMuted_.store(audioMuted);
+            leadNotesMuted_.store(notesMuted);
+            backingAudioMuted_.store(audioMuted);
+            backingNotesMuted_.store(notesMuted);
+            for (size_t i = 0; i < kMaxBackingTracks; ++i)
+            {
+                backingTrackAudioMuted_[i].store(audioMuted);
+                backingTrackNotesMuted_[i].store(notesMuted);
+            }
+            sendWebTrackLayerState("Voice Main", audioMuted, notesMuted);
+            for (const auto& track : document_.backingTracks)
+                sendWebTrackLayerState(track.styleName, audioMuted, notesMuted);
         };
         addAndMakeVisible(playbackModeBox_);
 
@@ -804,6 +953,7 @@ public:
         addAndMakeVisible(infoLabel_);
 
         addAndMakeVisible(editor_);
+        addAndMakeVisible(webView_);
         setWantsKeyboardFocus(true);
         setSize(1280, 720);
         resetHistory();
@@ -834,6 +984,8 @@ public:
     void prepareToPlay(int samplesPerBlockExpected, double sampleRate) override
     {
         audioSampleRate_.store(sampleRate);
+        for (auto& peak : outputPeakLevels_)
+            peak.store(0.0f, std::memory_order_relaxed);
         leadAudioMixBuffer_.setSize(2, samplesPerBlockExpected, false, false, true);
         instrumentalMixBuffer_.setSize(2, samplesPerBlockExpected, false, false, true);
         backingAudioMixBuffer_.setSize(2, samplesPerBlockExpected, false, false, true);
@@ -842,9 +994,43 @@ public:
         backingAudioTransport_.prepareToPlay(samplesPerBlockExpected, sampleRate);
     }
 
+    void accumulateOutputPeak(size_t channel, float peak) noexcept
+    {
+        auto& outputPeak = outputPeakLevels_[channel];
+        auto currentPeak = outputPeak.load(std::memory_order_relaxed);
+        while (peak > currentPeak
+               && ! outputPeak.compare_exchange_weak(
+                   currentPeak,
+                   peak,
+                   std::memory_order_relaxed,
+                   std::memory_order_relaxed))
+        {
+        }
+    }
+
+    void captureOutputPeaks(const juce::AudioSourceChannelInfo& bufferToFill) noexcept
+    {
+        auto* buffer = bufferToFill.buffer;
+        if (buffer == nullptr || bufferToFill.numSamples <= 0 || buffer->getNumChannels() <= 0)
+            return;
+
+        const auto leftPeak = buffer->getMagnitude(
+            0,
+            bufferToFill.startSample,
+            bufferToFill.numSamples);
+        const auto rightPeak = buffer->getNumChannels() > 1
+            ? buffer->getMagnitude(
+                1,
+                bufferToFill.startSample,
+                bufferToFill.numSamples)
+            : leftPeak;
+        accumulateOutputPeak(0, leftPeak);
+        accumulateOutputPeak(1, rightPeak);
+    }
+
     void getNextAudioBlock(const juce::AudioSourceChannelInfo& bufferToFill) override
     {
-        const auto playheadStart = transport_.getCurrentPosition();
+        const auto playheadStart = currentTransportPosition();
         bufferToFill.clearActiveBufferRegion();
 
         if (readerSource_ != nullptr)
@@ -856,9 +1042,10 @@ public:
                 juce::AudioSourceChannelInfo leadInfo(&leadAudioMixBuffer_, 0, bufferToFill.numSamples);
                 transport_.getNextAudioBlock(leadInfo);
 
-                const auto anySolo = instrumentalSolo_.load() || leadSolo_.load() || backingSolo_.load();
-                const auto mode = static_cast<PlaybackMode>(playbackMode_.load());
-                const auto leadAudible = mode != PlaybackMode::notesOnly
+                const auto anySolo = instrumentalSolo_.load()
+                    || leadSolo_.load()
+                    || anyBackingTrackSoloed();
+                const auto leadAudible = ! leadAudioMuted_.load()
                     && (anySolo ? leadSolo_.load() : ! leadMuted_.load());
 
                 if (leadAudible && bufferToFill.buffer != nullptr)
@@ -879,18 +1066,22 @@ public:
             }
         }
 
-        const auto mode = static_cast<PlaybackMode>(playbackMode_.load());
-
-        if (transport_.isPlaying() && (mode == PlaybackMode::notesOnly || mode == PlaybackMode::notesAndSound))
+        if (isPlaybackRunning())
             renderTimelineNotes(bufferToFill, playheadStart);
 
-        if (mode == PlaybackMode::notesAndSound || mode == PlaybackMode::soundOnly)
-        {
-            mixInstrumentalTrack(bufferToFill);
-            mixBackingAudioTrack(bufferToFill);
-        }
+        mixInstrumentalTrack(bufferToFill);
+        mixBackingAudioTrack(bufferToFill);
 
         renderClickedNoteTone(bufferToFill);
+
+        if (bufferToFill.buffer != nullptr)
+        {
+            bufferToFill.buffer->applyGain(
+                bufferToFill.startSample,
+                bufferToFill.numSamples,
+                masterVolume_.load());
+            captureOutputPeaks(bufferToFill);
+        }
     }
 
     void releaseResources() override
@@ -913,7 +1104,9 @@ public:
         juce::AudioSourceChannelInfo instrumentalInfo(&instrumentalMixBuffer_, 0, bufferToFill.numSamples);
         instrumentalTransport_.getNextAudioBlock(instrumentalInfo);
 
-        const auto anySolo = instrumentalSolo_.load() || leadSolo_.load() || backingSolo_.load();
+        const auto anySolo = instrumentalSolo_.load()
+            || leadSolo_.load()
+            || anyBackingTrackSoloed();
         if (anySolo ? ! instrumentalSolo_.load() : instrumentalMuted_.load())
             return;
 
@@ -940,8 +1133,25 @@ public:
         juce::AudioSourceChannelInfo backingInfo(&backingAudioMixBuffer_, 0, bufferToFill.numSamples);
         backingAudioTransport_.getNextAudioBlock(backingInfo);
 
-        const auto anySolo = instrumentalSolo_.load() || leadSolo_.load() || backingSolo_.load();
-        if (anySolo ? ! backingSolo_.load() : backingMuted_.load())
+        const auto activeTrackIndex = activeBackingTrackIndex_.load(std::memory_order_relaxed);
+        const auto hasActiveTrack = activeTrackIndex >= 0
+            && activeTrackIndex < static_cast<int>(kMaxBackingTracks);
+        const auto audioMuted = hasActiveTrack
+            ? backingTrackAudioMuted_[static_cast<size_t>(activeTrackIndex)].load(std::memory_order_relaxed)
+            : backingAudioMuted_.load();
+        if (audioMuted)
+            return;
+
+        const auto activeTrackSoloed = hasActiveTrack
+            ? backingTrackSoloed_[static_cast<size_t>(activeTrackIndex)].load(std::memory_order_relaxed)
+            : backingSolo_.load();
+        const auto activeTrackMuted = hasActiveTrack
+            ? backingTrackMuted_[static_cast<size_t>(activeTrackIndex)].load(std::memory_order_relaxed)
+            : backingMuted_.load();
+        const auto anySolo = instrumentalSolo_.load()
+            || leadSolo_.load()
+            || anyBackingTrackSoloed();
+        if (anySolo ? ! activeTrackSoloed : activeTrackMuted)
             return;
 
         for (int channel = 0; channel < channels; ++channel)
@@ -971,11 +1181,23 @@ public:
         const auto channels = buffer->getNumChannels();
         const auto startSample = bufferToFill.startSample;
         const auto numSamples = bufferToFill.numSamples;
-        const auto anySolo = instrumentalSolo_.load() || leadSolo_.load() || backingSolo_.load();
-        const auto leadAudible = anySolo ? leadSolo_.load() : ! leadMuted_.load();
-        const auto backingAudible = (anySolo ? backingSolo_.load() : ! backingMuted_.load())
-            && ! backingAudioAvailable_.load();
-        if (! leadAudible && ! backingAudible)
+        const auto anyBackingSolo = anyBackingTrackSoloed();
+        const auto anySolo = instrumentalSolo_.load() || leadSolo_.load() || anyBackingSolo;
+        const auto leadAudible = ! leadNotesMuted_.load()
+            && (anySolo ? leadSolo_.load() : ! leadMuted_.load());
+        std::array<bool, kMaxBackingTracks> backingAudible {};
+        auto anyBackingAudible = false;
+        for (size_t i = 0; i < kMaxBackingTracks; ++i)
+        {
+            const auto notesMuted = backingTrackNotesMuted_[i].load(std::memory_order_relaxed);
+            const auto trackAudible = ! notesMuted
+                && (anySolo
+                        ? backingTrackSoloed_[i].load(std::memory_order_relaxed)
+                        : ! backingTrackMuted_[i].load(std::memory_order_relaxed));
+            backingAudible[i] = trackAudible;
+            anyBackingAudible = anyBackingAudible || trackAudible;
+        }
+        if (! leadAudible && ! anyBackingAudible)
             return;
 
         if (state != renderedNoteState_ || playheadStart + 0.02 < lastTimelineRenderEnd_)
@@ -991,8 +1213,19 @@ public:
                 const auto& note = state->notes[static_cast<size_t>(i)];
                 if (note.start > time)
                     break;
-                if (note.isBacking ? ! backingAudible : ! leadAudible)
+                if (note.isBacking)
+                {
+                    if (note.backingTrackIndex < 0
+                        || note.backingTrackIndex >= static_cast<int>(kMaxBackingTracks)
+                        || ! backingAudible[static_cast<size_t>(note.backingTrackIndex)])
+                    {
+                        continue;
+                    }
+                }
+                else if (! leadAudible)
+                {
                     continue;
+                }
                 if (time < note.start || time >= note.end)
                     continue;
 
@@ -1109,13 +1342,15 @@ public:
         statusLabel_.setBounds(inspector);
 
         editor_.setBounds(bounds);
+        webView_.setBounds(getLocalBounds());
+        webView_.toFront(false);
     }
 
     bool keyPressed(const juce::KeyPress& key) override
     {
         if (key == juce::KeyPress('s', juce::ModifierKeys::commandModifier, 0))
         {
-            saveJson();
+            saveProject();
             return true;
         }
 
@@ -1172,6 +1407,1097 @@ private:
         addAndMakeVisible(editor);
     }
 
+    static juce::var makeTrackState(bool muted, bool soloed)
+    {
+        auto* state = new juce::DynamicObject();
+        state->setProperty("mute", muted);
+        state->setProperty("solo", soloed);
+        return state;
+    }
+
+    static juce::var makeWaveformState(const WaveformData& waveform,
+                                       const juce::String& packedWaveform)
+    {
+        auto* result = new juce::DynamicObject();
+        result->setProperty("encoding", "i16le-base64");
+        result->setProperty("pointCount", static_cast<int>(waveform.size()));
+        result->setProperty("data", packedWaveform);
+        return result;
+    }
+
+    void requestWaveformData(WaveformTrack track,
+                             const juce::File& file,
+                             int requestedBackingTrackIndex = -1)
+    {
+        const auto backingTrackIndex = track == WaveformTrack::backing
+            ? (requestedBackingTrackIndex >= 0
+                ? requestedBackingTrackIndex
+                : activeBackingTrackIndex_.load(std::memory_order_relaxed))
+            : -1;
+        const auto hasBackingTrackCache = backingTrackIndex >= 0
+            && backingTrackIndex < static_cast<int>(kMaxBackingTracks);
+        auto* backingCache = hasBackingTrackCache
+            ? &backingTrackWaveforms_[static_cast<size_t>(backingTrackIndex)]
+            : nullptr;
+
+        auto* sourceFile = backingCache != nullptr
+            ? &backingCache->file
+            : track == WaveformTrack::vocal
+                ? &vocalWaveformFile_
+                : track == WaveformTrack::instrumental
+                    ? &instrumentalWaveformFile_
+                    : &backingWaveformFile_;
+        auto* waveform = backingCache != nullptr
+            ? &backingCache->waveform
+            : track == WaveformTrack::vocal
+                ? &vocalWaveform_
+                : track == WaveformTrack::instrumental
+                    ? &instrumentalWaveform_
+                    : &backingWaveform_;
+        auto* packedWaveform = backingCache != nullptr
+            ? &backingCache->packedWaveform
+            : track == WaveformTrack::vocal
+                ? &vocalPackedWaveform_
+                : track == WaveformTrack::instrumental
+                    ? &instrumentalPackedWaveform_
+                    : &backingPackedWaveform_;
+        auto* loading = backingCache != nullptr
+            ? &backingCache->loading
+            : track == WaveformTrack::vocal
+                ? &vocalWaveformLoading_
+                : track == WaveformTrack::instrumental
+                    ? &instrumentalWaveformLoading_
+                    : &backingWaveformLoading_;
+        auto* requestRevision = backingCache != nullptr
+            ? &backingCache->requestRevision
+            : track == WaveformTrack::vocal
+                ? &vocalWaveformRequestRevision_
+                : track == WaveformTrack::instrumental
+                    ? &instrumentalWaveformRequestRevision_
+                    : &backingWaveformRequestRevision_;
+
+        if (! file.existsAsFile())
+        {
+            ++*requestRevision;
+            *sourceFile = juce::File();
+            waveform->clear();
+            packedWaveform->clear();
+            *loading = false;
+            if (backingCache != nullptr)
+                backingCache->durationSeconds = 0.0;
+            if (backingCache != nullptr
+                && backingTrackIndex == activeBackingTrackIndex_.load(std::memory_order_relaxed))
+            {
+                backingWaveformFile_ = juce::File();
+                backingWaveform_.clear();
+                backingPackedWaveform_.clear();
+                backingWaveformLoading_ = false;
+            }
+            return;
+        }
+
+        if (*sourceFile == file && (*loading || ! waveform->empty()))
+        {
+            if (backingCache != nullptr
+                && backingTrackIndex == activeBackingTrackIndex_.load(std::memory_order_relaxed))
+            {
+                backingWaveformFile_ = backingCache->file;
+                backingWaveform_ = backingCache->waveform;
+                backingPackedWaveform_ = backingCache->packedWaveform;
+                backingWaveformLoading_ = backingCache->loading;
+            }
+            return;
+        }
+
+        *sourceFile = file;
+        waveform->clear();
+        packedWaveform->clear();
+        *loading = true;
+        const auto expectedRevision = ++*requestRevision;
+        juce::WeakReference<MainComponent> safeThis(this);
+        juce::Thread::launch([safeThis, file, track, expectedRevision, backingTrackIndex]
+        {
+            auto loadedWaveform = readWaveformData(file);
+            juce::MessageManager::callAsync(
+                [safeThis,
+                 file,
+                 track,
+                 expectedRevision,
+                 backingTrackIndex,
+                 waveformResult = std::move(loadedWaveform.waveform),
+                 packedWaveformResult = std::move(loadedWaveform.packedWaveform),
+                 durationSeconds = loadedWaveform.durationSeconds]() mutable
+                {
+                    if (safeThis == nullptr)
+                        return;
+
+                    if (track == WaveformTrack::backing
+                        && backingTrackIndex >= 0
+                        && backingTrackIndex < static_cast<int>(kMaxBackingTracks))
+                    {
+                        auto& cache = safeThis->backingTrackWaveforms_[
+                            static_cast<size_t>(backingTrackIndex)];
+                        if (cache.file != file || cache.requestRevision != expectedRevision)
+                            return;
+
+                        cache.waveform = std::move(waveformResult);
+                        cache.packedWaveform = std::move(packedWaveformResult);
+                        cache.durationSeconds = durationSeconds;
+                        cache.loading = false;
+                        if (backingTrackIndex
+                            == safeThis->activeBackingTrackIndex_.load(std::memory_order_relaxed))
+                        {
+                            safeThis->backingWaveformFile_ = cache.file;
+                            safeThis->backingWaveform_ = cache.waveform;
+                            safeThis->backingPackedWaveform_ = cache.packedWaveform;
+                            safeThis->backingWaveformLoading_ = false;
+                        }
+                        safeThis->sendWebProjectState();
+                        return;
+                    }
+
+                    auto& currentFile = track == WaveformTrack::vocal
+                        ? safeThis->document_.audioFile
+                        : track == WaveformTrack::instrumental
+                            ? safeThis->document_.instrumentalFile
+                            : safeThis->document_.backingAudioFile;
+                    auto& currentRevision = track == WaveformTrack::vocal
+                        ? safeThis->vocalWaveformRequestRevision_
+                        : track == WaveformTrack::instrumental
+                            ? safeThis->instrumentalWaveformRequestRevision_
+                            : safeThis->backingWaveformRequestRevision_;
+                    if (currentFile != file || currentRevision != expectedRevision)
+                        return;
+
+                    auto& currentWaveform = track == WaveformTrack::vocal
+                        ? safeThis->vocalWaveform_
+                        : track == WaveformTrack::instrumental
+                            ? safeThis->instrumentalWaveform_
+                            : safeThis->backingWaveform_;
+                    auto& currentLoading = track == WaveformTrack::vocal
+                        ? safeThis->vocalWaveformLoading_
+                        : track == WaveformTrack::instrumental
+                            ? safeThis->instrumentalWaveformLoading_
+                            : safeThis->backingWaveformLoading_;
+                    auto& currentPackedWaveform = track == WaveformTrack::vocal
+                        ? safeThis->vocalPackedWaveform_
+                        : track == WaveformTrack::instrumental
+                            ? safeThis->instrumentalPackedWaveform_
+                            : safeThis->backingPackedWaveform_;
+                    currentWaveform = std::move(waveformResult);
+                    currentPackedWaveform = std::move(packedWaveformResult);
+                    currentLoading = false;
+                    safeThis->sendWebProjectState();
+                });
+        });
+    }
+
+    void refreshWaveformData()
+    {
+        requestWaveformData(WaveformTrack::vocal, document_.audioFile);
+        requestWaveformData(WaveformTrack::instrumental, document_.instrumentalFile);
+        for (const auto& track : document_.backingTracks)
+        {
+            const auto trackIndex = backingStyleIndex(track.styleId, track.styleName);
+            if (trackIndex >= 0)
+                requestWaveformData(WaveformTrack::backing, track.audioFile, trackIndex);
+        }
+        if (document_.backingTracks.empty())
+            requestWaveformData(WaveformTrack::backing, document_.backingAudioFile);
+    }
+
+    bool isPlaybackRunning() const
+    {
+        return transport_.isPlaying()
+            || instrumentalTransport_.isPlaying()
+            || backingAudioTransport_.isPlaying();
+    }
+
+    double currentTransportPosition() const
+    {
+        if (readerSource_ != nullptr)
+            return transport_.getCurrentPosition();
+        if (instrumentalReaderSource_ != nullptr)
+            return instrumentalTransport_.getCurrentPosition();
+        return 0.0;
+    }
+
+    double timelineDuration() const
+    {
+        return juce::jmax(1.0, document_.duration);
+    }
+
+    double normalisedTimelinePosition(double seconds) const
+    {
+        return juce::jlimit(0.0, 100.0, seconds * 100.0 / timelineDuration());
+    }
+
+    void setTransportPosition(double seconds)
+    {
+        const auto clamped = juce::jlimit(0.0, juce::jmax(0.0, document_.duration), seconds);
+        transport_.setPosition(clamped);
+        instrumentalTransport_.setPosition(clamped);
+        backingAudioTransport_.setPosition(clamped);
+        editor_.setPlayheadTime(clamped);
+    }
+
+    void stopPlayback()
+    {
+        transport_.stop();
+        instrumentalTransport_.stop();
+        backingAudioTransport_.stop();
+        loopAuditionActive_ = false;
+        playButton_.setButtonText("Play");
+    }
+
+    void sendWebStatus()
+    {
+        if (! webFrontendReady_)
+            return;
+
+        auto* event = new juce::DynamicObject();
+        event->setProperty("type", "status-state");
+        event->setProperty("message", statusLabel_.getText());
+        event->setProperty(
+            "vocalAnalysisRunning",
+            analysisRunning_ || aiPartsAnalysisRunning_ || analyzeAfterAiParts_);
+        event->setProperty(
+            "instrumentalAnalysisRunning",
+            musicalContextAnalysisRunning_);
+        event->setProperty("backingGenerationRunning", backingGenerationRunning_);
+        event->setProperty("backingAudioRenderRunning", backingAudioRenderRunning_);
+        event->setProperty("backingGenerationTrack", backingGenerationTrackName_);
+        event->setProperty("backingAudioRenderTrack", backingAudioRenderTrackName_);
+        webView_.dispatch(event);
+    }
+
+    void completeExport(const juce::String& summary, const juce::File& directory)
+    {
+        setStatus(summary + " to " + directory.getFullPathName() + ".");
+
+        if (webFrontendReady_)
+        {
+            auto* event = new juce::DynamicObject();
+            event->setProperty("type", "export-complete");
+            event->setProperty("message", summary + ".");
+            event->setProperty("directory", directory.getFullPathName());
+            webView_.dispatch(event);
+        }
+
+        if (! directory.startAsProcess())
+            directory.revealToUser();
+    }
+
+    void sendWebTransportState()
+    {
+        if (! webFrontendReady_)
+            return;
+
+        auto* event = new juce::DynamicObject();
+        event->setProperty("type", "transport-state");
+        event->setProperty("playing", isPlaybackRunning());
+        event->setProperty("playhead", normalisedTimelinePosition(currentTransportPosition()));
+        webView_.dispatch(event);
+    }
+
+    void sendWebLoopState()
+    {
+        if (! webFrontendReady_)
+            return;
+
+        auto* range = new juce::DynamicObject();
+        range->setProperty("start", normalisedTimelinePosition(loopStartTime_));
+        range->setProperty(
+            "end",
+            loopEndTime_ > loopStartTime_
+                ? normalisedTimelinePosition(loopEndTime_)
+                : 25.0);
+
+        auto* event = new juce::DynamicObject();
+        event->setProperty("type", "loop-state");
+        event->setProperty("active", cycleLoopActive_);
+        event->setProperty("range", range);
+        webView_.dispatch(event);
+    }
+
+    void sendWebVolumeState()
+    {
+        if (! webFrontendReady_)
+            return;
+
+        auto* event = new juce::DynamicObject();
+        event->setProperty("type", "volume-state");
+        event->setProperty("value", masterVolume_.load() * 100.0f);
+        webView_.dispatch(event);
+    }
+
+    void sendWebOutputMeterState()
+    {
+        constexpr float release = 0.88f;
+        for (size_t channel = 0; channel < outputMeterLevels_.size(); ++channel)
+        {
+            const auto measuredPeak = outputPeakLevels_[channel].exchange(
+                0.0f,
+                std::memory_order_relaxed);
+            outputMeterLevels_[channel] = juce::jmax(
+                measuredPeak,
+                outputMeterLevels_[channel] * release);
+            if (outputMeterLevels_[channel] < 0.00001f)
+                outputMeterLevels_[channel] = 0.0f;
+        }
+
+        if (! webFrontendReady_)
+            return;
+
+        auto* event = new juce::DynamicObject();
+        event->setProperty("type", "output-meter-state");
+        event->setProperty("left", outputMeterLevels_[0]);
+        event->setProperty("right", outputMeterLevels_[1]);
+        webView_.dispatch(event);
+    }
+
+    void sendWebTrackState(const juce::String& track, bool muted, bool soloed)
+    {
+        if (! webFrontendReady_)
+            return;
+
+        auto* event = new juce::DynamicObject();
+        event->setProperty("type", "track-state");
+        event->setProperty("track", track);
+        event->setProperty("state", makeTrackState(muted, soloed));
+        webView_.dispatch(event);
+    }
+
+    void sendWebTrackLayerState(const juce::String& track, bool audioMuted, bool notesMuted)
+    {
+        if (! webFrontendReady_)
+            return;
+
+        auto* state = new juce::DynamicObject();
+        state->setProperty("audioMuted", audioMuted);
+        state->setProperty("notesMuted", notesMuted);
+
+        auto* event = new juce::DynamicObject();
+        event->setProperty("type", "track-layer-state");
+        event->setProperty("track", track);
+        event->setProperty("state", state);
+        webView_.dispatch(event);
+    }
+
+    BackingVocalTrack* findBackingTrack(const juce::String& styleId,
+                                        const juce::String& styleName)
+    {
+        const auto track = std::find_if(
+            document_.backingTracks.begin(),
+            document_.backingTracks.end(),
+            [&styleId, &styleName](const auto& candidate)
+            {
+                return (styleId.isNotEmpty() && candidate.styleId == styleId)
+                    || (styleName.isNotEmpty() && candidate.styleName == styleName);
+            });
+        return track != document_.backingTracks.end() ? &*track : nullptr;
+    }
+
+    const BackingVocalTrack* findBackingTrack(const juce::String& styleId,
+                                              const juce::String& styleName) const
+    {
+        const auto track = std::find_if(
+            document_.backingTracks.begin(),
+            document_.backingTracks.end(),
+            [&styleId, &styleName](const auto& candidate)
+            {
+                return (styleId.isNotEmpty() && candidate.styleId == styleId)
+                    || (styleName.isNotEmpty() && candidate.styleName == styleName);
+            });
+        return track != document_.backingTracks.end() ? &*track : nullptr;
+    }
+
+    void makeBackingTrackActive(const BackingVocalTrack& track)
+    {
+        document_.backingStyleId = track.styleId;
+        document_.backingStyleName = track.styleName;
+        document_.backingNotes = track.notes;
+        document_.backingAudioFile = track.audioFile;
+        const auto trackIndex = backingStyleIndex(track.styleId, track.styleName);
+        activeBackingTrackIndex_.store(trackIndex, std::memory_order_relaxed);
+        if (trackIndex >= 0 && trackIndex < static_cast<int>(kMaxBackingTracks))
+        {
+            const auto& cache = backingTrackWaveforms_[static_cast<size_t>(trackIndex)];
+            if (cache.file == track.audioFile)
+            {
+                backingWaveformFile_ = cache.file;
+                backingWaveform_ = cache.waveform;
+                backingPackedWaveform_ = cache.packedWaveform;
+                backingWaveformLoading_ = cache.loading;
+                return;
+            }
+        }
+
+        backingWaveformFile_ = juce::File();
+        backingWaveform_.clear();
+        backingPackedWaveform_.clear();
+        backingWaveformLoading_ = false;
+    }
+
+    void selectBackingTrackForEditing(const juce::String& trackName)
+    {
+        auto* track = findBackingTrack({}, trackName);
+        if (track == nullptr)
+            return;
+
+        const auto transportPosition = currentTransportPosition();
+        const auto shouldKeepPlaying = isPlaybackRunning();
+        const auto sourceAlreadyConfigured =
+            backingAudioReaderSource_ != nullptr && backingAudioTransportFile_ == track->audioFile;
+        makeBackingTrackActive(*track);
+
+        if (track->audioFile.existsAsFile())
+        {
+            editor_.setBackingAudioFile(track->audioFile);
+            if (! sourceAlreadyConfigured)
+                configureBackingAudioTransportForFile(track->audioFile);
+            backingAudioTransport_.setPosition(transportPosition);
+            if (shouldKeepPlaying)
+                backingAudioTransport_.start();
+
+            const auto trackIndex = backingStyleIndex(track->styleId, track->styleName);
+            if (trackIndex >= 0)
+                requestWaveformData(WaveformTrack::backing, track->audioFile, trackIndex);
+        }
+        else
+        {
+            clearBackingAudioTrack();
+        }
+    }
+
+    bool anyBackingTrackSoloed() const noexcept
+    {
+        for (const auto& soloed : backingTrackSoloed_)
+            if (soloed.load(std::memory_order_relaxed))
+                return true;
+        return false;
+    }
+
+    void resetBackingTrackControls() noexcept
+    {
+        for (size_t i = 0; i < kMaxBackingTracks; ++i)
+        {
+            backingTrackMuted_[i].store(false, std::memory_order_relaxed);
+            backingTrackSoloed_[i].store(false, std::memory_order_relaxed);
+            backingTrackAudioMuted_[i].store(false, std::memory_order_relaxed);
+            backingTrackNotesMuted_[i].store(false, std::memory_order_relaxed);
+            auto& waveform = backingTrackWaveforms_[i];
+            ++waveform.requestRevision;
+            waveform.file = juce::File();
+            waveform.waveform.clear();
+            waveform.packedWaveform.clear();
+            waveform.durationSeconds = 0.0;
+            waveform.loading = false;
+        }
+        backingWaveformFile_ = juce::File();
+        backingWaveform_.clear();
+        backingPackedWaveform_.clear();
+        backingWaveformLoading_ = false;
+        activeBackingTrackIndex_.store(-1, std::memory_order_relaxed);
+    }
+
+    void sendWebProjectState()
+    {
+        if (! webFrontendReady_)
+            return;
+
+        juce::Array<juce::var> backingOptions;
+        for (const auto& style : kBackingStyles)
+            backingOptions.add(style.name);
+
+        juce::Array<juce::var> backingTracks;
+        for (const auto& track : document_.backingTracks)
+            if (track.styleName.isNotEmpty())
+                backingTracks.add(track.styleName);
+        if (backingTracks.isEmpty()
+            && ! document_.backingNotes.empty()
+            && document_.backingStyleName.isNotEmpty())
+        {
+            backingTracks.add(document_.backingStyleName);
+        }
+
+        juce::Array<juce::var> trackStates;
+        const auto addTrackState = [&trackStates](const juce::String& track, bool muted, bool soloed)
+        {
+            auto* entry = new juce::DynamicObject();
+            entry->setProperty("track", track);
+            entry->setProperty("state", makeTrackState(muted, soloed));
+            trackStates.add(entry);
+        };
+        addTrackState("Instrumental", instrumentalMuted_.load(), instrumentalSolo_.load());
+        addTrackState("Voice Main", leadMuted_.load(), leadSolo_.load());
+        for (const auto& backing : backingTracks)
+        {
+            const auto index = backingStyleIndex({}, backing.toString());
+            const auto hasIndex = index >= 0 && index < static_cast<int>(kMaxBackingTracks);
+            addTrackState(
+                backing.toString(),
+                hasIndex
+                    ? backingTrackMuted_[static_cast<size_t>(index)].load(std::memory_order_relaxed)
+                    : backingMuted_.load(),
+                hasIndex
+                    ? backingTrackSoloed_[static_cast<size_t>(index)].load(std::memory_order_relaxed)
+                    : backingSolo_.load());
+        }
+
+        juce::Array<juce::var> trackLayerState;
+        const auto addTrackLayerState =
+            [&trackLayerState](const juce::String& track, bool audioMuted, bool notesMuted)
+        {
+            auto* state = new juce::DynamicObject();
+            state->setProperty("audioMuted", audioMuted);
+            state->setProperty("notesMuted", notesMuted);
+
+            auto* entry = new juce::DynamicObject();
+            entry->setProperty("track", track);
+            entry->setProperty("state", state);
+            trackLayerState.add(entry);
+        };
+        addTrackLayerState(
+            "Voice Main",
+            leadAudioMuted_.load(),
+            leadNotesMuted_.load());
+        for (const auto& backing : backingTracks)
+        {
+            const auto index = backingStyleIndex({}, backing.toString());
+            const auto hasIndex = index >= 0 && index < static_cast<int>(kMaxBackingTracks);
+            addTrackLayerState(
+                backing.toString(),
+                hasIndex
+                    ? backingTrackAudioMuted_[static_cast<size_t>(index)].load(std::memory_order_relaxed)
+                    : backingAudioMuted_.load(),
+                hasIndex
+                    ? backingTrackNotesMuted_[static_cast<size_t>(index)].load(std::memory_order_relaxed)
+                    : backingNotesMuted_.load());
+        }
+
+        static constexpr const char* clipColours[] {
+            "violet", "cyan", "silver", "pink", "lime", "amber"
+        };
+        juce::Array<juce::var> clips;
+        const auto duration = timelineDuration();
+        for (size_t i = 0; i < document_.notes.size(); ++i)
+        {
+            const auto& note = document_.notes[i];
+            auto* clip = new juce::DynamicObject();
+            clip->setProperty("id", note.id);
+            clip->setProperty("label", note.lyric.isNotEmpty() ? note.lyric : note.id);
+            clip->setProperty("x", juce::jlimit(0.0, 100.0, note.start * 100.0 / duration));
+            clip->setProperty("pitch", juce::jlimit(0.0, 127.0, note.pitchExact));
+            clip->setProperty(
+                "width",
+                juce::jlimit(
+                    0.0,
+                    100.0,
+                    juce::jmax(0.0, note.end - note.start) * 100.0 / duration));
+            clip->setProperty("color", clipColours[i % std::size(clipColours)]);
+            clip->setProperty(
+                "legatoFromPrevious",
+                note.flags.contains("legato_from_previous"));
+            clip->setProperty("legatoToNext", note.flags.contains("legato_to_next"));
+
+            juce::Array<juce::var> pitchCurve;
+            constexpr size_t maxCurvePoints = 64;
+            const auto curveStep = juce::jmax(
+                static_cast<size_t>(1),
+                note.curve.size() / maxCurvePoints);
+            for (size_t pointIndex = 0; pointIndex < note.curve.size(); pointIndex += curveStep)
+            {
+                const auto& point = note.curve[pointIndex];
+                if (point.time < note.start || point.time > note.end)
+                    continue;
+
+                auto* curvePoint = new juce::DynamicObject();
+                curvePoint->setProperty(
+                    "x",
+                    juce::jlimit(0.0, 100.0, point.time * 100.0 / duration));
+                curvePoint->setProperty("pitch", juce::jlimit(0.0, 127.0, point.midi));
+                pitchCurve.add(curvePoint);
+            }
+            if (note.curve.size() > 1)
+            {
+                const auto& finalPoint = note.curve.back();
+                const auto finalX = juce::jlimit(
+                    0.0,
+                    100.0,
+                    finalPoint.time * 100.0 / duration);
+                const auto lastX = pitchCurve.isEmpty()
+                    ? -1.0
+                    : static_cast<double>(
+                        pitchCurve.getLast().getDynamicObject()->getProperty("x"));
+                if (std::abs(finalX - lastX) > 0.0001)
+                {
+                    auto* curvePoint = new juce::DynamicObject();
+                    curvePoint->setProperty("x", finalX);
+                    curvePoint->setProperty(
+                        "pitch",
+                        juce::jlimit(0.0, 127.0, finalPoint.midi));
+                    pitchCurve.add(curvePoint);
+                }
+            }
+            clip->setProperty("pitchCurve", pitchCurve);
+            clips.add(clip);
+        }
+
+        juce::Array<juce::var> backingClips;
+        for (size_t i = 0; i < document_.backingNotes.size(); ++i)
+        {
+            const auto& note = document_.backingNotes[i];
+            auto* clip = new juce::DynamicObject();
+            clip->setProperty("id", note.id);
+            clip->setProperty("label", note.lyric.isNotEmpty() ? note.lyric : note.id);
+            clip->setProperty("x", juce::jlimit(0.0, 100.0, note.start * 100.0 / duration));
+            clip->setProperty("pitch", juce::jlimit(0.0, 127.0, note.pitchExact));
+            clip->setProperty(
+                "width",
+                juce::jlimit(
+                    0.0,
+                    100.0,
+                    juce::jmax(0.0, note.end - note.start) * 100.0 / duration));
+            clip->setProperty("color", clipColours[(i + 1) % std::size(clipColours)]);
+            backingClips.add(clip);
+        }
+
+        juce::Array<juce::var> backingTrackContents;
+        for (const auto& track : document_.backingTracks)
+        {
+            auto* trackContent = new juce::DynamicObject();
+            trackContent->setProperty("track", track.styleName);
+            trackContent->setProperty("hasAudio", track.audioFile.existsAsFile());
+            const auto isActiveTrack = track.styleId == document_.backingStyleId
+                || track.styleName == document_.backingStyleName;
+            const auto trackIndex = backingStyleIndex(track.styleId, track.styleName);
+            const auto hasTrackWaveform = trackIndex >= 0
+                && trackIndex < static_cast<int>(kMaxBackingTracks);
+            const auto& trackWaveform = hasTrackWaveform
+                ? backingTrackWaveforms_[static_cast<size_t>(trackIndex)].waveform
+                : backingWaveform_;
+            const auto& trackPackedWaveform = hasTrackWaveform
+                ? backingTrackWaveforms_[static_cast<size_t>(trackIndex)].packedWaveform
+                : backingPackedWaveform_;
+            const auto cachedDuration = hasTrackWaveform
+                && backingTrackWaveforms_[static_cast<size_t>(trackIndex)].file == track.audioFile
+                ? backingTrackWaveforms_[static_cast<size_t>(trackIndex)].durationSeconds
+                : 0.0;
+            trackContent->setProperty(
+                "audioDurationSeconds",
+                track.audioFile.existsAsFile()
+                    ? (cachedDuration > 0.0
+                        ? cachedDuration
+                        : isActiveTrack && backingAudioReaderSource_ != nullptr
+                        ? backingAudioTransport_.getLengthInSeconds()
+                        : document_.duration)
+                    : 0.0);
+            trackContent->setProperty(
+                "waveform",
+                makeWaveformState(trackWaveform, trackPackedWaveform));
+
+            juce::Array<juce::var> trackClips;
+            for (size_t i = 0; i < track.notes.size(); ++i)
+            {
+                const auto& note = track.notes[i];
+                auto* clip = new juce::DynamicObject();
+                clip->setProperty("id", track.styleId + ":" + note.id);
+                clip->setProperty("label", note.lyric.isNotEmpty() ? note.lyric : note.id);
+                clip->setProperty("x", juce::jlimit(0.0, 100.0, note.start * 100.0 / duration));
+                clip->setProperty("pitch", juce::jlimit(0.0, 127.0, note.pitchExact));
+                clip->setProperty(
+                    "width",
+                    juce::jlimit(
+                        0.0,
+                        100.0,
+                        juce::jmax(0.0, note.end - note.start) * 100.0 / duration));
+                clip->setProperty("color", clipColours[(i + 1) % std::size(clipColours)]);
+                trackClips.add(clip);
+            }
+            trackContent->setProperty("clips", trackClips);
+            backingTrackContents.add(trackContent);
+        }
+
+        juce::Array<juce::var> chords;
+        for (const auto& chord : document_.chords)
+        {
+            auto* item = new juce::DynamicObject();
+            item->setProperty("label", chord.name);
+            item->setProperty(
+                "width",
+                juce::jlimit(0.0, 100.0, (chord.end - chord.start) * 100.0 / duration));
+            chords.add(item);
+        }
+
+        juce::Array<juce::var> timeSignatures;
+        for (const auto& signature : document_.timeSignatures)
+        {
+            auto* item = new juce::DynamicObject();
+            const auto start = juce::jlimit(0.0, duration, signature.start);
+            item->setProperty("start", start);
+            item->setProperty("end", juce::jlimit(start, duration, signature.end));
+            item->setProperty("numerator", signature.numerator);
+            item->setProperty("denominator", signature.denominator);
+            timeSignatures.add(item);
+        }
+        if (timeSignatures.isEmpty())
+        {
+            auto* item = new juce::DynamicObject();
+            item->setProperty("start", 0.0);
+            item->setProperty("end", duration);
+            item->setProperty("numerator", 4);
+            item->setProperty("denominator", 4);
+            timeSignatures.add(item);
+        }
+
+        juce::Array<juce::var> tempoSegments;
+        for (const auto& tempo : document_.tempoSegments)
+        {
+            auto* item = new juce::DynamicObject();
+            const auto start = juce::jlimit(0.0, duration, tempo.start);
+            item->setProperty("start", start);
+            item->setProperty("end", juce::jlimit(start, duration, tempo.end));
+            item->setProperty("bpm", tempo.bpm);
+            tempoSegments.add(item);
+        }
+        if (tempoSegments.isEmpty())
+        {
+            auto* item = new juce::DynamicObject();
+            item->setProperty("start", 0.0);
+            item->setProperty("end", duration);
+            item->setProperty("bpm", document_.bpm);
+            tempoSegments.add(item);
+        }
+
+        const auto meter = document_.timeSignatures.empty()
+            ? juce::String("4 / 4")
+            : juce::String(document_.timeSignatures.front().numerator)
+                + " / "
+                + juce::String(document_.timeSignatures.front().denominator);
+
+        auto* cycleRange = new juce::DynamicObject();
+        cycleRange->setProperty("start", normalisedTimelinePosition(loopStartTime_));
+        cycleRange->setProperty(
+            "end",
+            loopEndTime_ > loopStartTime_
+                ? normalisedTimelinePosition(loopEndTime_)
+                : 25.0);
+
+        auto* project = new juce::DynamicObject();
+        project->setProperty("tempo", document_.bpm);
+        project->setProperty("meter", meter);
+        project->setProperty("hasInstrumental", document_.instrumentalFile.existsAsFile());
+        project->setProperty("hasVocal", document_.audioFile.existsAsFile());
+        project->setProperty("hasBackingAudio", document_.backingAudioFile.existsAsFile());
+        project->setProperty(
+            "instrumentalDurationSeconds",
+            instrumentalReaderSource_ != nullptr ? instrumentalTransport_.getLengthInSeconds() : 0.0);
+        project->setProperty(
+            "vocalDurationSeconds",
+            readerSource_ != nullptr ? transport_.getLengthInSeconds() : 0.0);
+        project->setProperty(
+            "backingAudioDurationSeconds",
+            backingAudioReaderSource_ != nullptr ? backingAudioTransport_.getLengthInSeconds() : 0.0);
+        project->setProperty("timelineStartSeconds", 0.0);
+        project->setProperty("timelineDurationSeconds", duration);
+        project->setProperty("initialPlayhead", normalisedTimelinePosition(currentTransportPosition()));
+        project->setProperty("initialVolume", masterVolume_.load() * 100.0f);
+        project->setProperty("initialLoopActive", cycleLoopActive_);
+        project->setProperty("initialCycleRange", cycleRange);
+        project->setProperty("backingTrackOptions", backingOptions);
+        project->setProperty("initialBackingTracks", backingTracks);
+        project->setProperty("initialTrackState", trackStates);
+        project->setProperty("initialTrackLayerState", trackLayerState);
+        project->setProperty("clips", clips);
+        project->setProperty("backingClips", backingClips);
+        project->setProperty("backingTrackContents", backingTrackContents);
+        project->setProperty(
+            "vocalWaveform",
+            makeWaveformState(vocalWaveform_, vocalPackedWaveform_));
+        project->setProperty(
+            "instrumentalWaveform",
+            makeWaveformState(instrumentalWaveform_, instrumentalPackedWaveform_));
+        project->setProperty(
+            "backingWaveform",
+            makeWaveformState(backingWaveform_, backingPackedWaveform_));
+        project->setProperty("chords", chords);
+        project->setProperty("timeSignatures", timeSignatures);
+        project->setProperty("tempoSegments", tempoSegments);
+
+        auto* event = new juce::DynamicObject();
+        event->setProperty("type", "project-state");
+        event->setProperty("project", project);
+        webView_.dispatch(event);
+    }
+
+    void handleProjectAction(const juce::String& action)
+    {
+        if (action == "open-audio")              chooseAudioFile();
+        else if (action == "open-instrumental") chooseInstrumentalFile();
+        else if (action == "open-project")      chooseProject();
+        else if (action == "save-project")      saveProject();
+        else if (action == "load-json")         chooseJsonFile();
+        else if (action == "load-lyrics")       chooseLyricsFile();
+        else if (action == "analyze")           runCombinedAnalysis();
+        else if (action == "ai-parts")          runAiPartsAnalysis();
+        else if (action == "generate-backing")  runBackingVocalGeneration();
+        else if (action == "render-backing")    runBackingAudioRender();
+        else if (action == "save")              saveProject();
+        else if (action == "undo")              undo();
+        else if (action == "redo")              redo();
+        else if (action == "export-all-tracks") exportAllTracks();
+        else if (action == "export-midi")       exportMidi();
+        else if (action == "validate")          updateValidationStatus();
+    }
+
+    void handleTransportCommand(const juce::String& action)
+    {
+        if (action == "return-to-start")
+        {
+            stopPlayback();
+            setTransportPosition(0.0);
+        }
+        else if (action == "play")
+        {
+            if (! isPlaybackRunning())
+                togglePlayback();
+        }
+        else if (action == "pause" || action == "stop")
+        {
+            if (isPlaybackRunning())
+                stopPlayback();
+        }
+
+        sendWebTransportState();
+    }
+
+    void handleWebCommand(const juce::var& command)
+    {
+        auto* root = command.getDynamicObject();
+        if (root == nullptr)
+            return;
+
+        const auto type = root->getProperty("type").toString();
+        if (type == "frontend-ready")
+        {
+            webFrontendReady_ = true;
+            sendWebProjectState();
+            sendWebStatus();
+            sendWebTransportState();
+            sendWebLoopState();
+            sendWebVolumeState();
+            return;
+        }
+
+        if (type == "project-action")
+        {
+            handleProjectAction(root->getProperty("action").toString());
+            return;
+        }
+
+        if (type == "transport")
+        {
+            handleTransportCommand(root->getProperty("action").toString());
+            return;
+        }
+
+        if (type == "set-playhead")
+        {
+            const auto position = juce::jlimit(
+                0.0,
+                100.0,
+                static_cast<double>(root->getProperty("position")));
+            stopPlayback();
+            setTransportPosition(position * timelineDuration() / 100.0);
+            sendWebTransportState();
+            return;
+        }
+
+        if (type == "set-loop")
+        {
+            auto* range = root->getProperty("range").getDynamicObject();
+            if (range == nullptr)
+                return;
+
+            const auto start = juce::jlimit(
+                0.0,
+                100.0,
+                static_cast<double>(range->getProperty("start")));
+            const auto end = juce::jlimit(
+                start,
+                100.0,
+                static_cast<double>(range->getProperty("end")));
+            loopStartTime_ = start * timelineDuration() / 100.0;
+            loopEndTime_ = end * timelineDuration() / 100.0;
+            cycleLoopActive_ = static_cast<bool>(root->getProperty("active"));
+            sendWebLoopState();
+            return;
+        }
+
+        if (type == "set-volume")
+        {
+            const auto value = juce::jlimit(
+                0.0,
+                100.0,
+                static_cast<double>(root->getProperty("value")));
+            masterVolume_.store(static_cast<float>(value / 100.0));
+            sendWebVolumeState();
+            return;
+        }
+
+        if (type == "set-track-state")
+        {
+            const auto track = root->getProperty("track").toString();
+            auto* state = root->getProperty("state").getDynamicObject();
+            if (state == nullptr)
+                return;
+
+            const auto muted = static_cast<bool>(state->getProperty("mute"));
+            const auto soloed = static_cast<bool>(state->getProperty("solo"));
+            if (track == "Instrumental")
+            {
+                instrumentalMuted_.store(muted);
+                instrumentalSolo_.store(soloed);
+            }
+            else if (track == "Voice Main")
+            {
+                leadMuted_.store(muted);
+                leadSolo_.store(soloed);
+            }
+            else
+            {
+                const auto index = backingStyleIndex({}, track);
+                if (index < 0 || index >= static_cast<int>(kMaxBackingTracks))
+                    return;
+                backingTrackMuted_[static_cast<size_t>(index)].store(
+                    muted,
+                    std::memory_order_relaxed);
+                backingTrackSoloed_[static_cast<size_t>(index)].store(
+                    soloed,
+                    std::memory_order_relaxed);
+                if (track == document_.backingStyleName)
+                {
+                    backingMuted_.store(muted);
+                    backingSolo_.store(soloed);
+                }
+            }
+            sendWebTrackState(track, muted, soloed);
+            return;
+        }
+
+        if (type == "set-track-layer-state")
+        {
+            const auto track = root->getProperty("track").toString();
+            auto* state = root->getProperty("state").getDynamicObject();
+            if (state == nullptr)
+                return;
+
+            const auto audioMuted = static_cast<bool>(state->getProperty("audioMuted"));
+            const auto notesMuted = static_cast<bool>(state->getProperty("notesMuted"));
+            if (track == "Voice Main")
+            {
+                leadAudioMuted_.store(audioMuted);
+                leadNotesMuted_.store(notesMuted);
+            }
+            else if (track != "Instrumental")
+            {
+                const auto index = backingStyleIndex({}, track);
+                if (index < 0 || index >= static_cast<int>(kMaxBackingTracks))
+                    return;
+                backingTrackAudioMuted_[static_cast<size_t>(index)].store(
+                    audioMuted,
+                    std::memory_order_relaxed);
+                backingTrackNotesMuted_[static_cast<size_t>(index)].store(
+                    notesMuted,
+                    std::memory_order_relaxed);
+                if (track == document_.backingStyleName)
+                {
+                    backingAudioMuted_.store(audioMuted);
+                    backingNotesMuted_.store(notesMuted);
+                }
+            }
+            else
+                return;
+
+            sendWebTrackLayerState(track, audioMuted, notesMuted);
+            return;
+        }
+
+        if (type == "select-tracks")
+        {
+            auto* tracks = root->getProperty("tracks").getArray();
+            if (tracks != nullptr && tracks->size() == 1)
+            {
+                const auto track = tracks->getFirst().toString();
+                if (track != "Instrumental" && track != "Voice Main")
+                    selectBackingTrackForEditing(track);
+            }
+            return;
+        }
+
+        if (type == "add-backing-track" || type == "regenerate-backing-track")
+        {
+            const auto requestedTrack = root->getProperty("track").toString();
+            for (size_t i = 0; i < kBackingStyles.size(); ++i)
+            {
+                if (requestedTrack == kBackingStyles[i].name)
+                {
+                    backingStyleBox_.setSelectedId(
+                        static_cast<int>(i) + 1,
+                        juce::dontSendNotification);
+                    runBackingVocalGeneration();
+                    break;
+                }
+            }
+            return;
+        }
+
+        if (type == "render-backing-track")
+        {
+            const auto requestedTrack = root->getProperty("track").toString();
+            auto* backingTrack = findBackingTrack({}, requestedTrack);
+            if (backingTrack == nullptr)
+            {
+                setStatus("Could not render backing vocal: track not found.");
+                return;
+            }
+
+            makeBackingTrackActive(*backingTrack);
+            clearBackingAudioTrack();
+            updatePlaybackNotes();
+            runBackingAudioRender();
+            return;
+        }
+
+        if (type == "set-clip-pitch")
+        {
+            const auto clipId = root->getProperty("clipId").toString();
+            const auto pitch = juce::jlimit(
+                0.0,
+                127.0,
+                static_cast<double>(root->getProperty("pitch")));
+            const auto index = document_.findNoteIndex(clipId);
+            if (! index)
+                return;
+
+            beginUndoableAction();
+            auto& note = document_.notes[static_cast<size_t>(*index)];
+            const auto pitchDelta = pitch - note.pitchExact;
+            note.pitchExact = pitch;
+            note.pitch = juce::jlimit(0, 127, static_cast<int>(std::lround(pitch)));
+            for (auto& point : note.curve)
+                point.midi = juce::jlimit(0.0, 127.0, point.midi + pitchDelta);
+            markChanged();
+
+            auto* event = new juce::DynamicObject();
+            event->setProperty("type", "clip-pitch-state");
+            event->setProperty("clipId", clipId);
+            event->setProperty("pitch", pitch);
+            webView_.dispatch(event);
+        }
+    }
+
     void resetHistory()
     {
         undoStack_.clear();
@@ -1184,7 +2510,7 @@ private:
     {
         auto& state = noteStates_[static_cast<size_t>(writeNoteStateIndex_)];
         state.count = 0;
-        const auto addNote = [&state](const NoteBlock& note, bool isBacking)
+        const auto addNote = [&state](const NoteBlock& note, int backingTrackIndex)
         {
             if (note.end <= note.start || state.count >= kMaxPlaybackNotes)
                 return;
@@ -1193,7 +2519,8 @@ private:
             playbackNote.start = note.start;
             playbackNote.end = note.end;
             playbackNote.frequency = midiNoteToFrequency(note.pitchExact);
-            playbackNote.isBacking = isBacking;
+            playbackNote.isBacking = backingTrackIndex >= 0;
+            playbackNote.backingTrackIndex = backingTrackIndex;
             playbackNote.legatoFromPrevious = note.flags.contains("legato_from_previous");
             playbackNote.legatoToNext = note.flags.contains("legato_to_next");
             playbackNote.curveCount = 0;
@@ -1231,9 +2558,24 @@ private:
         };
 
         for (const auto& note : document_.notes)
-            addNote(note, false);
-        for (const auto& note : document_.backingNotes)
-            addNote(note, true);
+            addNote(note, -1);
+        if (! document_.backingTracks.empty())
+        {
+            for (const auto& track : document_.backingTracks)
+            {
+                const auto trackIndex = backingStyleIndex(track.styleId, track.styleName);
+                for (const auto& note : track.notes)
+                    addNote(note, trackIndex);
+            }
+        }
+        else
+        {
+            const auto trackIndex = backingStyleIndex(
+                document_.backingStyleId,
+                document_.backingStyleName);
+            for (const auto& note : document_.backingNotes)
+                addNote(note, trackIndex);
+        }
         std::sort(state.notes.begin(),
                   state.notes.begin() + state.count,
                   [](const auto& a, const auto& b) { return a.start < b.start; });
@@ -1255,15 +2597,26 @@ private:
         leadSolo_.store(leadSolo);
         backingMuted_.store(backingMuted);
         backingSolo_.store(backingSolo);
+        const auto activeIndex = activeBackingTrackIndex_.load(std::memory_order_relaxed);
+        if (activeIndex >= 0 && activeIndex < static_cast<int>(kMaxBackingTracks))
+        {
+            backingTrackMuted_[static_cast<size_t>(activeIndex)].store(
+                backingMuted,
+                std::memory_order_relaxed);
+            backingTrackSoloed_[static_cast<size_t>(activeIndex)].store(
+                backingSolo,
+                std::memory_order_relaxed);
+        }
+        sendWebTrackState("Instrumental", instrumentalMuted, instrumentalSolo);
+        sendWebTrackState("Voice Main", leadMuted, leadSolo);
+        if (document_.backingStyleName.isNotEmpty())
+            sendWebTrackState(document_.backingStyleName, backingMuted, backingSolo);
     }
 
     void playheadPositionRequested(double seconds) override
     {
-        const auto clamped = juce::jlimit(0.0, juce::jmax(0.0, document_.duration), seconds);
-        transport_.setPosition(clamped);
-        instrumentalTransport_.setPosition(clamped);
-        backingAudioTransport_.setPosition(clamped);
-        editor_.setPlayheadTime(clamped);
+        setTransportPosition(seconds);
+        sendWebTransportState();
     }
 
     void beginUndoableAction() override
@@ -1314,6 +2667,9 @@ private:
         undoButton_.setEnabled(! undoStack_.empty());
         redoButton_.setEnabled(! redoStack_.empty());
         dirty_ = true;
+        activeBackingTrackIndex_.store(
+            backingStyleIndex(document_.backingStyleId, document_.backingStyleName),
+            std::memory_order_relaxed);
         editor_.clearSelection();
         if (document_.audioFile.existsAsFile())
             editor_.setAudioFile(document_.audioFile);
@@ -1337,6 +2693,7 @@ private:
         {
             clearInstrumentalTrack();
         }
+        refreshWaveformData();
         updatePlaybackNotes();
         syncInspector();
         setStatus("History restored.");
@@ -1355,7 +2712,8 @@ private:
         backingAudioTransport_.stop();
         backingAudioTransport_.setSource(nullptr);
         backingAudioReaderSource_.reset();
-        backingAudioAvailable_.store(false);
+        backingAudioTransportFile_ = juce::File();
+        requestWaveformData(WaveformTrack::backing, {});
         editor_.setBackingAudioFile({});
     }
 
@@ -1417,7 +2775,7 @@ private:
             backingAudioTransport_.stop();
             backingAudioTransport_.setSource(nullptr);
             backingAudioReaderSource_.reset();
-            backingAudioAvailable_.store(false);
+            backingAudioTransportFile_ = juce::File();
             deviceManager.restartLastAudioDevice();
             return;
         }
@@ -1430,7 +2788,7 @@ private:
         backingAudioTransport_.setSource(nullptr);
         backingAudioReaderSource_ = std::move(nextReaderSource);
         backingAudioTransport_.setSource(backingAudioReaderSource_.get(), 0, nullptr, sampleRate);
-        backingAudioAvailable_.store(true);
+        backingAudioTransportFile_ = file;
         deviceManager.restartLastAudioDevice();
     }
 
@@ -1520,27 +2878,22 @@ private:
 
     void timerCallback() override
     {
-        const auto transportPosition = readerSource_ != nullptr ? transport_.getCurrentPosition() : instrumentalTransport_.getCurrentPosition();
+        const auto transportPosition = currentTransportPosition();
         const auto playhead = juce::jlimit(0.0, juce::jmax(0.0, document_.duration), transportPosition);
         editor_.setPlayheadTime(playhead);
 
-        if (transport_.isPlaying() && loopAuditionActive_)
+        if (isPlaybackRunning() && (loopAuditionActive_ || cycleLoopActive_))
         {
             if (playhead >= loopEndTime_ - 0.004)
-            {
-                transport_.setPosition(loopStartTime_);
-                instrumentalTransport_.setPosition(loopStartTime_);
-                backingAudioTransport_.setPosition(loopStartTime_);
-            }
+                setTransportPosition(loopStartTime_);
         }
-        else if (transport_.isPlaying() && document_.duration > 0.0 && playhead >= document_.duration - 0.005)
+        else if (isPlaybackRunning() && document_.duration > 0.0 && playhead >= document_.duration - 0.005)
         {
-            transport_.stop();
-            instrumentalTransport_.stop();
-            backingAudioTransport_.stop();
-            playButton_.setButtonText("Play");
+            stopPlayback();
         }
 
+        sendWebTransportState();
+        sendWebOutputMeterState();
         maybeAutosave();
     }
 
@@ -1568,6 +2921,12 @@ private:
 
     void chooseAudioFile()
     {
+        if (! document_.instrumentalFile.existsAsFile())
+        {
+            setStatus("Open instrumental before selecting vocal audio.");
+            return;
+        }
+
         chooser_ = std::make_unique<juce::FileChooser>("Open vocal audio", juce::File(), "*.wav;*.aiff;*.aif;*.flac");
         chooser_->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
                               [this](const juce::FileChooser& chooser)
@@ -1597,9 +2956,81 @@ private:
                               [this](const juce::FileChooser& chooser)
                               {
                                   const auto file = chooser.getResult();
-                                  if (file.existsAsFile())
-                                      loadJson(file);
+                                  if (file.existsAsFile() && loadJson(file))
+                                  {
+                                      projectDirectory_ = isProjectManifest(file)
+                                          ? file.getParentDirectory()
+                                          : juce::File();
+                                  }
                               });
+    }
+
+    static bool isProjectManifest(const juce::File& file)
+    {
+        const auto name = file.getFileName();
+        return name.equalsIgnoreCase("project.synthetic-obsidian.json")
+            || name.endsWithIgnoreCase(".synthetic-obsidian.json");
+    }
+
+    static juce::File findProjectManifest(const juce::File& directory)
+    {
+        const auto canonicalManifest = directory.getChildFile("project.synthetic-obsidian.json");
+        if (canonicalManifest.existsAsFile())
+            return canonicalManifest;
+
+        juce::Array<juce::File> candidates;
+        directory.findChildFiles(candidates, juce::File::findFiles, false, "*.json");
+
+        for (const auto& candidate : candidates)
+            if (isProjectManifest(candidate))
+                return candidate;
+
+        for (const auto& candidate : candidates)
+            if (! candidate.getFileName().containsIgnoreCase(".autosave."))
+                return candidate;
+
+        return {};
+    }
+
+    void chooseProject()
+    {
+        if (projectSaveRunning_)
+        {
+            setStatus("Wait for the current project save to finish.");
+            return;
+        }
+
+        const auto initialLocation = projectDirectory_.isDirectory()
+            ? projectDirectory_
+            : juce::File::getSpecialLocation(juce::File::userDocumentsDirectory);
+        chooser_ = std::make_unique<juce::FileChooser>(
+            "Open Synthetic Obsidian project",
+            initialLocation,
+            "*.json");
+        chooser_->launchAsync(
+            juce::FileBrowserComponent::openMode
+                | juce::FileBrowserComponent::canSelectFiles
+                | juce::FileBrowserComponent::canSelectDirectories,
+            [this](const juce::FileChooser& chooser)
+            {
+                const auto selected = chooser.getResult();
+                const auto manifest = selected.isDirectory()
+                    ? findProjectManifest(selected)
+                    : selected;
+                if (! manifest.existsAsFile())
+                {
+                    if (selected != juce::File())
+                        setStatus("The selected folder does not contain a project manifest.");
+                    return;
+                }
+
+                if (loadJson(manifest))
+                {
+                    projectDirectory_ = manifest.getParentDirectory();
+                    currentJsonFile_ = manifest;
+                    setStatus("Opened project: " + projectDirectory_.getFileName() + ".");
+                }
+            });
     }
 
     void chooseLyricsFile()
@@ -1629,7 +3060,10 @@ private:
         auto previousChords = std::move(document_.chords);
 
         document_.clear();
+        resetBackingTrackControls();
         document_.audioFile = file;
+        leadAudioMuted_.store(false);
+        leadNotesMuted_.store(false);
         document_.instrumentalFile = previousInstrumentalFile;
         document_.tempoSegments = std::move(previousTempoSegments);
         document_.timeSignatures = std::move(previousTimeSignatures);
@@ -1651,11 +3085,13 @@ private:
         editor_.setAudioFile(file);
         if (document_.instrumentalFile.existsAsFile())
             editor_.setInstrumentalFile(document_.instrumentalFile);
+        refreshWaveformData();
         updatePlaybackNotes();
         syncInspector();
         markChanged();
         resetHistory();
-        setStatus("Loaded audio. Run AI Parts or Analyze to create annotation.");
+        setStatus("Loaded vocal track: " + file.getFileName() + ". Starting analysis...");
+        runCombinedAnalysis();
     }
 
     void loadInstrumental(const juce::File& file)
@@ -1678,12 +3114,15 @@ private:
         document_.backingNotes.clear();
         document_.backingStyleId.clear();
         document_.backingStyleName.clear();
+        document_.backingTracks.clear();
         document_.backingAudioFile = juce::File();
+        resetBackingTrackControls();
         clearBackingAudioTrack();
         editor_.setInstrumentalFile(file);
         if (! document_.audioFile.existsAsFile())
             editor_.fitToClip();
         configureInstrumentalTransportForFile(file);
+        refreshWaveformData();
         markChanged();
         setStatus("Loaded instrumental track: " + file.getFileName());
         runMusicalContextAnalysis();
@@ -2857,6 +4296,8 @@ private:
             document_.backingNotes.clear();
             document_.backingStyleId.clear();
             document_.backingStyleName.clear();
+            document_.backingTracks.clear();
+            resetBackingTrackControls();
         }
     }
 
@@ -3049,17 +4490,29 @@ private:
         markChanged();
         syncInspector();
         editor_.repaint();
+        const auto& signature = document_.timeSignatures.front();
         setStatus("Detected " + juce::String(static_cast<int>(document_.tempoSegments.size()))
             + " tempo segment"
             + (document_.tempoSegments.size() == 1 ? ", " : "s, ")
+            + juce::String(signature.numerator)
+            + "/"
+            + juce::String(signature.denominator)
+            + " signature, "
             + juce::String(static_cast<int>(document_.chords.size()))
             + " chord"
             + (document_.chords.size() == 1 ? "." : "s."));
     }
 
+    void finishBackingVocalGeneration()
+    {
+        backingGenerationRunning_ = false;
+        backingGenerationTrackName_.clear();
+        addBackingVocalButton_.setEnabled(true);
+    }
+
     void runBackingVocalGeneration()
     {
-        if (backingGenerationRunning_)
+        if (backingGenerationRunning_ || backingAudioRenderRunning_)
             return;
 
         if (document_.notes.empty())
@@ -3193,18 +4646,24 @@ private:
             return;
         }
 
-        backingGenerationRunning_ = true;
-        addBackingVocalButton_.setEnabled(false);
-        const auto expectedRevision = documentRevision_;
         const juce::String styleId(style->id);
         const juce::String styleName(style->name);
+        backingGenerationRunning_ = true;
+        backingGenerationTrackName_ = styleName;
+        addBackingVocalButton_.setEnabled(false);
         beginUndoableAction();
-        document_.backingNotes.clear();
-        document_.backingStyleId = styleId;
-        document_.backingStyleName = styleName;
-        document_.backingAudioFile = juce::File();
+        auto* backingTrack = findBackingTrack(styleId, styleName);
+        if (backingTrack == nullptr)
+        {
+            document_.backingTracks.push_back({ styleId, styleName, {}, {} });
+            backingTrack = &document_.backingTracks.back();
+        }
+        backingTrack->notes.clear();
+        backingTrack->audioFile = juce::File();
+        makeBackingTrackActive(*backingTrack);
         clearBackingAudioTrack();
-        updatePlaybackNotes();
+        markChanged();
+        const auto expectedRevision = documentRevision_;
         editor_.repaint();
         auto generationStatus = "Generating backing vocal MIDI: " + styleName
             + " from " + juce::String(leadNotes.size()) + " lead notes";
@@ -3294,8 +4753,7 @@ private:
 
         if (type == "error")
         {
-            backingGenerationRunning_ = false;
-            addBackingVocalButton_.setEnabled(true);
+            finishBackingVocalGeneration();
             setStatus("Backing vocal generation failed: " + root->getProperty("message").toString());
             return;
         }
@@ -3324,8 +4782,7 @@ private:
         {
             if (type == "done")
             {
-                backingGenerationRunning_ = false;
-                addBackingVocalButton_.setEnabled(true);
+                finishBackingVocalGeneration();
                 setStatus("Discarded backing vocal result because the source annotation changed during generation.");
             }
             return;
@@ -3337,17 +4794,36 @@ private:
         {
             if (type == "done")
             {
-                backingGenerationRunning_ = false;
-                addBackingVocalButton_.setEnabled(true);
+                finishBackingVocalGeneration();
                 setStatus(parseError.isNotEmpty() ? parseError : "Backing vocal model returned no notes.");
             }
             return;
         }
 
-        document_.backingNotes = std::move(generatedNotes);
-        document_.backingStyleId = styleId;
-        document_.backingStyleName = styleName;
-        document_.backingAudioFile = juce::File();
+        auto* backingTrack = findBackingTrack(styleId, styleName);
+        if (backingTrack == nullptr)
+        {
+            finishBackingVocalGeneration();
+            setStatus("Discarded backing vocal result because its target track no longer exists.");
+            return;
+        }
+
+        backingTrack->notes = std::move(generatedNotes);
+        backingTrack->audioFile = juce::File();
+        makeBackingTrackActive(*backingTrack);
+        backingAudioMuted_.store(false);
+        backingNotesMuted_.store(false);
+        const auto generatedTrackIndex = backingStyleIndex(styleId, styleName);
+        if (generatedTrackIndex >= 0
+            && generatedTrackIndex < static_cast<int>(kMaxBackingTracks))
+        {
+            backingTrackAudioMuted_[static_cast<size_t>(generatedTrackIndex)].store(
+                false,
+                std::memory_order_relaxed);
+            backingTrackNotesMuted_[static_cast<size_t>(generatedTrackIndex)].store(
+                false,
+                std::memory_order_relaxed);
+        }
         updatePlaybackNotes();
         updateInfoText();
         editor_.repaint();
@@ -3356,6 +4832,7 @@ private:
         const auto windowCount = static_cast<int>(root->getProperty("window_count"));
         if (type == "window")
         {
+            sendWebProjectState();
             setStatus("Generated backing vocal window "
                 + juce::String(windowIndex)
                 + "/"
@@ -3368,18 +4845,14 @@ private:
             return;
         }
 
-        backingGenerationRunning_ = false;
-        addBackingVocalButton_.setEnabled(true);
+        finishBackingVocalGeneration();
         markChanged();
 
         auto status = "Generated " + juce::String(static_cast<int>(document_.backingNotes.size()))
             + " backing vocal MIDI notes: " + styleName + ".";
         const auto debugDslPath = payloadRoot->getProperty("debug_dsl_path").toString();
         if (debugDslPath.isNotEmpty())
-        {
             status += " Debug DSL: " + debugDslPath;
-            openBackingDebugDslPlayer();
-        }
         setStatus(status);
     }
 
@@ -3447,8 +4920,7 @@ private:
         if (expectedRevision != documentRevision_)
             return;
 
-        backingGenerationRunning_ = false;
-        addBackingVocalButton_.setEnabled(true);
+        finishBackingVocalGeneration();
         setStatus("Backing vocal worker timed out while generating: " + styleName + ".");
     }
 
@@ -3572,9 +5044,16 @@ private:
         }
     }
 
+    void finishBackingAudioRender()
+    {
+        backingAudioRenderRunning_ = false;
+        backingAudioRenderTrackName_.clear();
+        renderBackingAudioButton_.setEnabled(true);
+    }
+
     void runBackingAudioRender()
     {
-        if (backingAudioRenderRunning_)
+        if (backingAudioRenderRunning_ || backingGenerationRunning_)
             return;
 
         if (! document_.audioFile.existsAsFile())
@@ -3654,8 +5133,11 @@ private:
         }
 
         backingAudioRenderRunning_ = true;
+        backingAudioRenderTrackName_ = document_.backingStyleName;
         renderBackingAudioButton_.setEnabled(false);
-        setStatus("Rendering backing vocal audio with SoulX-Singer-SVC...");
+        setStatus("Rendering backing vocal audio with SoulX-Singer-SVC: "
+            + backingAudioRenderTrackName_
+            + "...");
 
         juce::WeakReference<MainComponent> safeThis(this);
         const auto expectedRevision = documentRevision_;
@@ -3767,8 +5249,8 @@ private:
                                  const juce::File& outputFile,
                                  unsigned int expectedRevision)
     {
-        backingAudioRenderRunning_ = false;
-        renderBackingAudioButton_.setEnabled(true);
+        const auto renderedTrackName = backingAudioRenderTrackName_;
+        finishBackingAudioRender();
 
         if (error.isNotEmpty())
         {
@@ -3785,10 +5267,28 @@ private:
         if (expectedRevision != documentRevision_)
             setStatus("Applied rendered backing audio to the current document; source annotation changed during render.");
 
+        auto* backingTrack = findBackingTrack({}, renderedTrackName);
+        if (backingTrack == nullptr)
+        {
+            setStatus("Discarded rendered backing audio because its target track no longer exists.");
+            return;
+        }
+
         beginUndoableAction();
-        document_.backingAudioFile = outputFile;
+        backingTrack->audioFile = outputFile;
+        makeBackingTrackActive(*backingTrack);
+        backingAudioMuted_.store(false);
+        const auto renderedTrackIndex = activeBackingTrackIndex_.load(std::memory_order_relaxed);
+        if (renderedTrackIndex >= 0
+            && renderedTrackIndex < static_cast<int>(kMaxBackingTracks))
+        {
+            backingTrackAudioMuted_[static_cast<size_t>(renderedTrackIndex)].store(
+                false,
+                std::memory_order_relaxed);
+        }
         editor_.setBackingAudioFile(outputFile);
         configureBackingAudioTransportForFile(outputFile);
+        requestWaveformData(WaveformTrack::backing, outputFile);
         markChanged();
         updateInfoText();
 
@@ -3798,7 +5298,10 @@ private:
         if (jsonStart >= 0 && jsonEnd > jsonStart)
             jsonText = jsonText.substring(jsonStart, jsonEnd + 1);
 
-        auto status = "Rendered backing vocal audio: " + outputFile.getFileName();
+        auto status = "Rendered backing vocal audio for "
+            + renderedTrackName
+            + ": "
+            + outputFile.getFileName();
         if (auto parsed = juce::JSON::parse(jsonText); parsed.isObject())
             if (auto* root = parsed.getDynamicObject())
                 status << " (" << root->getProperty("engine").toString() << ").";
@@ -4290,6 +5793,7 @@ private:
             document_.backingNotes.clear();
             document_.backingStyleId.clear();
             document_.backingStyleName.clear();
+            document_.backingTracks.clear();
             rebuildPyinNotesAroundBoundaries(pyinNotes);
             if (document_.notes.empty())
                 document_.notes = std::move(pyinNotes);
@@ -4301,6 +5805,7 @@ private:
             document_.backingNotes.clear();
             document_.backingStyleId.clear();
             document_.backingStyleName.clear();
+            document_.backingTracks.clear();
             document_.boundaries.erase(
                 std::remove_if(document_.boundaries.begin(), document_.boundaries.end(),
                                [](const auto& boundary)
@@ -4319,6 +5824,7 @@ private:
                 document_.boundaries.push_back(std::move(boundary));
             }
         }
+        resetBackingTrackControls();
 
         for (const auto& note : document_.notes)
         {
@@ -4329,6 +5835,7 @@ private:
         std::sort(document_.boundaries.begin(), document_.boundaries.end(), [](const auto& a, const auto& b) { return a.time < b.time; });
         std::sort(document_.notes.begin(), document_.notes.end(), [](const auto& a, const auto& b) { return a.start < b.start; });
 
+        leadNotesMuted_.store(false);
         editor_.fitToClip();
         updatePlaybackNotes();
         markChanged();
@@ -4494,17 +6001,26 @@ private:
         setStatus("Recalculated " + juce::String(changed) + " note pitch" + (changed == 1 ? "." : "es."));
     }
 
-    void loadJson(const juce::File& file)
+    bool loadJson(const juce::File& file)
     {
         const auto result = AnnotationJson::load(file, document_);
         if (result.failed())
         {
             setStatus(resultMessage("Load JSON", result));
-            return;
+            return false;
         }
 
         ++documentRevision_;
         currentJsonFile_ = file;
+        dirty_ = false;
+        leadAudioMuted_.store(false);
+        leadNotesMuted_.store(false);
+        backingAudioMuted_.store(false);
+        backingNotesMuted_.store(false);
+        resetBackingTrackControls();
+        activeBackingTrackIndex_.store(
+            backingStyleIndex(document_.backingStyleId, document_.backingStyleName),
+            std::memory_order_relaxed);
         if (document_.audioFile.existsAsFile())
         {
             editor_.setAudioFile(document_.audioFile);
@@ -4528,34 +6044,442 @@ private:
         {
             clearBackingAudioTrack();
         }
+        refreshWaveformData();
         updatePlaybackNotes();
         syncInspector();
         resetHistory();
         updateValidationStatus();
+        return true;
     }
 
-    void saveJson()
+    static juce::Result copyProjectAsset(
+        const juce::File& source,
+        const juce::File& directory,
+        const juce::String& stem,
+        juce::File& copiedFile)
     {
-        if (! currentJsonFile_.existsAsFile() && currentJsonFile_ == juce::File())
+        copiedFile = juce::File();
+        if (! source.existsAsFile())
+            return juce::Result::ok();
+
+        if (const auto result = directory.createDirectory(); result.failed())
+            return result;
+
+        auto extension = source.getFileExtension();
+        if (extension.isEmpty())
+            extension = ".wav";
+        const auto legalStem = juce::File::createLegalFileName(
+            stem.isNotEmpty() ? stem : "audio");
+        const auto target = directory.getChildFile(legalStem + extension);
+        if (source == target)
         {
-            if (document_.audioFile.existsAsFile())
-                currentJsonFile_ = document_.audioFile.withFileExtension(".annotation.json");
-            else
-                currentJsonFile_ = juce::File::getSpecialLocation(juce::File::userDocumentsDirectory).getChildFile("annotation.json");
+            copiedFile = target;
+            return juce::Result::ok();
         }
 
-        const auto result = AnnotationJson::save(document_, currentJsonFile_);
-        dirty_ = result.failed();
-        setStatus(resultMessage("Save JSON", result));
+        if (target.existsAsFile() && ! target.deleteFile())
+            return juce::Result::fail("Could not replace " + target.getFileName() + ".");
+        if (! source.copyFileTo(target))
+            return juce::Result::fail("Could not copy " + source.getFileName() + ".");
+
+        copiedFile = target;
+        return juce::Result::ok();
+    }
+
+    static juce::Result consolidateProject(
+        const AnnotationDocument& source,
+        const juce::File& projectDirectory,
+        AnnotationDocument& consolidated)
+    {
+        if (projectDirectory.existsAsFile())
+            return juce::Result::fail("The project path points to a file.");
+        if (const auto result = projectDirectory.createDirectory(); result.failed())
+            return result;
+
+        const auto audioDirectory = projectDirectory.getChildFile("artifacts").getChildFile("audio");
+        const auto backingDirectory = audioDirectory.getChildFile("backing");
+        consolidated = source;
+        consolidated.audioFile = juce::File();
+        consolidated.instrumentalFile = juce::File();
+        consolidated.backingAudioFile = juce::File();
+
+        if (const auto result = copyProjectAsset(
+                source.audioFile,
+                audioDirectory,
+                "voice_main",
+                consolidated.audioFile);
+            result.failed())
+        {
+            return result;
+        }
+        if (const auto result = copyProjectAsset(
+                source.instrumentalFile,
+                audioDirectory,
+                "instrumental",
+                consolidated.instrumentalFile);
+            result.failed())
+        {
+            return result;
+        }
+
+        for (size_t index = 0; index < source.backingTracks.size(); ++index)
+        {
+            const auto& sourceTrack = source.backingTracks[index];
+            auto& consolidatedTrack = consolidated.backingTracks[index];
+            const auto trackName = sourceTrack.styleName.isNotEmpty()
+                ? sourceTrack.styleName
+                : (sourceTrack.styleId.isNotEmpty() ? sourceTrack.styleId : "backing_vocal");
+            const auto stem = "backing_"
+                + juce::String(static_cast<int>(index) + 1).paddedLeft('0', 2)
+                + "_"
+                + trackName;
+
+            if (const auto result = copyProjectAsset(
+                    sourceTrack.audioFile,
+                    backingDirectory,
+                    stem,
+                    consolidatedTrack.audioFile);
+                result.failed())
+            {
+                return result;
+            }
+
+            if (source.backingAudioFile.existsAsFile()
+                && source.backingAudioFile == sourceTrack.audioFile)
+            {
+                consolidated.backingAudioFile = consolidatedTrack.audioFile;
+            }
+        }
+
+        if (source.backingAudioFile.existsAsFile()
+            && ! consolidated.backingAudioFile.existsAsFile())
+        {
+            if (const auto result = copyProjectAsset(
+                    source.backingAudioFile,
+                    backingDirectory,
+                    "active_backing_vocal",
+                    consolidated.backingAudioFile);
+                result.failed())
+            {
+                return result;
+            }
+        }
+
+        return AnnotationJson::save(
+            consolidated,
+            projectDirectory.getChildFile("project.synthetic-obsidian.json"));
+    }
+
+    bool projectHasBackgroundWork() const
+    {
+        return analysisRunning_
+            || aiPartsAnalysisRunning_
+            || musicalContextAnalysisRunning_
+            || backingGenerationRunning_
+            || backingAudioRenderRunning_
+            || lyricsAlignmentRunning_
+            || noteRecalculationRunning_;
+    }
+
+    void beginProjectSave(const juce::File& directory)
+    {
+        if (projectSaveRunning_)
+            return;
+
+        projectSaveRunning_ = true;
+        setStatus("Consolidating project files...");
+        const auto snapshot = document_;
+        const auto expectedRevision = documentRevision_;
+        juce::WeakReference<MainComponent> safeThis(this);
+
+        juce::Thread::launch([safeThis, snapshot, expectedRevision, directory]
+        {
+            auto consolidated = std::make_shared<AnnotationDocument>();
+            const auto result = consolidateProject(snapshot, directory, *consolidated);
+            juce::MessageManager::callAsync(
+                [safeThis, consolidated, expectedRevision, directory, result]
+                {
+                    if (safeThis == nullptr)
+                        return;
+
+                    safeThis->projectSaveRunning_ = false;
+                    if (result.failed())
+                    {
+                        safeThis->setStatus(resultMessage("Save project", result));
+                        return;
+                    }
+
+                    safeThis->projectDirectory_ = directory;
+                    safeThis->currentJsonFile_ =
+                        directory.getChildFile("project.synthetic-obsidian.json");
+                    if (safeThis->documentRevision_ == expectedRevision)
+                    {
+                        safeThis->document_ = *consolidated;
+                        safeThis->dirty_ = false;
+                        safeThis->refreshWaveformData();
+                        safeThis->updateInfoText();
+                        safeThis->setStatus(
+                            "Saved consolidated project to "
+                            + directory.getFullPathName()
+                            + ".");
+                    }
+                    else
+                    {
+                        safeThis->dirty_ = true;
+                        safeThis->updateInfoText();
+                        safeThis->setStatus(
+                            "Saved a project snapshot, but the project changed during save. Save again to include the latest changes.");
+                    }
+                });
+        });
+    }
+
+    void chooseProjectSaveLocation()
+    {
+        auto projectName = document_.audioFile.existsAsFile()
+            ? document_.audioFile.getFileNameWithoutExtension()
+            : document_.instrumentalFile.getFileNameWithoutExtension();
+        if (projectName.isEmpty())
+            projectName = "Synthetic Obsidian Project";
+        projectName = juce::File::createLegalFileName(projectName);
+
+        const auto initialLocation =
+            juce::File::getSpecialLocation(juce::File::userDocumentsDirectory)
+                .getChildFile(projectName);
+        chooser_ = std::make_unique<juce::FileChooser>(
+            "Save Synthetic Obsidian project",
+            initialLocation,
+            juce::String());
+        chooser_->launchAsync(
+            juce::FileBrowserComponent::saveMode
+                | juce::FileBrowserComponent::canSelectFiles
+                | juce::FileBrowserComponent::warnAboutOverwriting,
+            [this](const juce::FileChooser& chooser)
+            {
+                auto directory = chooser.getResult();
+                if (directory == juce::File())
+                    return;
+                if (directory.hasFileExtension(".json"))
+                {
+                    directory = directory.getParentDirectory().getChildFile(
+                        directory.getFileNameWithoutExtension());
+                }
+                if (directory.existsAsFile())
+                {
+                    setStatus("Choose a folder name rather than an existing file.");
+                    return;
+                }
+
+                beginProjectSave(directory);
+            });
+    }
+
+    void saveProject()
+    {
+        if (projectSaveRunning_)
+        {
+            setStatus("Project save is already running.");
+            return;
+        }
+        if (projectHasBackgroundWork())
+        {
+            setStatus("Wait for analysis, generation, or rendering to finish before saving the project.");
+            return;
+        }
+
+        if (projectDirectory_.isDirectory())
+            beginProjectSave(projectDirectory_);
+        else
+            chooseProjectSaveLocation();
+    }
+
+    juce::File exportDirectory() const
+    {
+        if (projectDirectory_.isDirectory())
+            return projectDirectory_.getChildFile("exports");
+
+        auto baseFile = currentJsonFile_ != juce::File()
+            ? currentJsonFile_
+            : document_.audioFile;
+        if (baseFile == juce::File())
+        {
+            baseFile = juce::File::getSpecialLocation(
+                juce::File::userDocumentsDirectory).getChildFile("synthetic_obsidian");
+        }
+
+        auto projectName = baseFile.getFileNameWithoutExtension();
+        if (projectName.endsWithIgnoreCase(".annotation"))
+            projectName = projectName.dropLastCharacters(
+                juce::String(".annotation").length());
+        if (projectName.isEmpty())
+            projectName = "synthetic_obsidian";
+
+        return baseFile.getParentDirectory().getChildFile(
+            juce::File::createLegalFileName(projectName + "_export"));
+    }
+
+    juce::Result exportMidiFilesTo(const juce::File& directory, int& exportedFileCount) const
+    {
+        const auto exportDocument = [&directory, &exportedFileCount](
+                                        const AnnotationDocument& document,
+                                        const juce::String& fileName)
+        {
+            const auto result = AnnotationJson::exportMidi(
+                document,
+                directory.getChildFile(
+                    juce::File::createLegalFileName(fileName) + ".mid"));
+            if (result.wasOk())
+                ++exportedFileCount;
+            return result;
+        };
+
+        if (! document_.notes.empty())
+        {
+            auto leadDocument = document_;
+            leadDocument.backingNotes.clear();
+            if (const auto result = exportDocument(
+                    leadDocument,
+                    "voice_main");
+                result.failed())
+            {
+                return result;
+            }
+        }
+
+        if (! document_.backingTracks.empty())
+        {
+            for (const auto& track : document_.backingTracks)
+            {
+                if (track.notes.empty())
+                    continue;
+
+                auto backingDocument = document_;
+                backingDocument.notes.clear();
+                backingDocument.backingNotes = track.notes;
+                if (const auto result = exportDocument(
+                        backingDocument,
+                        track.styleName.isNotEmpty() ? track.styleName : "backing_vocal");
+                    result.failed())
+                {
+                    return result;
+                }
+            }
+        }
+        else if (! document_.backingNotes.empty())
+        {
+            auto backingDocument = document_;
+            backingDocument.notes.clear();
+            if (const auto result = exportDocument(
+                    backingDocument,
+                    document_.backingStyleName.isNotEmpty()
+                        ? document_.backingStyleName
+                        : "backing_vocal");
+                result.failed())
+            {
+                return result;
+            }
+        }
+
+        return exportedFileCount > 0
+            ? juce::Result::ok()
+            : juce::Result::fail("There are no MIDI tracks to export.");
     }
 
     void exportMidi()
     {
-        const auto midiFile = currentJsonFile_ != juce::File()
-                                ? currentJsonFile_.withFileExtension(".mid")
-                                : document_.audioFile.withFileExtension(".mid");
-        const auto result = AnnotationJson::exportMidi(document_, midiFile);
-        setStatus(resultMessage("Export MIDI", result));
+        const auto directory = exportDirectory();
+        if (const auto result = directory.createDirectory(); result.failed())
+        {
+            setStatus(resultMessage("Export MIDI", result));
+            return;
+        }
+
+        int exportedFileCount = 0;
+        const auto result = exportMidiFilesTo(directory, exportedFileCount);
+        if (result.failed())
+        {
+            setStatus(resultMessage("Export MIDI", result));
+            return;
+        }
+
+        completeExport("Exported "
+            + juce::String(exportedFileCount)
+            + " MIDI file"
+            + (exportedFileCount == 1 ? "" : "s"),
+            directory);
+    }
+
+    void exportAllTracks()
+    {
+        const auto directory = exportDirectory();
+        if (const auto result = directory.createDirectory(); result.failed())
+        {
+            setStatus(resultMessage("Export all tracks", result));
+            return;
+        }
+
+        int exportedAudioCount = 0;
+        const auto copyAudioTrack =
+            [&directory, &exportedAudioCount](
+                const juce::File& source,
+                const juce::String& stemName) -> juce::Result
+        {
+            if (! source.existsAsFile())
+                return juce::Result::ok();
+
+            const auto target = directory.getChildFile(
+                juce::File::createLegalFileName(stemName)
+                + source.getFileExtension());
+            if (target.existsAsFile() && ! target.deleteFile())
+                return juce::Result::fail("Could not replace " + target.getFileName() + ".");
+            if (! source.copyFileTo(target))
+                return juce::Result::fail("Could not export " + source.getFileName() + ".");
+
+            ++exportedAudioCount;
+            return juce::Result::ok();
+        };
+
+        if (const auto result = copyAudioTrack(document_.instrumentalFile, "instrumental");
+            result.failed())
+        {
+            setStatus(resultMessage("Export all tracks", result));
+            return;
+        }
+        if (const auto result = copyAudioTrack(document_.audioFile, "voice_main");
+            result.failed())
+        {
+            setStatus(resultMessage("Export all tracks", result));
+            return;
+        }
+        for (const auto& track : document_.backingTracks)
+        {
+            if (const auto result = copyAudioTrack(
+                    track.audioFile,
+                    track.styleName.isNotEmpty() ? track.styleName : "backing_vocal");
+                result.failed())
+            {
+                setStatus(resultMessage("Export all tracks", result));
+                return;
+            }
+        }
+
+        int exportedMidiCount = 0;
+        const auto midiResult = exportMidiFilesTo(directory, exportedMidiCount);
+        if (midiResult.failed() && exportedAudioCount == 0)
+        {
+            setStatus(resultMessage("Export all tracks", midiResult));
+            return;
+        }
+
+        completeExport("Exported "
+            + juce::String(exportedAudioCount)
+            + " audio stem"
+            + (exportedAudioCount == 1 ? "" : "s")
+            + " and "
+            + juce::String(exportedMidiCount)
+            + " MIDI file"
+            + (exportedMidiCount == 1 ? "" : "s"),
+            directory);
     }
 
     void createDraftAnnotation(juce::AudioFormatReader& reader)
@@ -4972,20 +6896,24 @@ private:
 
     void markChanged()
     {
+        openAudioButton_.setEnabled(document_.instrumentalFile.existsAsFile());
         dirty_ = true;
         ++documentRevision_;
         lastDirtyTimeMs_ = juce::Time::getMillisecondCounterHiRes();
         updatePlaybackNotes();
         updateInfoText();
         repaint();
+        sendWebProjectState();
     }
 
     void syncInspector()
     {
+        openAudioButton_.setEnabled(document_.instrumentalFile.existsAsFile());
         bpmEditor_.setText(juce::String(document_.bpm, 0), false);
         keyEditor_.setText(document_.key, false);
         updateInfoText();
         repaint();
+        sendWebProjectState();
     }
 
     void updateInfoText()
@@ -4999,7 +6927,8 @@ private:
              << "Backing: " << static_cast<int>(document_.backingNotes.size())
              << (document_.backingStyleName.isNotEmpty() ? " (" + document_.backingStyleName + ")" : "") << "\n"
              << "Boundaries: " << static_cast<int>(document_.boundaries.size()) << "\n"
-             << "Tempo/Chords: " << static_cast<int>(document_.tempoSegments.size())
+             << "Tempo/Signature/Chords: " << static_cast<int>(document_.tempoSegments.size())
+             << " / " << static_cast<int>(document_.timeSignatures.size())
              << " / " << static_cast<int>(document_.chords.size());
         if (editor_.getSelectedNoteId().isEmpty() && editor_.getSelectedBoundaryId().isEmpty())
             infoLabel_.setText(info, juce::dontSendNotification);
@@ -5014,6 +6943,7 @@ private:
     void setStatus(const juce::String& text)
     {
         statusLabel_.setText(text, juce::dontSendNotification);
+        sendWebStatus();
     }
 
     juce::AudioFormatManager formatManager_;
@@ -5025,20 +6955,31 @@ private:
     std::unique_ptr<juce::AudioFormatReaderSource> readerSource_;
     std::unique_ptr<juce::AudioFormatReaderSource> instrumentalReaderSource_;
     std::unique_ptr<juce::AudioFormatReaderSource> backingAudioReaderSource_;
+    juce::File backingAudioTransportFile_;
     juce::AudioBuffer<float> leadAudioMixBuffer_;
     juce::AudioBuffer<float> instrumentalMixBuffer_;
     juce::AudioBuffer<float> backingAudioMixBuffer_;
     std::array<PlaybackNoteState, 2> noteStates_;
     std::atomic<PlaybackNoteState*> activeNoteState_ { nullptr };
     int writeNoteStateIndex_ = 0;
-    std::atomic<int> playbackMode_ { static_cast<int>(PlaybackMode::notesAndSound) };
+    std::atomic<bool> leadAudioMuted_ { false };
+    std::atomic<bool> leadNotesMuted_ { false };
+    std::atomic<bool> backingAudioMuted_ { false };
+    std::atomic<bool> backingNotesMuted_ { false };
     std::atomic<bool> instrumentalMuted_ { false };
     std::atomic<bool> instrumentalSolo_ { false };
     std::atomic<bool> leadMuted_ { false };
     std::atomic<bool> leadSolo_ { false };
     std::atomic<bool> backingMuted_ { false };
     std::atomic<bool> backingSolo_ { false };
-    std::atomic<bool> backingAudioAvailable_ { false };
+    std::array<std::atomic<bool>, kMaxBackingTracks> backingTrackMuted_ {};
+    std::array<std::atomic<bool>, kMaxBackingTracks> backingTrackSoloed_ {};
+    std::array<std::atomic<bool>, kMaxBackingTracks> backingTrackAudioMuted_ {};
+    std::array<std::atomic<bool>, kMaxBackingTracks> backingTrackNotesMuted_ {};
+    std::atomic<int> activeBackingTrackIndex_ { -1 };
+    std::atomic<float> masterVolume_ { 0.76f };
+    std::array<std::atomic<float>, 2> outputPeakLevels_ {};
+    std::array<float, 2> outputMeterLevels_ {};
     std::atomic<double> audioSampleRate_ { 44100.0 };
     std::array<double, kMaxPlaybackNotes> timelineNotePhases_ {};
     const PlaybackNoteState* renderedNoteState_ = nullptr;
@@ -5051,9 +6992,28 @@ private:
     double clickedTonePhase_ = 0.0;
     int clickedToneElapsedSamples_ = 0;
     bool loopAuditionActive_ = false;
+    bool cycleLoopActive_ = false;
     double loopStartTime_ = 0.0;
     double loopEndTime_ = 0.0;
+    WaveformData vocalWaveform_;
+    WaveformData instrumentalWaveform_;
+    WaveformData backingWaveform_;
+    juce::String vocalPackedWaveform_;
+    juce::String instrumentalPackedWaveform_;
+    juce::String backingPackedWaveform_;
+    std::array<BackingWaveformCache, kMaxBackingTracks> backingTrackWaveforms_;
+    juce::File vocalWaveformFile_;
+    juce::File instrumentalWaveformFile_;
+    juce::File backingWaveformFile_;
+    unsigned int vocalWaveformRequestRevision_ = 0;
+    unsigned int instrumentalWaveformRequestRevision_ = 0;
+    unsigned int backingWaveformRequestRevision_ = 0;
+    bool vocalWaveformLoading_ = false;
+    bool instrumentalWaveformLoading_ = false;
+    bool backingWaveformLoading_ = false;
+    bool webFrontendReady_ = false;
     juce::File currentJsonFile_;
+    juce::File projectDirectory_;
     std::unique_ptr<juce::FileChooser> chooser_;
     std::vector<AnnotationDocument> undoStack_;
     std::vector<AnnotationDocument> redoStack_;
@@ -5063,9 +7023,12 @@ private:
     bool musicalContextAnalysisRunning_ = false;
     bool backingGenerationRunning_ = false;
     bool backingAudioRenderRunning_ = false;
+    juce::String backingGenerationTrackName_;
+    juce::String backingAudioRenderTrackName_;
     bool analyzeAfterAiParts_ = false;
     bool lyricsAlignmentRunning_ = false;
     bool noteRecalculationRunning_ = false;
+    bool projectSaveRunning_ = false;
     bool restoringHistory_ = false;
     unsigned int documentRevision_ = 0;
     double lastDirtyTimeMs_ = 0.0;
@@ -5101,6 +7064,7 @@ private:
     juce::ComboBox boundaryKindBox_;
     juce::Label infoLabel_;
     juce::Label statusLabel_;
+    synthetic_obsidian::SyntheticObsidianWebView webView_;
 
     JUCE_DECLARE_WEAK_REFERENCEABLE(MainComponent)
 };

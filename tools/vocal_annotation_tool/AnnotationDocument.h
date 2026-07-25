@@ -84,6 +84,14 @@ struct ChordSegment
     double confidence = 0.0;
 };
 
+struct BackingVocalTrack
+{
+    juce::String styleId;
+    juce::String styleName;
+    std::vector<NoteBlock> notes;
+    juce::File audioFile;
+};
+
 struct AnnotationDocument
 {
     int version = 1;
@@ -98,6 +106,7 @@ struct AnnotationDocument
     std::vector<NoteBlock> backingNotes;
     juce::String backingStyleId;
     juce::String backingStyleName;
+    std::vector<BackingVocalTrack> backingTracks;
     std::vector<BoundaryMarker> boundaries;
     std::vector<AnnotationRegion> regions;
     std::vector<TempoSegment> tempoSegments;

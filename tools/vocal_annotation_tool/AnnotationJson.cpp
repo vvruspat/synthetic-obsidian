@@ -182,6 +182,18 @@ int pitchWheelForSemitoneOffset(double semitones, double range)
     const auto normalized = juce::jlimit(-1.0, 1.0, semitones / range);
     return juce::jlimit(0, 16383, center + juce::roundToInt(normalized * static_cast<double>(center - 1)));
 }
+
+juce::String projectPathForFile(const juce::File& file, const juce::File& jsonFile)
+{
+    if (! file.existsAsFile())
+        return {};
+
+    const auto projectDirectory = jsonFile.getParentDirectory();
+    if (file.isAChildOf(projectDirectory))
+        return file.getRelativePathFrom(projectDirectory);
+
+    return file.getFullPathName();
+}
 } // namespace
 
 juce::Result AnnotationJson::load(const juce::File& jsonFile, AnnotationDocument& document)
@@ -222,6 +234,68 @@ juce::Result AnnotationJson::load(const juce::File& jsonFile, AnnotationDocument
         for (const auto& value : *backingNotes)
             if (auto note = readNoteBlock(value, loaded))
                 loaded.backingNotes.push_back(std::move(*note));
+    }
+
+    if (auto* backingTracks = root->getProperty("backing_tracks").getArray())
+    {
+        for (const auto& value : *backingTracks)
+        {
+            auto* trackObject = value.getDynamicObject();
+            if (trackObject == nullptr)
+                continue;
+
+            BackingVocalTrack track;
+            track.styleId = stringProperty(*trackObject, "style_id");
+            track.styleName = stringProperty(*trackObject, "style_name");
+            const auto trackAudioPath = stringProperty(*trackObject, "audio");
+            track.audioFile = trackAudioPath.isEmpty()
+                ? juce::File()
+                : (juce::File::isAbsolutePath(trackAudioPath)
+                       ? juce::File(trackAudioPath)
+                       : jsonFile.getSiblingFile(trackAudioPath));
+
+            if (auto* notes = trackObject->getProperty("notes").getArray())
+            {
+                for (const auto& noteValue : *notes)
+                    if (auto note = readNoteBlock(noteValue, loaded))
+                        track.notes.push_back(std::move(*note));
+            }
+
+            if (track.styleId.isNotEmpty() || track.styleName.isNotEmpty())
+                loaded.backingTracks.push_back(std::move(track));
+        }
+    }
+
+    if (loaded.backingTracks.empty()
+        && (loaded.backingStyleId.isNotEmpty()
+            || loaded.backingStyleName.isNotEmpty()
+            || ! loaded.backingNotes.empty()
+            || loaded.backingAudioFile.existsAsFile()))
+    {
+        loaded.backingTracks.push_back({
+            loaded.backingStyleId,
+            loaded.backingStyleName,
+            loaded.backingNotes,
+            loaded.backingAudioFile
+        });
+    }
+    else if (! loaded.backingTracks.empty())
+    {
+        const auto activeTrack = std::find_if(
+            loaded.backingTracks.begin(),
+            loaded.backingTracks.end(),
+            [&loaded](const auto& track)
+            {
+                return (loaded.backingStyleId.isNotEmpty() && track.styleId == loaded.backingStyleId)
+                    || (loaded.backingStyleName.isNotEmpty() && track.styleName == loaded.backingStyleName);
+            });
+        const auto& track = activeTrack != loaded.backingTracks.end()
+            ? *activeTrack
+            : loaded.backingTracks.front();
+        loaded.backingStyleId = track.styleId;
+        loaded.backingStyleName = track.styleName;
+        loaded.backingNotes = track.notes;
+        loaded.backingAudioFile = track.audioFile;
     }
 
     if (auto* boundaries = root->getProperty("boundaries").getArray())
@@ -320,9 +394,9 @@ juce::Result AnnotationJson::save(const AnnotationDocument& document, const juce
 {
     auto* root = new juce::DynamicObject();
     root->setProperty("version", document.version);
-    root->setProperty("audio", document.audioFile.existsAsFile() ? document.audioFile.getFileName() : juce::String());
-    root->setProperty("instrumental", document.instrumentalFile.existsAsFile() ? document.instrumentalFile.getFileName() : juce::String());
-    root->setProperty("backing_audio", document.backingAudioFile.existsAsFile() ? document.backingAudioFile.getFileName() : juce::String());
+    root->setProperty("audio", projectPathForFile(document.audioFile, jsonFile));
+    root->setProperty("instrumental", projectPathForFile(document.instrumentalFile, jsonFile));
+    root->setProperty("backing_audio", projectPathForFile(document.backingAudioFile, jsonFile));
     root->setProperty("sample_rate", document.sampleRate);
     root->setProperty("duration", document.duration);
     root->setProperty("bpm", document.bpm);
@@ -339,6 +413,24 @@ juce::Result AnnotationJson::save(const AnnotationDocument& document, const juce
     for (const auto& note : document.backingNotes)
         backingNotes.add(makeNoteVar(note));
     root->setProperty("backing_notes", backingNotes);
+
+    juce::Array<juce::var> backingTracks;
+    for (const auto& track : document.backingTracks)
+    {
+        auto* object = new juce::DynamicObject();
+        object->setProperty("style_id", track.styleId);
+        object->setProperty("style_name", track.styleName);
+        object->setProperty(
+            "audio",
+            projectPathForFile(track.audioFile, jsonFile));
+
+        juce::Array<juce::var> trackNotes;
+        for (const auto& note : track.notes)
+            trackNotes.add(makeNoteVar(note));
+        object->setProperty("notes", trackNotes);
+        backingTracks.add(object);
+    }
+    root->setProperty("backing_tracks", backingTracks);
 
     juce::Array<juce::var> boundaries;
     for (const auto& boundary : document.boundaries)

@@ -17,6 +17,8 @@ brew install ninja
 ### Windows
 - Visual Studio 2022 (Community or higher) with "Desktop development with C++" workload
 - CMake 3.22+ (bundled with VS or via https://cmake.org)
+- Microsoft Edge WebView2 Runtime and the WebView2 NuGet package in JUCE's
+  default package location (required by the embedded React interface)
 
 ---
 

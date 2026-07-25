@@ -6,6 +6,21 @@ The tool is intentionally isolated from the realtime plugin target. Audio loadin
 JSON import/export, pYIN subprocess analysis, and manual editing all live under
 `tools/vocal_annotation_tool`.
 
+Its visible interface is the React application in `frontend/`. JUCE embeds the
+checked-in `frontend/dist` files, owns audio and document state, and exchanges
+typed JSON commands/events with the WebView. The native annotation component is
+kept as an internal editing/compatibility helper; it is not the visible app UI.
+The bridge supplies real decimated vocal/instrumental waveforms and analyzed
+tempo segments; the React canvas and tempo SVG do not synthesize production data.
+It also supplies complete time-signature segments. React integrates tempo across
+signature regions to place bar and beat lines, including denominator-aware beat
+spacing such as eighth-note beats in 6/8.
+
+The bundled offline analyzer currently infers one global 3/4 or 4/4 signature
+from detected beat accents and falls back to low-confidence 4/4 when evidence is
+weak. Imported annotation JSON may contain arbitrary signature changes and
+denominators; those are preserved and rendered without flattening.
+
 ## Build
 
 ```bash

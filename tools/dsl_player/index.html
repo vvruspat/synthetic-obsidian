@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Synthetic Obsidian DSL Player</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="mark">SO</div>
+          <div>
+            <h1>DSL Player</h1>
+            <p>Lead vocal and chord preview</p>
+          </div>
+        </div>
+
+        <label class="file-drop" for="fileInput">
+          <span class="file-icon">YAML</span>
+          <strong>Open DSL YAML</strong>
+          <small>Generated files from multitrack MIDI conversion</small>
+        </label>
+        <input id="fileInput" type="file" accept=".yaml,.yml,text/yaml,text/plain" />
+
+        <div class="metadata" id="metadata">
+          <div class="empty-state">Open a YAML file to inspect it.</div>
+        </div>
+
+        <section class="panel">
+          <div class="panel-title">Transport</div>
+          <div class="transport">
+            <button id="stopButton" class="icon-button" title="Stop" disabled>■</button>
+            <button id="playButton" class="primary-button" disabled>Play</button>
+          </div>
+          <label class="slider-row">
+            <span>Position</span>
+            <input id="positionSlider" type="range" min="0" max="1" value="0" step="0.001" disabled />
+          </label>
+          <div class="readout">
+            <span id="timeReadout">0:00.000</span>
+            <span id="beatReadout">beat 0.00</span>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-title">Tracks</div>
+          <div id="trackControls" class="track-controls"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-title">View</div>
+          <label class="slider-row">
+            <span>Zoom</span>
+            <input id="zoomSlider" type="range" min="18" max="120" value="42" />
+          </label>
+          <label class="check-row">
+            <input id="followToggle" type="checkbox" checked />
+            <span>Follow playhead</span>
+          </label>
+          <label class="slider-row">
+            <span>Audio sync <output id="syncReadout">0 ms</output></span>
+            <input id="syncSlider" type="range" min="-200" max="200" value="0" step="5" />
+          </label>
+        </section>
+      </aside>
+
+      <main class="workspace">
+        <header class="topbar">
+          <div>
+            <div id="songTitle" class="song-title">No file loaded</div>
+            <div id="songSubtitle" class="song-subtitle">Choose a DSL YAML file to begin.</div>
+          </div>
+          <div id="stats" class="stats"></div>
+        </header>
+
+        <section class="timeline-shell">
+          <div class="ruler" id="ruler"></div>
+          <div class="timeline-scroll" id="timelineScroll">
+            <div id="timelineSpacer" class="timeline-spacer"></div>
+            <canvas id="timelineCanvas"></canvas>
+            <div id="playhead" class="playhead"></div>
+          </div>
+        </section>
+
+        <section class="details">
+          <div class="detail-panel">
+            <h2>Chord Grid</h2>
+            <div id="chordList" class="chord-list"></div>
+          </div>
+          <div class="detail-panel">
+            <h2>Warnings</h2>
+            <div id="warnings" class="warnings"></div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="./app.js"></script>
+  </body>
+</html>

@@ -350,8 +350,9 @@ def _make_pitch_curve(
     masked_times = times[mask]
     masked_midi = midi_float[mask]
     masked_conf = conf[mask]
-    if len(masked_times) > 64:
-        keep = np.linspace(0, len(masked_times) - 1, 64).round().astype(np.int32)
+    max_curve_points = 240
+    if len(masked_times) > max_curve_points:
+        keep = np.linspace(0, len(masked_times) - 1, max_curve_points).round().astype(np.int32)
         masked_times = masked_times[keep]
         masked_midi = masked_midi[keep]
         masked_conf = masked_conf[keep]
@@ -883,14 +884,21 @@ def _attach_lyrics_to_notes(notes: list[dict], words: list[dict]) -> list[dict]:
     return notes
 
 
-def _compute_pitch_tracks(path: Path, sensitivity: float) -> dict:
+def _compute_pitch_tracks(
+    path: Path,
+    sensitivity: float,
+    offset: float = 0.0,
+    duration: float | None = None,
+    pitch_backend: str = "hybrid",
+) -> dict:
     sample_rate = 22050
     hop_length = 256
     sensitivity = float(np.clip(sensitivity, 0.0, 1.0))
     confidence_threshold = 0.10 - 0.07 * sensitivity
     fill_gap_sec = 0.35 + 0.40 * sensitivity
 
-    y, sr = librosa.load(path, sr=sample_rate, mono=True, duration=120.0)
+    load_duration = 120.0 if duration is None else max(0.0, float(duration))
+    y, sr = librosa.load(path, sr=sample_rate, mono=True, offset=max(0.0, float(offset)), duration=load_duration)
     if y.size == 0:
         return {"empty": True}
 
@@ -904,7 +912,7 @@ def _compute_pitch_tracks(path: Path, sensitivity: float) -> dict:
         fill_na=np.nan,
     )
 
-    times = librosa.frames_to_time(np.arange(len(f0)), sr=sr, hop_length=hop_length)
+    local_times = librosa.frames_to_time(np.arange(len(f0)), sr=sr, hop_length=hop_length)
     conf = np.nan_to_num(voiced_prob, nan=0.0).astype(np.float32)
     midi = np.full(len(f0), -1, dtype=np.int32)
     valid = np.isfinite(f0) & voiced_flag & (conf >= confidence_threshold)
@@ -913,8 +921,9 @@ def _compute_pitch_tracks(path: Path, sensitivity: float) -> dict:
     midi_float[valid] = librosa.hz_to_midi(f0[valid]).astype(np.float32)
 
     hop_sec = hop_length / sr
-    if os.environ.get("SO_DISABLE_CREPE", "0") != "1":
-        crepe_midi, crepe_conf = _compute_crepe_track(y, sr, times, hop_sec, sensitivity)
+    use_crepe = pitch_backend == "hybrid" and os.environ.get("SO_DISABLE_CREPE", "0") != "1"
+    if use_crepe:
+        crepe_midi, crepe_conf = _compute_crepe_track(y, sr, local_times, hop_sec, sensitivity)
         midi_float, conf = _combine_pitch_tracks(midi_float, conf, crepe_midi, crepe_conf)
         midi = np.full(len(f0), -1, dtype=np.int32)
         valid = np.isfinite(midi_float) & (conf >= confidence_threshold)
@@ -922,6 +931,7 @@ def _compute_pitch_tracks(path: Path, sensitivity: float) -> dict:
 
     midi = _fill_short_gaps(midi, conf, max_gap_frames=int(round(fill_gap_sec / hop_sec)))
     midi = _median_smooth(midi, radius=4)
+    times = local_times + max(0.0, float(offset))
     return {
         "empty": False,
         "y": y,
@@ -937,8 +947,8 @@ def _compute_pitch_tracks(path: Path, sensitivity: float) -> dict:
     }
 
 
-def analyze(path: Path, sensitivity: float) -> list[dict]:
-    tracks = _compute_pitch_tracks(path, sensitivity)
+def analyze(path: Path, sensitivity: float, pitch_backend: str = "hybrid") -> list[dict]:
+    tracks = _compute_pitch_tracks(path, sensitivity, pitch_backend=pitch_backend)
     if tracks["empty"]:
         return []
 
@@ -967,6 +977,19 @@ def analyze(path: Path, sensitivity: float) -> list[dict]:
     return _attach_lyrics_to_notes(notes, _detect_lyrics(path))
 
 
+def _parse_analysis_window(value: str) -> tuple[float, float]:
+    parts = value.split(":")
+    if len(parts) != 2:
+        raise argparse.ArgumentTypeError("analysis window must be start:end")
+
+    start = float(parts[0])
+    end = float(parts[1])
+    if end <= start:
+        raise argparse.ArgumentTypeError("analysis window has invalid start/end")
+
+    return start, end
+
+
 def _parse_region(value: str) -> tuple[str, float, float, int]:
     parts = value.split(":")
     if len(parts) not in (3, 4):
@@ -982,8 +1005,61 @@ def _parse_region(value: str) -> tuple[str, float, float, int]:
     return note_id, start, end, int(np.clip(pitch, 0, 127))
 
 
-def analyze_regions(path: Path, sensitivity: float, regions: list[tuple[str, float, float, int]]) -> list[dict]:
-    tracks = _compute_pitch_tracks(path, sensitivity)
+def analyze_windows(
+    path: Path,
+    sensitivity: float,
+    windows: list[tuple[float, float]],
+    pitch_backend: str = "hybrid",
+) -> list[dict]:
+    notes: list[dict] = []
+    min_note_sec = 0.12 - 0.07 * float(np.clip(sensitivity, 0.0, 1.0))
+    merge_gap_sec = 0.24 + 0.22 * float(np.clip(sensitivity, 0.0, 1.0))
+
+    for start_time, end_time in windows:
+        duration = end_time - start_time
+        if duration < max(0.10, min_note_sec):
+            continue
+
+        tracks = _compute_pitch_tracks(
+            path,
+            sensitivity,
+            offset=start_time,
+            duration=duration,
+            pitch_backend=pitch_backend,
+        )
+        if tracks["empty"]:
+            continue
+
+        window_notes = _merge_notes(
+            midi=tracks["midi"],
+            midi_float=tracks["midi_float"],
+            f0=tracks["f0"],
+            conf=tracks["conf"],
+            times=tracks["times"],
+            hop_sec=tracks["hop_sec"],
+            min_note_sec=min_note_sec,
+            merge_gap_sec=merge_gap_sec,
+        )
+        window_notes = _merge_ornamental_notes(
+            window_notes,
+            tracks["midi_float"],
+            tracks["f0"],
+            tracks["conf"],
+            tracks["times"],
+        )
+        notes.extend(window_notes)
+
+    notes.sort(key=lambda note: float(note.get("start", 0.0)))
+    return _attach_lyrics_to_notes(notes, _detect_lyrics(path))
+
+
+def analyze_regions(
+    path: Path,
+    sensitivity: float,
+    regions: list[tuple[str, float, float, int]],
+    pitch_backend: str = "hybrid",
+) -> list[dict]:
+    tracks = _compute_pitch_tracks(path, sensitivity, pitch_backend=pitch_backend)
     if tracks["empty"]:
         return []
 
@@ -1017,9 +1093,16 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("audio_file", type=Path)
     parser.add_argument("--sensitivity", type=float, default=0.72)
+    parser.add_argument("--pitch-backend", choices=("pyin", "hybrid"), default="hybrid")
+    parser.add_argument("--analysis-window", action="append", type=_parse_analysis_window, default=[])
     parser.add_argument("--region", action="append", type=_parse_region, default=[])
     args = parser.parse_args()
-    notes = analyze_regions(args.audio_file, args.sensitivity, args.region) if args.region else analyze(args.audio_file, args.sensitivity)
+    if args.region:
+        notes = analyze_regions(args.audio_file, args.sensitivity, args.region, args.pitch_backend)
+    elif args.analysis_window:
+        notes = analyze_windows(args.audio_file, args.sensitivity, args.analysis_window, args.pitch_backend)
+    else:
+        notes = analyze(args.audio_file, args.sensitivity, args.pitch_backend)
     print(json.dumps({"notes": notes}, ensure_ascii=False))
 
 

@@ -1,0 +1,20 @@
+.ui-icon-button,
+.ui-select-menu button {
+  font: inherit;
+}
+
+.ui-icon-button {
+  color: inherit;
+}
+
+.ui-select-menu > summary {
+  list-style: none;
+}
+
+.ui-select-menu > summary::-webkit-details-marker {
+  display: none;
+}
+
+.ui-select-menu button {
+  color: inherit;
+}

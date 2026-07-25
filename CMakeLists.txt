@@ -25,6 +25,36 @@ FetchContent_MakeAvailable(JUCE)
 
 option(SYNTHETIC_OBSIDIAN_BUILD_TOOLS "Build offline Synthetic Obsidian tools" ON)
 
+# ── Embedded React frontend ──────────────────────────────────────────────────
+# The checked-in dist bundle keeps C++ builds independent from Node.js. Rebuild
+# it explicitly with `npm ci && npm run build` from frontend/ after UI changes.
+set(SYNTHETIC_OBSIDIAN_FRONTEND_DIST "${CMAKE_SOURCE_DIR}/frontend/dist")
+set(SYNTHETIC_OBSIDIAN_FRONTEND_ASSETS
+    "${SYNTHETIC_OBSIDIAN_FRONTEND_DIST}/index.html"
+    "${SYNTHETIC_OBSIDIAN_FRONTEND_DIST}/assets/app.js"
+    "${SYNTHETIC_OBSIDIAN_FRONTEND_DIST}/assets/app.css"
+    "${SYNTHETIC_OBSIDIAN_FRONTEND_DIST}/favicon.svg"
+)
+
+foreach(frontend_asset IN LISTS SYNTHETIC_OBSIDIAN_FRONTEND_ASSETS)
+    if(NOT EXISTS "${frontend_asset}")
+        message(FATAL_ERROR
+            "Missing embedded frontend asset: ${frontend_asset}. "
+            "Run `npm ci && npm run build` in ${CMAKE_SOURCE_DIR}/frontend.")
+    endif()
+endforeach()
+
+juce_add_binary_data(SyntheticObsidianFrontendData
+    HEADER_NAME SyntheticObsidianFrontendData.h
+    NAMESPACE SyntheticObsidianFrontendData
+    SOURCES ${SYNTHETIC_OBSIDIAN_FRONTEND_ASSETS}
+)
+if(APPLE)
+    set_target_properties(SyntheticObsidianFrontendData PROPERTIES
+        OSX_ARCHITECTURES "arm64;x86_64"
+    )
+endif()
+
 # ── Plugin target ─────────────────────────────────────────────────────────────
 juce_add_plugin(SyntheticObsidian
     COMPANY_NAME                "SyntheticObsidian"

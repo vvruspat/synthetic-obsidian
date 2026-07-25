@@ -18,12 +18,21 @@ public:
         virtual void noteAuditionRequested(const juce::String& noteId) = 0;
         virtual void notesRecalculationRequested(const juce::StringArray& noteIds) = 0;
         virtual void waveformAuditionRequested(double startTime, double endTime) = 0;
+        virtual void playheadPositionRequested(double) {}
+        virtual void trackPlaybackStateChanged(bool,
+                                               bool,
+                                               bool,
+                                               bool,
+                                               bool,
+                                               bool) {}
     };
 
     AnnotationEditorComponent(juce::AudioFormatManager& formatManager, AnnotationDocument& document);
 
     void setListener(Listener* newListener);
     void setAudioFile(const juce::File& file);
+    void setInstrumentalFile(const juce::File& file);
+    void setBackingAudioFile(const juce::File& file);
     void fitToClip();
     void setPlayheadTime(double seconds);
     void setHorizontalZoom(double zoom);
@@ -67,16 +76,36 @@ private:
         moveBoundary
     };
 
+    enum class SelectedTrack
+    {
+        instrumental,
+        lead,
+        backing
+    };
+
     juce::Rectangle<int> getTimelineBounds() const;
+    juce::Rectangle<int> getTrackOverviewBounds() const;
+    juce::Rectangle<int> getTrackHeaderBounds() const;
+    juce::Rectangle<int> getTrackLaneBounds() const;
+    juce::Rectangle<int> getMusicalContextOverviewBounds() const;
+    juce::Rectangle<int> getInstrumentalOverviewBounds() const;
+    juce::Rectangle<int> getLeadOverviewBounds() const;
+    juce::Rectangle<int> getBackingOverviewBounds() const;
     juce::Rectangle<int> getKeyboardBounds() const;
     juce::Rectangle<int> getEditorBounds() const;
+    juce::Rectangle<int> getVocalEditorBounds() const;
+    juce::Rectangle<int> getBackingEditorBounds() const;
+    juce::Rectangle<int> getInstrumentalHeaderBounds() const;
+    juce::Rectangle<int> getInstrumentalTrackBounds() const;
     juce::Rectangle<int> getLyricsBounds() const;
 
     double xToTime(float x) const;
     float timeToX(double time) const;
     int yToPitch(float y) const;
     float pitchToY(double pitch) const;
+    float pitchToYInBounds(double pitch, juce::Rectangle<int> bounds) const;
     juce::Rectangle<float> noteBoundsFor(const NoteBlock& note) const;
+    juce::Rectangle<float> noteBoundsFor(const NoteBlock& note, juce::Rectangle<int> bounds) const;
     void scrollTime(double deltaSeconds);
     void scrollPitch(double deltaSemitones);
     void zoomTimeAt(double pivotTime, double scaleFactor);
@@ -100,9 +129,19 @@ private:
     static void recalculateNotePitchFromCurve(NoteBlock& note);
     void drawPianoKeyboard(juce::Graphics& g, juce::Rectangle<int> bounds) const;
     void drawTimeline(juce::Graphics& g, juce::Rectangle<int> bounds) const;
+    void drawTrackOverview(juce::Graphics& g);
+    void drawTrackHeader(juce::Graphics& g, juce::Rectangle<int> bounds, const juce::String& title, SelectedTrack track) const;
+    void drawCompactWaveformTrack(juce::Graphics& g, juce::Rectangle<int> bounds, juce::AudioThumbnail& thumbnail, juce::Colour colour, const juce::String& label);
+    void drawCompactNoteTrack(juce::Graphics& g, juce::Rectangle<int> bounds, const std::vector<NoteBlock>& notes, juce::Colour colour, const juce::String& label) const;
+    void drawPianoRollBackground(juce::Graphics& g, juce::Rectangle<int> bounds) const;
+    void drawInstrumentalHeader(juce::Graphics& g, juce::Rectangle<int> bounds) const;
+    void drawMusicalGrid(juce::Graphics& g, juce::Rectangle<int> bounds) const;
+    void drawMusicalContext(juce::Graphics& g, juce::Rectangle<int> bounds) const;
     void drawWaveform(juce::Graphics& g, juce::Rectangle<int> bounds);
+    void drawInstrumentalTrack(juce::Graphics& g, juce::Rectangle<int> bounds);
     void drawSelectedWaveformBorder(juce::Graphics& g, juce::Rectangle<int> waveformBounds);
     void drawNotes(juce::Graphics& g, juce::Rectangle<int> bounds) const;
+    void drawBackingNotes(juce::Graphics& g, juce::Rectangle<int> bounds) const;
     void drawBoundaries(juce::Graphics& g, juce::Rectangle<int> bounds) const;
     void drawSplitPreview(juce::Graphics& g, juce::Rectangle<int> bounds) const;
     void drawLyrics(juce::Graphics& g, juce::Rectangle<int> bounds) const;
@@ -112,6 +151,8 @@ private:
     juce::AudioFormatManager& formatManager_;
     juce::AudioThumbnailCache thumbnailCache_;
     juce::AudioThumbnail thumbnail_;
+    juce::AudioThumbnail instrumentalThumbnail_;
+    juce::AudioThumbnail backingThumbnail_;
     Listener* listener_ = nullptr;
 
     double visibleStart_ = 0.0;
@@ -134,6 +175,13 @@ private:
     int lastDragAuditionPitch_ = -1;
     NoteBlock originalNoteSnapshot_;
     double originalBoundaryTime_ = 0.0;
+    SelectedTrack selectedTrack_ = SelectedTrack::lead;
+    bool instrumentalMuted_ = false;
+    bool instrumentalSolo_ = false;
+    bool leadMuted_ = false;
+    bool leadSolo_ = false;
+    bool backingMuted_ = false;
+    bool backingSolo_ = false;
 };
 
 } // namespace vocal_annotation

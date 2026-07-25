@@ -6,6 +6,21 @@ The tool is intentionally isolated from the realtime plugin target. Audio loadin
 JSON import/export, pYIN subprocess analysis, and manual editing all live under
 `tools/vocal_annotation_tool`.
 
+Its visible interface is the React application in `frontend/`. JUCE embeds the
+checked-in `frontend/dist` files, owns audio and document state, and exchanges
+typed JSON commands/events with the WebView. The native annotation component is
+kept as an internal editing/compatibility helper; it is not the visible app UI.
+The bridge supplies real decimated vocal/instrumental waveforms and analyzed
+tempo segments; the React canvas and tempo SVG do not synthesize production data.
+It also supplies complete time-signature segments. React integrates tempo across
+signature regions to place bar and beat lines, including denominator-aware beat
+spacing such as eighth-note beats in 6/8.
+
+The bundled offline analyzer currently infers one global 3/4 or 4/4 signature
+from detected beat accents and falls back to low-confidence 4/4 when evidence is
+weak. Imported annotation JSON may contain arbitrary signature changes and
+denominators; those are preserved and rendered without flattening.
+
 ## Build
 
 ```bash
@@ -21,6 +36,32 @@ cmake --build /Users/aleksandrkolesov/synthetic-obsidian/build --target VocalAnn
 python3 /Users/aleksandrkolesov/synthetic-obsidian/tools/vocal_annotation_tool/validate_annotation.py \
   /path/to/sample.annotation.json
 ```
+
+## SoulX-Singer-SVC runtime
+
+`Render BV` expects an isolated Python 3.10 runtime and the official SVC
+checkpoint outside the repository:
+
+```bash
+runtime="$HOME/.synthetic_obsidian/runtime/soulx-singer"
+models="$HOME/.synthetic_obsidian/models/SoulX-Singer"
+
+git clone https://github.com/Soul-AILab/SoulX-Singer.git "$runtime/source"
+git -C "$runtime/source" checkout 81aeb3ae772c70093c3de74dc23c92d983801ae4
+uv venv --python 3.10 "$runtime/.venv"
+uv pip install --python "$runtime/.venv/bin/python" \
+  'numpy<2' torch==2.2.0 torchaudio==2.2.0 transformers==4.41.2 \
+  accelerate==1.11.0 beartype==0.22.9 einops==0.8.2 librosa==0.11.0 \
+  omegaconf==2.3.0 scipy==1.15.3 soundfile==0.13.1 tqdm==4.67.1 \
+  pyworld==0.3.5 'setuptools<81'
+"$runtime/.venv/bin/hf" download Soul-AILab/SoulX-Singer model-svc.pt \
+  --local-dir "$models"
+```
+
+On Apple Silicon, the content encoder and flow model run on MPS. Vocos alone
+runs on CPU because its complex ISTFT operation is not supported by MPS. The
+bridge is outside the real-time playback path and only transfers the generated
+mel/audio at each offline render segment.
 
 ## Notes
 
@@ -58,6 +99,12 @@ python3 /Users/aleksandrkolesov/synthetic-obsidian/tools/vocal_annotation_tool/v
   pitch curve, so legato slides/drift are audible instead of flat MIDI steps.
 - MIDI export writes pitch-bend range setup and pitch-wheel events from note
   curves. This represents vocal slides in standard monophonic MIDI playback.
+- `Render BV` uses SoulX-Singer-SVC in a persistent offline worker. The main
+  vocal supplies phonetic timing and a short same-singer timbre prompt, while
+  generated backing notes supply a replacement 50 Hz F0 contour. The worker is
+  loaded lazily on the first render and reused for later renders; no model code
+  runs on the audio thread. Runtime files and the 2.8 GB checkpoint live outside
+  the repository under `~/.synthetic_obsidian/`.
 - `Lyrics` imports a text file and runs an offline torchaudio wav2vec2 forced
   alignment subprocess against the currently loaded audio. The aligned word
   timings are split into rough syllables, placed back onto the waveform, and used

@@ -60,6 +60,18 @@ def strong_vocal_mask(audio: np.ndarray, sample_rate: int) -> tuple[np.ndarray, 
     return smoothed >= threshold, frames_per_second
 
 
+def low_level_vocal_activity_mask(audio: np.ndarray, sample_rate: int) -> tuple[np.ndarray, float]:
+    smoothed, frames_per_second = rms_values(audio, sample_rate)
+    floor = float(np.quantile(smoothed, 0.50))
+    active = float(np.quantile(smoothed, 0.90))
+    peakish = float(np.quantile(smoothed, 0.98))
+    # For pause labels we want the opposite of the breath labels: be very
+    # conservative and treat quiet consonants, tails, and room tone as vocal
+    # activity unless the frame is close to the local noise floor.
+    threshold = max(floor * 2.5, active * 0.06, peakish * 0.015, 3.0e-5)
+    return smoothed >= threshold, frames_per_second
+
+
 def breath_rms_mask(audio: np.ndarray, sample_rate: int) -> tuple[np.ndarray, float]:
     if sample_rate != TARGET_SAMPLE_RATE:
         audio = librosa.resample(
@@ -248,6 +260,7 @@ def build_record(
     vocal_path: Path,
     breath_path: Path,
     split: str,
+    strict_silence: bool,
 ) -> dict[str, object]:
     vocal_audio, vocal_sample_rate = load_mono(vocal_path)
     breath_audio, breath_sample_rate = load_mono(breath_path)
@@ -257,7 +270,10 @@ def build_record(
     )
 
     breath_mask, frames_per_second = breath_rms_mask(breath_audio, breath_sample_rate)
-    vocal_mask, _ = rms_mask(vocal_audio, vocal_sample_rate)
+    if strict_silence:
+        vocal_mask, _ = low_level_vocal_activity_mask(vocal_audio, vocal_sample_rate)
+    else:
+        vocal_mask, _ = rms_mask(vocal_audio, vocal_sample_rate)
     frame_count = min(len(breath_mask), len(vocal_mask))
     breath_mask = close_mask(breath_mask[:frame_count], max_gap_frames=20)
     breath_mask = trim_breath_mask_by_vocal_difference(
@@ -268,7 +284,7 @@ def build_record(
         breath_sample_rate,
         minimum_keep_frames=round(0.12 * frames_per_second),
     )
-    vocal_mask = close_mask(vocal_mask[:frame_count], max_gap_frames=8)
+    vocal_mask = close_mask(vocal_mask[:frame_count], max_gap_frames=20 if strict_silence else 8)
 
     breath_intervals = mask_to_intervals(
         breath_mask,
@@ -322,7 +338,11 @@ def build_record(
         "loss_heads": ["breath", "silence"],
         "label_notes": {
             "breath": f"RMS activity from paired breath stem {breath_path.name}",
-            "silence": "RMS inactivity where neither vocal nor breath stem is active",
+            "silence": (
+                "strict low-floor RMS inactivity where neither vocal nor breath stem is active"
+                if strict_silence
+                else "RMS inactivity where neither vocal nor breath stem is active"
+            ),
             "loss_heads": "only breath/silence heads are trained from this dataset",
         },
     }
@@ -336,6 +356,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--validation-ratio", type=float, default=0.0)
     parser.add_argument("--test-ratio", type=float, default=0.0)
+    parser.add_argument("--strict-silence", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
@@ -359,6 +380,7 @@ def main() -> int:
                 args.validation_ratio,
                 args.test_ratio,
             ),
+            args.strict_silence,
         )
         for vocal, breath in pairs
     ]

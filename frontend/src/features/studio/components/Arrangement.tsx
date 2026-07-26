@@ -353,6 +353,10 @@ export function Arrangement({
             controller={controller}
             waveform={controller.editorWaveform}
             waveformDurationRatio={controller.editorWaveformDurationRatio}
+            backingRenderBusy={backingGenerationRunning || backingAudioRenderRunning}
+            backingRenderTrack={
+              backingAudioRenderRunning ? backingAudioRenderTrack : backingGenerationTrack
+            }
           />
         </div>
       </div>

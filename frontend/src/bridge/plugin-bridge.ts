@@ -46,7 +46,71 @@ export type PluginCommand =
   | { type: "add-backing-track"; track: BackingTrackName }
   | { type: "regenerate-backing-track"; track: BackingTrackName }
   | { type: "render-backing-track"; track: BackingTrackName }
-  | { type: "set-clip-pitch"; clipId: string; pitch: number };
+  | {
+      type: "pitch-history";
+      action: "undo" | "redo";
+      track: Exclude<TrackName, "Instrumental">;
+    }
+  | {
+      type: "set-clip-pitch";
+      track: Exclude<TrackName, "Instrumental">;
+      clipId: string;
+      pitch: number;
+    }
+  | {
+      type: "add-clip";
+      track: Exclude<TrackName, "Instrumental">;
+      clip: { id: string; x: number; pitch: number; width: number };
+    }
+  | {
+      type: "delete-clips";
+      track: Exclude<TrackName, "Instrumental">;
+      clipIds: string[];
+    }
+  | {
+      type: "move-clips";
+      track: Exclude<TrackName, "Instrumental">;
+      clips: Array<{ clipId: string; pitch: number }>;
+    }
+  | {
+      type: "preview-pitch-tone";
+      pitch: number;
+      restart: boolean;
+    }
+  | {
+      type: "stop-pitch-tone";
+    }
+  | {
+      type: "set-clip-time";
+      track: Exclude<TrackName, "Instrumental">;
+      clipId: string;
+      x: number;
+      width: number;
+    }
+  | {
+      type: "split-clip";
+      track: Exclude<TrackName, "Instrumental">;
+      clipId: string;
+      x: number;
+      rightClipId: string;
+    }
+  | {
+      type: "join-clips";
+      track: Exclude<TrackName, "Instrumental">;
+      clipIds: string[];
+    }
+  | {
+      type: "set-clip-vibrato";
+      track: Exclude<TrackName, "Instrumental">;
+      clipId: string;
+      scale: number;
+    }
+  | {
+      type: "set-clip-gain";
+      track: Exclude<TrackName, "Instrumental">;
+      clipId: string;
+      gainDb: number;
+    };
 
 export type PluginEvent =
   | { type: "project-state"; project: StudioProject }
@@ -80,7 +144,12 @@ export type PluginEvent =
       state: TrackLayerState;
     }
   | { type: "backing-track-added"; track: BackingTrackName }
-  | { type: "clip-pitch-state"; clipId: string; pitch: number };
+  | {
+      type: "clip-pitch-state";
+      track: Exclude<TrackName, "Instrumental">;
+      clipId: string;
+      pitch: number;
+    };
 
 export type PluginEventListener = (event: PluginEvent) => void;
 

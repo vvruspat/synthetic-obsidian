@@ -122,6 +122,10 @@ export const mockStudioProject: StudioProject = {
       waveform: [],
     },
   ],
+  pitchEditorHistory: [
+    { track: "Voice Main", canUndo: false, canRedo: false },
+    { track: "Third Above", canUndo: false, canRedo: false },
+  ],
   vocalWaveform: createWaveform(37),
   instrumentalWaveform: createWaveform(23),
   backingWaveform: [],

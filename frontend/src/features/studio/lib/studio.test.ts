@@ -14,6 +14,18 @@ import {
   getPitchFill,
   pitchToTop,
 } from "@/features/studio/lib/pitch";
+import {
+  createManualClip,
+  getJoinCandidateIds,
+  joinClips,
+  moveSelectedClips,
+  nextManualClipId,
+  scaleClipVibrato,
+  setClipGain,
+  splitClipAt,
+  stretchClipStartTo,
+  stretchClipTo,
+} from "@/features/studio/lib/pitch-editing";
 import { getNextTrackSelection } from "@/features/studio/lib/track-selection";
 import { formatTime, getCenteredTimelineScrollLeft } from "@/features/studio/lib/transport";
 import {
@@ -119,6 +131,76 @@ describe("studio value helpers", () => {
   it("preserves the analyzed duration of short clips", () => {
     expect(getClipVisualWidthPercent(0.08)).toBe(0.08);
     expect(getClipVisualWidthPercent(-0.08)).toBe(0);
+  });
+
+  it("moves selected pitch clips vertically as a clamped group", () => {
+    const clips: VocalClip[] = [
+      {
+        id: "n001",
+        label: "one",
+        x: 2,
+        pitch: 60,
+        width: 10,
+        color: "cyan",
+        pitchCurve: [{ x: 4, pitch: 60.25 }],
+      },
+      { id: "n002", label: "two", x: 20, pitch: 70, width: 8, color: "violet" },
+    ];
+    const moved = moveSelectedClips(clips, ["n001", "n002"], 8);
+
+    expect(moved[0].x).toBe(2);
+    expect(moved[1].x).toBe(20);
+    expect(moved[0].pitch).toBe(62);
+    expect(moved[1].pitch).toBe(72);
+    expect(moved[0].pitchCurve?.[0]).toEqual({ x: 4, pitch: 62.25 });
+  });
+
+  it("creates, stretches, splits, and joins manual clips", () => {
+    const clip = createManualClip("n001", 10, 64, 20, "cyan");
+    const stretched = stretchClipTo([clip], clip.id, 40);
+    expect(stretched[0].width).toBe(30);
+    expect(stretched[0].pitchCurve?.at(-1)?.x).toBe(40);
+
+    const stretchedFromStart = stretchClipStartTo([clip], clip.id, 5);
+    expect(stretchedFromStart[0].x).toBe(5);
+    expect(stretchedFromStart[0].width).toBe(25);
+    expect(stretchedFromStart[0].pitchCurve?.[0].x).toBe(5);
+    expect(stretchedFromStart[0].pitchCurve?.at(-1)?.x).toBe(30);
+
+    const split = splitClipAt(stretched, clip.id, 25, "n002");
+    expect(split.map(({ id, x, width }) => ({ id, x, width }))).toEqual([
+      { id: "n001", x: 10, width: 15 },
+      { id: "n002", x: 25, width: 15 },
+    ]);
+    expect(split[0].legatoToNext).toBe(true);
+    expect(split[1].legatoFromPrevious).toBe(true);
+
+    const joined = joinClips(split, ["n001", "n002"]);
+    expect(joined).toHaveLength(1);
+    expect(joined[0].width).toBe(30);
+    expect(getJoinCandidateIds(split, [], "n001")).toEqual(["n001", "n002"]);
+  });
+
+  it("edits vibrato and gain without changing the note anchor", () => {
+    const clip: VocalClip = {
+      id: "n004",
+      label: "vibe",
+      x: 0,
+      pitch: 60,
+      width: 10,
+      color: "pink",
+      pitchCurve: [
+        { x: 0, pitch: 59.8 },
+        { x: 5, pitch: 60.3 },
+      ],
+    };
+
+    const vibrato = scaleClipVibrato([clip], clip.id, 2)[0];
+    expect(vibrato.pitch).toBe(60);
+    expect(vibrato.pitchCurve?.[0].pitch).toBeCloseTo(59.6);
+    expect(vibrato.pitchCurve?.[1].pitch).toBeCloseTo(60.6);
+    expect(setClipGain([clip], clip.id, 30)[0].gainDb).toBe(12);
+    expect(nextManualClipId([clip, { ...clip, id: "n009" }])).toBe("n010");
   });
 
   it("builds a constant tempo line from a single analyzed segment", () => {

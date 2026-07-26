@@ -25,6 +25,23 @@ import {
   getMusicalContext,
 } from "@/features/studio/lib/musical-time";
 import { createPitchPath, PITCH_ROW_HEIGHT, PITCH_TOP } from "@/features/studio/lib/pitch";
+import {
+  createManualClip,
+  getJoinCandidateIds,
+  joinClips,
+  MAX_GAIN_DB,
+  MAX_VIBRATO_SCALE,
+  MIN_CLIP_WIDTH_PERCENT,
+  MIN_GAIN_DB,
+  moveSelectedClips,
+  nextManualClipId,
+  PITCH_BOTTOM,
+  scaleClipVibrato,
+  setClipGain,
+  splitClipAt,
+  stretchClipStartTo,
+  stretchClipTo,
+} from "@/features/studio/lib/pitch-editing";
 import { getNextTrackSelection } from "@/features/studio/lib/track-selection";
 import { formatTime, getCenteredTimelineScrollLeft } from "@/features/studio/lib/transport";
 
@@ -32,6 +49,50 @@ const HORIZONTAL_ZOOM_MIN = 1;
 const HORIZONTAL_ZOOM_MAX = 32;
 const VERTICAL_ZOOM_MIN = 1;
 const VERTICAL_ZOOM_MAX = 4;
+
+type PitchEditorGesture =
+  | {
+      kind: "move";
+      clipIds: string[];
+      startClientY: number;
+      source: VocalClip[];
+      result: VocalClip[];
+      changed: boolean;
+      auditionClipId: string;
+      lastAuditionPitch: number | null;
+    }
+  | {
+      kind: "pencil";
+      anchorX: number;
+      clip: VocalClip;
+    }
+  | {
+      kind: "stretch";
+      clipId: string;
+      edge: "start" | "end";
+      startClientX: number;
+      originalStartX: number;
+      originalEndX: number;
+      source: VocalClip[];
+      result: VocalClip[];
+    }
+  | {
+      kind: "vibrato";
+      clipId: string;
+      startClientY: number;
+      source: VocalClip[];
+      result: VocalClip[];
+      scale: number;
+    }
+  | {
+      kind: "gain";
+      clipId: string;
+      startClientY: number;
+      source: VocalClip[];
+      result: VocalClip[];
+      originalGainDb: number;
+      gainDb: number;
+    };
 
 export function useStudioController(bridge: PluginBridge, project: StudioProject) {
   const [playing, setPlaying] = useState(false);
@@ -41,10 +102,19 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
   const [volume, setVolume] = useState(project.initialVolume);
   const [outputLevels, setOutputLevels] = useState({ left: 0, right: 0 });
   const [clips, setClips] = useState(project.clips);
+  const [backingClipsByTrack, setBackingClipsByTrack] = useState<
+    Partial<Record<BackingTrackName, VocalClip[]>>
+  >(
+    Object.fromEntries(
+      project.backingTrackContents.map(({ track, clips: trackClips }) => [track, trackClips]),
+    ),
+  );
   const [horizontalZoom, setHorizontalZoom] = useState(1);
   const [verticalZoom, setVerticalZoom] = useState(1);
   const [leftCorrectionTool, setLeftCorrectionTool] = useState<CorrectionToolId>("pointer");
   const [rightCorrectionTool, setRightCorrectionTool] = useState<CorrectionToolId>("scissors");
+  const [secondaryToolModifierActive, setSecondaryToolModifierActive] = useState(false);
+  const [selectedClipIds, setSelectedClipIds] = useState<string[]>([]);
   const [pianoCollapsed, setPianoCollapsed] = useState(false);
   const [serviceTracksCollapsed, setServiceTracksCollapsed] = useState(false);
   const [backingTracks, setBackingTracks] = useState<BackingTrackName[]>(
@@ -65,8 +135,32 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
   );
 
   useEffect(() => {
+    const syncCommandModifier = (event: KeyboardEvent) => {
+      setSecondaryToolModifierActive(event.metaKey);
+    };
+    const clearCommandModifier = () => setSecondaryToolModifierActive(false);
+
+    window.addEventListener("keydown", syncCommandModifier);
+    window.addEventListener("keyup", syncCommandModifier);
+    window.addEventListener("blur", clearCommandModifier);
+    return () => {
+      window.removeEventListener("keydown", syncCommandModifier);
+      window.removeEventListener("keyup", syncCommandModifier);
+      window.removeEventListener("blur", clearCommandModifier);
+    };
+  }, []);
+
+  useEffect(() => {
     setClips(project.clips);
   }, [project.clips]);
+
+  useEffect(() => {
+    setBackingClipsByTrack(
+      Object.fromEntries(
+        project.backingTrackContents.map(({ track, clips: trackClips }) => [track, trackClips]),
+      ),
+    );
+  }, [project.backingTrackContents]);
 
   useEffect(() => {
     setBackingTracks(project.initialBackingTracks);
@@ -109,7 +203,7 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
   const horizontalZoomFrameRef = useRef(0);
   const verticalZoomAnchorRef = useRef<number | null>(null);
   const zoomWheelRef = useRef({ frame: 0, horizontal: 0, vertical: 0 });
-  const clipDragRef = useRef<{ id: string; dy: number; pitch: number } | null>(null);
+  const editorGestureRef = useRef<PitchEditorGesture | null>(null);
   const playheadDragRef = useRef(false);
 
   useEffect(
@@ -153,11 +247,21 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
             );
             break;
           case "clip-pitch-state":
-            setClips((current) =>
-              current.map((clip) =>
-                clip.id === event.clipId ? { ...clip, pitch: event.pitch } : clip,
-              ),
-            );
+            if (event.track === "Voice Main") {
+              setClips((current) =>
+                current.map((clip) =>
+                  clip.id === event.clipId ? { ...clip, pitch: event.pitch } : clip,
+                ),
+              );
+            } else {
+              const backingTrack = event.track as BackingTrackName;
+              setBackingClipsByTrack((current) => ({
+                ...current,
+                [backingTrack]: (current[backingTrack] ?? []).map((clip) =>
+                  clip.id === event.clipId ? { ...clip, pitch: event.pitch } : clip,
+                ),
+              }));
+            }
             break;
         }
       }),
@@ -237,20 +341,38 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
       const content = project.backingTrackContents.find((item) => item.track === track);
       availability[track] = {
         audioAvailable: content?.hasAudio ?? false,
-        notesAvailable: (content?.clips.length ?? 0) > 0,
+        notesAvailable: (backingClipsByTrack[track]?.length ?? 0) > 0,
       };
     }
     return availability;
-  }, [backingTracks, clips.length, project.backingTrackContents, project.hasVocal]);
+  }, [
+    backingClipsByTrack,
+    backingTracks,
+    clips.length,
+    project.backingTrackContents,
+    project.hasVocal,
+  ]);
+  const activePitchTrack: Exclude<TrackName, "Instrumental"> | null =
+    selectedTracks.length === 1 && selectedTracks[0] !== "Instrumental" ? selectedTracks[0] : null;
+  const activeEditorClips =
+    activePitchTrack === null
+      ? []
+      : activePitchTrack === "Voice Main"
+        ? clips
+        : (backingClipsByTrack[activePitchTrack] ?? []);
   const editorClips = useMemo(
     () =>
       selectedTracks.flatMap((track) => {
         if (track === "Instrumental") return [];
         if (track === "Voice Main") return clips;
-        return project.backingTrackContents.find((item) => item.track === track)?.clips ?? [];
+        return backingClipsByTrack[track] ?? [];
       }),
-    [clips, project.backingTrackContents, selectedTracks],
+    [backingClipsByTrack, clips, selectedTracks],
   );
+  useEffect(() => {
+    const availableIds = new Set(editorClips.map((clip) => clip.id));
+    setSelectedClipIds((current) => current.filter((clipId) => availableIds.has(clipId)));
+  }, [editorClips]);
   const selectedTrackContent =
     selectedTracks.length === 1 && selectedTracks[0] !== "Instrumental"
       ? project.backingTrackContents.find((item) => item.track === selectedTracks[0])
@@ -271,7 +393,18 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
         : selectedTracks[0] === "Voice Main"
           ? project.vocalDurationSeconds / project.timelineDurationSeconds
           : (selectedTrackContent?.audioDurationSeconds ?? 0) / project.timelineDurationSeconds;
-  const canEditSelectedClips = selectedTracks.length === 1 && selectedTracks[0] === "Voice Main";
+  const canEditSelectedClips = activePitchTrack !== null;
+  const pitchHistory = project.pitchEditorHistory.find(
+    ({ track }) => track === activePitchTrack,
+  ) ?? { track: activePitchTrack ?? "Voice Main", canUndo: false, canRedo: false };
+  const backingRenderAction =
+    activePitchTrack !== null && activePitchTrack !== "Voice Main" && selectedTrackContent
+      ? !selectedTrackContent.hasAudio
+        ? { track: activePitchTrack, label: "Render" as const }
+        : pitchHistory.canUndo
+          ? { track: activePitchTrack, label: "Re-render" as const }
+          : null
+      : null;
   const sortedClips = useMemo(() => [...editorClips].sort((a, b) => a.x - b.x), [editorClips]);
   const pitchPath = useMemo(() => createPitchPath(sortedClips), [sortedClips]);
 
@@ -339,6 +472,7 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
   const selectTrack = (name: TrackName, additive: boolean) => {
     const nextSelection = getNextTrackSelection(selectedTracks, name, additive);
     setSelectedTracks(nextSelection);
+    setSelectedClipIds([]);
     bridge.send({ type: "select-tracks", tracks: nextSelection });
   };
 
@@ -358,6 +492,18 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
 
   const renderBackingTrack = (name: BackingTrackName) => {
     bridge.send({ type: "render-backing-track", track: name });
+  };
+
+  const undoPitchEdit = () => {
+    if (activePitchTrack !== null && pitchHistory.canUndo) {
+      bridge.send({ type: "pitch-history", action: "undo", track: activePitchTrack });
+    }
+  };
+
+  const redoPitchEdit = () => {
+    if (activePitchTrack !== null && pitchHistory.canRedo) {
+      bridge.send({ type: "pitch-history", action: "redo", track: activePitchTrack });
+    }
   };
 
   const openProject = () => {
@@ -577,45 +723,398 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
     event.stopPropagation();
   };
 
-  const moveClip = (event: PointerEvent) => {
-    const drag = clipDragRef.current;
+  const editorPoint = (clientX: number, clientY: number) => {
     const editor = editorRef.current;
-    if (!drag || !editor) return;
+    if (!editor) return null;
     const rect = editor.getBoundingClientRect();
-    const top = ((event.clientY - rect.top - drag.dy) / rect.height) * 100;
-    const pitch = Math.max(48, Math.min(PITCH_TOP, PITCH_TOP - top / PITCH_ROW_HEIGHT));
-    drag.pitch = pitch;
-    setClips((current) => current.map((clip) => (clip.id === drag.id ? { ...clip, pitch } : clip)));
+    const x = Math.max(0, Math.min(100, ((clientX - rect.left) / Math.max(1, rect.width)) * 100));
+    const pitch = Math.max(
+      PITCH_BOTTOM,
+      Math.min(
+        PITCH_TOP,
+        PITCH_TOP - ((clientY - rect.top) / Math.max(1, rect.height)) * (100 / PITCH_ROW_HEIGHT),
+      ),
+    );
+    return { rect, x, pitch };
   };
 
-  const endClipDrag = () => {
-    const drag = clipDragRef.current;
-    if (drag) {
-      bridge.send({ type: "set-clip-pitch", clipId: drag.id, pitch: drag.pitch });
+  const toolForPointerEvent = (event: { button: number; metaKey: boolean }) =>
+    event.button === 2 || (event.button === 0 && event.metaKey)
+      ? rightCorrectionTool
+      : leftCorrectionTool;
+
+  const setActiveEditorClips = (next: VocalClip[] | ((current: VocalClip[]) => VocalClip[])) => {
+    if (activePitchTrack === null) return;
+    if (activePitchTrack === "Voice Main") {
+      setClips(next);
+      return;
     }
-    clipDragRef.current = null;
-    window.removeEventListener("pointermove", moveClip);
-    window.removeEventListener("pointerup", endClipDrag);
-    window.removeEventListener("pointercancel", endClipDrag);
+
+    setBackingClipsByTrack((current) => {
+      const currentClips = current[activePitchTrack] ?? [];
+      const nextClips = typeof next === "function" ? next(currentClips) : next;
+      return { ...current, [activePitchTrack]: nextClips };
+    });
   };
 
-  const startClipDrag = (event: ReactPointerEvent<HTMLButtonElement>, clip: VocalClip) => {
-    if (!canEditSelectedClips) return;
-    const rect = event.currentTarget.getBoundingClientRect();
-    clipDragRef.current = {
-      id: clip.id,
-      dy: event.clientY - rect.top,
-      pitch: clip.pitch,
-    };
-    event.currentTarget.setPointerCapture(event.pointerId);
-    window.addEventListener("pointermove", moveClip);
-    window.addEventListener("pointerup", endClipDrag);
-    window.addEventListener("pointercancel", endClipDrag);
+  const moveEditorGesture = (event: PointerEvent) => {
+    const gesture = editorGestureRef.current;
+    const point = editorPoint(event.clientX, event.clientY);
+    if (!gesture || !point) return;
+
+    if (gesture.kind === "move") {
+      const deltaPitch =
+        (-(event.clientY - gesture.startClientY) / Math.max(1, point.rect.height)) *
+        (100 / PITCH_ROW_HEIGHT);
+      gesture.changed = gesture.changed || Math.abs(deltaPitch) > 0.01;
+      gesture.result = moveSelectedClips(gesture.source, gesture.clipIds, deltaPitch);
+      setActiveEditorClips(gesture.result);
+      const auditionClip = gesture.result.find(
+        (candidate) => candidate.id === gesture.auditionClipId,
+      );
+      const auditionPitch = auditionClip?.pitch ?? null;
+      if (
+        Math.abs(deltaPitch) > 0.01 &&
+        auditionPitch !== null &&
+        (gesture.lastAuditionPitch === null ||
+          Math.abs(auditionPitch - gesture.lastAuditionPitch) >= 0.01)
+      ) {
+        gesture.lastAuditionPitch = auditionPitch;
+        bridge.send({ type: "preview-pitch-tone", pitch: auditionPitch, restart: false });
+      }
+      return;
+    }
+
+    if (gesture.kind === "pencil") {
+      if (Math.abs(point.x - gesture.anchorX) > MIN_CLIP_WIDTH_PERCENT) {
+        const x = Math.min(point.x, gesture.anchorX);
+        const width = Math.abs(point.x - gesture.anchorX);
+        gesture.clip = createManualClip(
+          gesture.clip.id,
+          x,
+          gesture.clip.pitch,
+          width,
+          gesture.clip.color,
+        );
+        setActiveEditorClips((current) =>
+          current.map((clip) => (clip.id === gesture.clip.id ? gesture.clip : clip)),
+        );
+      }
+      return;
+    }
+
+    if (gesture.kind === "stretch") {
+      const deltaX = ((event.clientX - gesture.startClientX) / Math.max(1, point.rect.width)) * 100;
+      gesture.result =
+        gesture.edge === "start"
+          ? stretchClipStartTo(gesture.source, gesture.clipId, gesture.originalStartX + deltaX)
+          : stretchClipTo(gesture.source, gesture.clipId, gesture.originalEndX + deltaX);
+      setActiveEditorClips(gesture.result);
+      return;
+    }
+
+    if (gesture.kind === "vibrato") {
+      gesture.scale = Math.max(
+        0,
+        Math.min(MAX_VIBRATO_SCALE, 1 + (gesture.startClientY - event.clientY) / 64),
+      );
+      gesture.result = scaleClipVibrato(gesture.source, gesture.clipId, gesture.scale);
+      setActiveEditorClips(gesture.result);
+      return;
+    }
+
+    const gainDelta = ((gesture.startClientY - event.clientY) / 96) * 12;
+    gesture.gainDb = Math.max(
+      MIN_GAIN_DB,
+      Math.min(MAX_GAIN_DB, gesture.originalGainDb + gainDelta),
+    );
+    gesture.result = setClipGain(gesture.source, gesture.clipId, gesture.gainDb);
+    setActiveEditorClips(gesture.result);
+  };
+
+  const endEditorGesture = () => {
+    const gesture = editorGestureRef.current;
+    editorGestureRef.current = null;
+    window.removeEventListener("pointermove", moveEditorGesture);
+    window.removeEventListener("pointerup", endEditorGesture);
+    window.removeEventListener("pointercancel", endEditorGesture);
+    window.removeEventListener("blur", endEditorGesture);
+    if (!gesture) return;
+
+    if (gesture.kind === "move") {
+      bridge.send({ type: "stop-pitch-tone" });
+      if (gesture.changed) {
+        const edits = gesture.clipIds.flatMap((clipId) => {
+          const clip = gesture.result.find((candidate) => candidate.id === clipId);
+          return clip ? [{ clipId, pitch: clip.pitch }] : [];
+        });
+        if (edits.length > 0 && activePitchTrack !== null) {
+          bridge.send({ type: "move-clips", track: activePitchTrack, clips: edits });
+        }
+      }
+      return;
+    }
+
+    if (gesture.kind === "pencil") {
+      if (activePitchTrack !== null) {
+        bridge.send({
+          type: "add-clip",
+          track: activePitchTrack,
+          clip: {
+            id: gesture.clip.id,
+            x: gesture.clip.x,
+            pitch: gesture.clip.pitch,
+            width: gesture.clip.width,
+          },
+        });
+      }
+      return;
+    }
+
+    if (gesture.kind === "stretch") {
+      const clip = gesture.result.find((candidate) => candidate.id === gesture.clipId);
+      if (clip) {
+        if (activePitchTrack !== null) {
+          bridge.send({
+            type: "set-clip-time",
+            track: activePitchTrack,
+            clipId: clip.id,
+            x: clip.x,
+            width: clip.width,
+          });
+        }
+      }
+      return;
+    }
+
+    if (gesture.kind === "vibrato") {
+      if (activePitchTrack !== null) {
+        bridge.send({
+          type: "set-clip-vibrato",
+          track: activePitchTrack,
+          clipId: gesture.clipId,
+          scale: gesture.scale,
+        });
+      }
+      return;
+    }
+
+    if (activePitchTrack !== null) {
+      bridge.send({
+        type: "set-clip-gain",
+        track: activePitchTrack,
+        clipId: gesture.clipId,
+        gainDb: gesture.gainDb,
+      });
+    }
+  };
+
+  const beginEditorGesture = (gesture: PitchEditorGesture) => {
+    endEditorGesture();
+    editorGestureRef.current = gesture;
+    window.addEventListener("pointermove", moveEditorGesture);
+    window.addEventListener("pointerup", endEditorGesture);
+    window.addEventListener("pointercancel", endEditorGesture);
+    window.addEventListener("blur", endEditorGesture);
+  };
+
+  const zoomAtEditorPosition = (x: number, zoomOut: boolean) => {
+    const nextZoom = Math.max(
+      HORIZONTAL_ZOOM_MIN,
+      Math.min(HORIZONTAL_ZOOM_MAX, horizontalZoom * (zoomOut ? 0.5 : 2)),
+    );
+    cancelAnimationFrame(horizontalZoomFrameRef.current);
+    setHorizontalZoom(nextZoom);
+    horizontalZoomFrameRef.current = requestAnimationFrame(() => {
+      horizontalZoomFrameRef.current = requestAnimationFrame(() => {
+        const scroller = arrangementScrollRef.current;
+        if (!scroller) return;
+        scroller.scrollLeft = getCenteredTimelineScrollLeft(
+          x / 100,
+          scroller.scrollWidth,
+          scroller.clientWidth,
+        );
+      });
+    });
+  };
+
+  const beginPencilGesture = (event: ReactPointerEvent<HTMLElement>) => {
+    const point = editorPoint(event.clientX, event.clientY);
+    if (!point) return;
+    const id = nextManualClipId(activeEditorClips);
+    const defaultWidth = Math.max(
+      MIN_CLIP_WIDTH_PERCENT,
+      Math.min(100 - point.x, (0.5 / Math.max(0.001, project.timelineDurationSeconds)) * 100),
+    );
+    const colours: VocalClip["color"][] = ["cyan", "violet", "pink", "amber", "lime", "silver"];
+    const clip = createManualClip(
+      id,
+      point.x,
+      point.pitch,
+      defaultWidth,
+      colours[activeEditorClips.length % colours.length],
+    );
+    setActiveEditorClips((current) => [...current, clip]);
+    setSelectedClipIds([id]);
+    beginEditorGesture({ kind: "pencil", anchorX: point.x, clip });
+  };
+
+  const startClipTool = (event: ReactPointerEvent<HTMLButtonElement>, clip: VocalClip) => {
+    if (!canEditSelectedClips || (event.button !== 0 && event.button !== 2)) return;
+    const tool = toolForPointerEvent(event);
+    const point = editorPoint(event.clientX, event.clientY);
+    if (!point) return;
+    event.preventDefault();
+    event.stopPropagation();
+
+    if (tool === "pointer") {
+      let nextSelection: string[];
+      if (event.shiftKey) {
+        nextSelection = selectedClipIds.includes(clip.id)
+          ? selectedClipIds.filter((clipId) => clipId !== clip.id)
+          : [...selectedClipIds, clip.id];
+      } else {
+        nextSelection = selectedClipIds.includes(clip.id) ? selectedClipIds : [clip.id];
+      }
+      setSelectedClipIds(nextSelection);
+      if (nextSelection.includes(clip.id)) {
+        event.currentTarget.setPointerCapture(event.pointerId);
+        beginEditorGesture({
+          kind: "move",
+          clipIds: nextSelection,
+          startClientY: event.clientY,
+          source: activeEditorClips,
+          result: activeEditorClips,
+          changed: false,
+          auditionClipId: clip.id,
+          lastAuditionPitch: clip.pitch,
+        });
+        bridge.send({ type: "preview-pitch-tone", pitch: clip.pitch, restart: true });
+      }
+      return;
+    }
+
+    if (tool === "pencil") {
+      beginPencilGesture(event);
+      return;
+    }
+
+    if (tool === "eraser") {
+      setActiveEditorClips((current) => current.filter((candidate) => candidate.id !== clip.id));
+      setSelectedClipIds((current) => current.filter((clipId) => clipId !== clip.id));
+      if (activePitchTrack !== null) {
+        bridge.send({ type: "delete-clips", track: activePitchTrack, clipIds: [clip.id] });
+      }
+      return;
+    }
+
+    if (tool === "scissors") {
+      const rightClipId = nextManualClipId(activeEditorClips);
+      const result = splitClipAt(activeEditorClips, clip.id, point.x, rightClipId);
+      if (result !== activeEditorClips) {
+        setActiveEditorClips(result);
+        setSelectedClipIds([clip.id, rightClipId]);
+        if (activePitchTrack !== null) {
+          bridge.send({
+            type: "split-clip",
+            track: activePitchTrack,
+            clipId: clip.id,
+            x: point.x,
+            rightClipId,
+          });
+        }
+      }
+      return;
+    }
+
+    if (tool === "join") {
+      const clipIds = getJoinCandidateIds(activeEditorClips, selectedClipIds, clip.id);
+      const result = joinClips(activeEditorClips, clipIds);
+      if (result !== activeEditorClips) {
+        const target = [...activeEditorClips]
+          .filter((candidate) => clipIds.includes(candidate.id))
+          .sort((left, right) => left.x - right.x)[0];
+        setActiveEditorClips(result);
+        setSelectedClipIds(target ? [target.id] : []);
+        if (activePitchTrack !== null) {
+          bridge.send({ type: "join-clips", track: activePitchTrack, clipIds });
+        }
+      }
+      return;
+    }
+
+    if (tool === "flex") {
+      const clipBounds = event.currentTarget.getBoundingClientRect();
+      const edge = event.clientX < clipBounds.left + clipBounds.width * 0.5 ? "start" : "end";
+      setSelectedClipIds([clip.id]);
+      beginEditorGesture({
+        kind: "stretch",
+        clipId: clip.id,
+        edge,
+        startClientX: event.clientX,
+        originalStartX: clip.x,
+        originalEndX: clip.x + clip.width,
+        source: activeEditorClips,
+        result: activeEditorClips,
+      });
+      return;
+    }
+
+    if (tool === "vibrato") {
+      setSelectedClipIds([clip.id]);
+      beginEditorGesture({
+        kind: "vibrato",
+        clipId: clip.id,
+        startClientY: event.clientY,
+        source: activeEditorClips,
+        result: activeEditorClips,
+        scale: 1,
+      });
+      return;
+    }
+
+    if (tool === "gain") {
+      const originalGainDb = clip.gainDb ?? 0;
+      setSelectedClipIds([clip.id]);
+      beginEditorGesture({
+        kind: "gain",
+        clipId: clip.id,
+        startClientY: event.clientY,
+        source: activeEditorClips,
+        result: activeEditorClips,
+        originalGainDb,
+        gainDb: originalGainDb,
+      });
+      return;
+    }
+
+    zoomAtEditorPosition(point.x, event.button === 2 || event.metaKey || event.altKey);
+  };
+
+  const startEditorTool = (event: ReactPointerEvent<HTMLFieldSetElement>) => {
+    if (!canEditSelectedClips || (event.button !== 0 && event.button !== 2)) return;
+    const tool = toolForPointerEvent(event);
+    const point = editorPoint(event.clientX, event.clientY);
+    if (!point) return;
+
+    if (tool === "pointer") {
+      setSelectedClipIds([]);
+      return;
+    }
+    if (tool === "pencil") {
+      event.preventDefault();
+      beginPencilGesture(event);
+      return;
+    }
+    if (tool === "zoom") {
+      event.preventDefault();
+      zoomAtEditorPosition(point.x, event.button === 2 || event.metaKey || event.altKey);
+    }
   };
 
   const dropSyllable = (event: DragEvent<HTMLFieldSetElement>) => {
     event.preventDefault();
-    if (!canEditSelectedClips) return;
+    if (!canEditSelectedClips || activePitchTrack !== "Voice Main") return;
     const editor = editorRef.current;
     const label = event.dataTransfer.getData("text/syllable");
     if (!editor || !label) return;
@@ -641,7 +1140,7 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
       window.clearTimeout(zoomWheelRef.current.frame);
       cancelAnimationFrame(horizontalZoomFrameRef.current);
       endPlayheadDrag();
-      endClipDrag();
+      endEditorGesture();
     },
     [],
   );
@@ -659,10 +1158,15 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
     editorWaveform,
     editorWaveformDurationRatio,
     canEditSelectedClips,
+    activePitchTrack,
+    pitchHistory,
+    backingRenderAction,
     horizontalZoom,
     verticalZoom,
     leftCorrectionTool,
     rightCorrectionTool,
+    secondaryToolModifierActive,
+    selectedClipIds,
     pianoCollapsed,
     serviceTracksCollapsed,
     backingTracks,
@@ -697,6 +1201,8 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
       addBackingTrack,
       regenerateBackingTrack,
       renderBackingTrack,
+      undoPitchEdit,
+      redoPitchEdit,
       openProject,
       saveProject,
       exportAllTracks,
@@ -712,7 +1218,8 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
       handleTimelineWheel,
       handlePianoWheel,
       startPlayheadDrag,
-      startClipDrag,
+      startClipTool,
+      startEditorTool,
       dropSyllable,
     },
   };

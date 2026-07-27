@@ -92,6 +92,7 @@ struct BackingVocalTrack
     std::vector<NoteBlock> notes;
     std::vector<NoteBlock> renderedNotes;
     juce::File audioFile;
+    juce::String voiceProfileId;
 };
 
 struct AnnotationDocument

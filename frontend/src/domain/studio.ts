@@ -110,10 +110,18 @@ export type TimeSignatureSegment = {
 
 export type BackingTrackContent = {
   track: BackingTrackName;
+  voiceProfileId: string;
   hasAudio: boolean;
   audioDurationSeconds: number;
   clips: VocalClip[];
   waveform: WaveformData;
+};
+
+export type VoiceProfileOption = {
+  id: string;
+  name: string;
+  quality: "balanced" | "high";
+  active: boolean;
 };
 
 export type PitchEditorHistoryState = {
@@ -138,6 +146,7 @@ export type StudioProject = {
   initialLoopActive: boolean;
   initialCycleRange: CycleRange;
   backingTrackOptions: readonly BackingTrackName[];
+  voiceProfiles: VoiceProfileOption[];
   initialBackingTracks: BackingTrackName[];
   initialTrackState: Array<{ track: string; state: TrackChannelState }>;
   initialTrackLayerState: Array<{ track: string; state: TrackLayerState }>;

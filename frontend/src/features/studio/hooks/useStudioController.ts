@@ -20,6 +20,11 @@ import type {
   VocalClip,
 } from "@/domain/studio";
 import {
+  chordLabelAtPosition,
+  snapClipsToChords,
+  snapPitchToChord,
+} from "@/features/studio/lib/chord-snap";
+import {
   createMusicalTimeline,
   formatMusicalPosition,
   getMusicalContext,
@@ -64,6 +69,7 @@ type PitchEditorGesture =
   | {
       kind: "pencil";
       anchorX: number;
+      requestedPitch: number;
       clip: VocalClip;
     }
   | {
@@ -113,6 +119,7 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
   const [verticalZoom, setVerticalZoom] = useState(1);
   const [leftCorrectionTool, setLeftCorrectionTool] = useState<CorrectionToolId>("pointer");
   const [rightCorrectionTool, setRightCorrectionTool] = useState<CorrectionToolId>("scissors");
+  const [chordSnapEnabled, setChordSnapEnabled] = useState(false);
   const [secondaryToolModifierActive, setSecondaryToolModifierActive] = useState(false);
   const [selectedClipIds, setSelectedClipIds] = useState<string[]>([]);
   const [pianoCollapsed, setPianoCollapsed] = useState(false);
@@ -354,6 +361,9 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
   ]);
   const activePitchTrack: Exclude<TrackName, "Instrumental"> | null =
     selectedTracks.length === 1 && selectedTracks[0] !== "Instrumental" ? selectedTracks[0] : null;
+  const chordSnapAvailable =
+    activePitchTrack !== null && activePitchTrack !== "Voice Main" && project.chords.length > 0;
+  const chordSnapActive = chordSnapEnabled && chordSnapAvailable;
   const activeEditorClips =
     activePitchTrack === null
       ? []
@@ -400,10 +410,16 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
   const backingRenderAction =
     activePitchTrack !== null && activePitchTrack !== "Voice Main" && selectedTrackContent
       ? !selectedTrackContent.hasAudio
-        ? { track: activePitchTrack, label: "Render" as const }
-        : pitchHistory.canUndo
-          ? { track: activePitchTrack, label: "Re-render" as const }
-          : null
+        ? {
+            track: activePitchTrack,
+            label: "Render" as const,
+            voiceProfileId: selectedTrackContent.voiceProfileId,
+          }
+        : {
+            track: activePitchTrack,
+            label: "Re-render" as const,
+            voiceProfileId: selectedTrackContent.voiceProfileId,
+          }
       : null;
   const sortedClips = useMemo(() => [...editorClips].sort((a, b) => a.x - b.x), [editorClips]);
   const pitchPath = useMemo(() => createPitchPath(sortedClips), [sortedClips]);
@@ -492,6 +508,14 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
 
   const renderBackingTrack = (name: BackingTrackName) => {
     bridge.send({ type: "render-backing-track", track: name });
+  };
+
+  const setBackingVoiceProfile = (name: BackingTrackName, profileId: string) => {
+    bridge.send({
+      type: "set-backing-voice-profile",
+      track: name,
+      profileId,
+    });
   };
 
   const undoPitchEdit = () => {
@@ -767,7 +791,10 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
         (-(event.clientY - gesture.startClientY) / Math.max(1, point.rect.height)) *
         (100 / PITCH_ROW_HEIGHT);
       gesture.changed = gesture.changed || Math.abs(deltaPitch) > 0.01;
-      gesture.result = moveSelectedClips(gesture.source, gesture.clipIds, deltaPitch);
+      const movedClips = moveSelectedClips(gesture.source, gesture.clipIds, deltaPitch);
+      gesture.result = chordSnapActive
+        ? snapClipsToChords(movedClips, gesture.clipIds, project.chords, PITCH_BOTTOM, PITCH_TOP)
+        : movedClips;
       setActiveEditorClips(gesture.result);
       const auditionClip = gesture.result.find(
         (candidate) => candidate.id === gesture.auditionClipId,
@@ -789,13 +816,15 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
       if (Math.abs(point.x - gesture.anchorX) > MIN_CLIP_WIDTH_PERCENT) {
         const x = Math.min(point.x, gesture.anchorX);
         const width = Math.abs(point.x - gesture.anchorX);
-        gesture.clip = createManualClip(
-          gesture.clip.id,
-          x,
-          gesture.clip.pitch,
-          width,
-          gesture.clip.color,
-        );
+        const pitch = chordSnapActive
+          ? snapPitchToChord(
+              gesture.requestedPitch,
+              chordLabelAtPosition(project.chords, x),
+              PITCH_BOTTOM,
+              PITCH_TOP,
+            )
+          : gesture.requestedPitch;
+        gesture.clip = createManualClip(gesture.clip.id, x, pitch, width, gesture.clip.color);
         setActiveEditorClips((current) =>
           current.map((clip) => (clip.id === gesture.clip.id ? gesture.clip : clip)),
         );
@@ -809,6 +838,15 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
         gesture.edge === "start"
           ? stretchClipStartTo(gesture.source, gesture.clipId, gesture.originalStartX + deltaX)
           : stretchClipTo(gesture.source, gesture.clipId, gesture.originalEndX + deltaX);
+      if (chordSnapActive) {
+        gesture.result = snapClipsToChords(
+          gesture.result,
+          [gesture.clipId],
+          project.chords,
+          PITCH_BOTTOM,
+          PITCH_TOP,
+        );
+      }
       setActiveEditorClips(gesture.result);
       return;
     }
@@ -849,7 +887,12 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
           return clip ? [{ clipId, pitch: clip.pitch }] : [];
         });
         if (edits.length > 0 && activePitchTrack !== null) {
-          bridge.send({ type: "move-clips", track: activePitchTrack, clips: edits });
+          bridge.send({
+            type: "move-clips",
+            track: activePitchTrack,
+            clips: edits,
+            snapToChord: chordSnapActive,
+          });
         }
       }
       return;
@@ -866,6 +909,7 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
             pitch: gesture.clip.pitch,
             width: gesture.clip.width,
           },
+          snapToChord: chordSnapActive,
         });
       }
       return;
@@ -881,6 +925,7 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
             clipId: clip.id,
             x: clip.x,
             width: clip.width,
+            snapToChord: chordSnapActive,
           });
         }
       }
@@ -947,16 +992,29 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
       Math.min(100 - point.x, (0.5 / Math.max(0.001, project.timelineDurationSeconds)) * 100),
     );
     const colours: VocalClip["color"][] = ["cyan", "violet", "pink", "amber", "lime", "silver"];
+    const pitch = chordSnapActive
+      ? snapPitchToChord(
+          point.pitch,
+          chordLabelAtPosition(project.chords, point.x),
+          PITCH_BOTTOM,
+          PITCH_TOP,
+        )
+      : point.pitch;
     const clip = createManualClip(
       id,
       point.x,
-      point.pitch,
+      pitch,
       defaultWidth,
       colours[activeEditorClips.length % colours.length],
     );
     setActiveEditorClips((current) => [...current, clip]);
     setSelectedClipIds([id]);
-    beginEditorGesture({ kind: "pencil", anchorX: point.x, clip });
+    beginEditorGesture({
+      kind: "pencil",
+      anchorX: point.x,
+      requestedPitch: point.pitch,
+      clip,
+    });
   };
 
   const startClipTool = (event: ReactPointerEvent<HTMLButtonElement>, clip: VocalClip) => {
@@ -1010,7 +1068,16 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
 
     if (tool === "scissors") {
       const rightClipId = nextManualClipId(activeEditorClips);
-      const result = splitClipAt(activeEditorClips, clip.id, point.x, rightClipId);
+      const splitResult = splitClipAt(activeEditorClips, clip.id, point.x, rightClipId);
+      const result = chordSnapActive
+        ? snapClipsToChords(
+            splitResult,
+            [clip.id, rightClipId],
+            project.chords,
+            PITCH_BOTTOM,
+            PITCH_TOP,
+          )
+        : splitResult;
       if (result !== activeEditorClips) {
         setActiveEditorClips(result);
         setSelectedClipIds([clip.id, rightClipId]);
@@ -1021,6 +1088,7 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
             clipId: clip.id,
             x: point.x,
             rightClipId,
+            snapToChord: chordSnapActive,
           });
         }
       }
@@ -1029,7 +1097,14 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
 
     if (tool === "join") {
       const clipIds = getJoinCandidateIds(activeEditorClips, selectedClipIds, clip.id);
-      const result = joinClips(activeEditorClips, clipIds);
+      const joinedResult = joinClips(activeEditorClips, clipIds);
+      const joinedClipId = [...activeEditorClips]
+        .filter((candidate) => clipIds.includes(candidate.id))
+        .sort((left, right) => left.x - right.x)[0]?.id;
+      const result =
+        chordSnapActive && joinedClipId
+          ? snapClipsToChords(joinedResult, [joinedClipId], project.chords, PITCH_BOTTOM, PITCH_TOP)
+          : joinedResult;
       if (result !== activeEditorClips) {
         const target = [...activeEditorClips]
           .filter((candidate) => clipIds.includes(candidate.id))
@@ -1037,7 +1112,12 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
         setActiveEditorClips(result);
         setSelectedClipIds(target ? [target.id] : []);
         if (activePitchTrack !== null) {
-          bridge.send({ type: "join-clips", track: activePitchTrack, clipIds });
+          bridge.send({
+            type: "join-clips",
+            track: activePitchTrack,
+            clipIds,
+            snapToChord: chordSnapActive,
+          });
         }
       }
       return;
@@ -1165,11 +1245,14 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
     verticalZoom,
     leftCorrectionTool,
     rightCorrectionTool,
+    chordSnapEnabled,
+    chordSnapAvailable,
     secondaryToolModifierActive,
     selectedClipIds,
     pianoCollapsed,
     serviceTracksCollapsed,
     backingTracks,
+    voiceProfiles: project.voiceProfiles,
     selectedTracks,
     trackState,
     trackLayerState,
@@ -1201,6 +1284,7 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
       addBackingTrack,
       regenerateBackingTrack,
       renderBackingTrack,
+      setBackingVoiceProfile,
       undoPitchEdit,
       redoPitchEdit,
       openProject,
@@ -1209,6 +1293,7 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
       exportMidiFiles,
       setLeftCorrectionTool,
       setRightCorrectionTool,
+      setChordSnapEnabled,
       setPianoCollapsed,
       setServiceTracksCollapsed,
       setHorizontalZoomFromInput,

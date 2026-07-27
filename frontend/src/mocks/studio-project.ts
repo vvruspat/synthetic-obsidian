@@ -97,6 +97,14 @@ export const mockStudioProject: StudioProject = {
   initialLoopActive: true,
   initialCycleRange: { start: 25, end: 50 },
   backingTrackOptions: BACKING_TRACK_OPTIONS,
+  voiceProfiles: [
+    {
+      id: "lena-lora-demo",
+      name: "Lena",
+      quality: "high",
+      active: true,
+    },
+  ],
   initialBackingTracks: ["Third Above"],
   initialTrackState: [
     { track: "Instrumental", state: { mute: false, solo: false } },
@@ -114,6 +122,7 @@ export const mockStudioProject: StudioProject = {
   backingTrackContents: [
     {
       track: "Third Above",
+      voiceProfileId: "lena-lora-demo",
       hasAudio: false,
       audioDurationSeconds: 0,
       clips: mockClips

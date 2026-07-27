@@ -27,6 +27,8 @@ from torch import nn
 from scipy.ndimage import gaussian_filter1d, median_filter
 from scipy.signal import resample_poly
 
+from soulx_lora import load_adapter, remove_lora
+
 
 SOULX_SAMPLE_RATE = 24_000
 SOULX_HOP_SIZE = 480
@@ -221,6 +223,52 @@ def select_prompt_window(
     return audio[start_sample:end_sample], f0[start_frame:end_frame], start_frame / SOULX_F0_RATE
 
 
+def select_best_prompt(
+    request: dict[str, Any],
+    target_audio_path: Path,
+    target_audio: np.ndarray,
+    target_f0: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, float, Path]:
+    """Pick the most consistently voiced prompt from the active local profile."""
+    candidates: list[Path] = []
+    raw_candidates = request.get("prompt_audio_candidates", [])
+    if isinstance(raw_candidates, list):
+        for value in raw_candidates:
+            if isinstance(value, str) and value:
+                candidates.append(Path(value).expanduser().resolve())
+    candidates.append(target_audio_path)
+
+    best: tuple[np.ndarray, np.ndarray, float, Path] | None = None
+    best_score = -1.0
+    for candidate_path in candidates:
+        try:
+            if candidate_path == target_audio_path:
+                candidate_audio = target_audio
+                candidate_f0 = target_f0
+            else:
+                candidate_audio = load_mono_24k(candidate_path)
+                if not len(candidate_audio):
+                    continue
+                candidate_f0 = extract_f0(candidate_audio)
+            prompt_audio, prompt_f0, prompt_start = select_prompt_window(
+                candidate_audio,
+                candidate_f0,
+            )
+        except (OSError, RuntimeError, ValueError):
+            continue
+
+        voiced_ratio = float(np.mean(prompt_f0 > 32.0)) if len(prompt_f0) else 0.0
+        duration_score = min(1.0, len(prompt_audio) / (8.0 * SOULX_SAMPLE_RATE))
+        score = voiced_ratio * 0.9 + duration_score * 0.1
+        if score > best_score:
+            best_score = score
+            best = prompt_audio, prompt_f0, prompt_start, candidate_path
+
+    if best is None:
+        raise ValueError("no usable voice prompt was found")
+    return best
+
+
 def build_sample_mask(note_mask: np.ndarray, sample_count: int) -> np.ndarray:
     expanded = np.repeat(note_mask, SOULX_HOP_SIZE)[:sample_count]
     if len(expanded) < sample_count:
@@ -276,8 +324,27 @@ class SoulXRenderer:
         )
         if self.device == "mps":
             self.model.vocoder = CpuVocoderBridge(self.model.vocoder)
+        self.active_adapter_path: Path | None = None
+
+    def activate_adapter(self, requested_path: str | None) -> None:
+        adapter_path = (
+            Path(requested_path).expanduser().resolve()
+            if requested_path
+            else None
+        )
+        if adapter_path == self.active_adapter_path:
+            return
+        if adapter_path is None:
+            remove_lora(self.model)
+        else:
+            if not adapter_path.is_file():
+                raise FileNotFoundError(f"SoulX LoRA adapter not found: {adapter_path}")
+            load_adapter(self.model, adapter_path, device=self.device)
+        self.model.eval()
+        self.active_adapter_path = adapter_path
 
     def render(self, request: dict[str, Any]) -> dict[str, Any]:
+        self.activate_adapter(request.get("voice_adapter"))
         audio_path = Path(request["audio"]).expanduser().resolve()
         output_path = Path(request["output"]).expanduser().resolve()
         notes = request.get("backing_notes", [])
@@ -293,7 +360,12 @@ class SoulXRenderer:
         if np.count_nonzero(target_f0) < 5:
             raise ValueError("backing notes do not overlap voiced source audio")
 
-        prompt_audio, prompt_f0, prompt_start = select_prompt_window(audio, source_f0)
+        prompt_audio, prompt_f0, prompt_start, prompt_source = select_best_prompt(
+            request,
+            audio_path,
+            audio,
+            source_f0,
+        )
         prompt_wav = torch.from_numpy(prompt_audio).unsqueeze(0).to(self.device)
         target_wav = torch.from_numpy(audio).unsqueeze(0).to(self.device)
         prompt_f0_tensor = torch.from_numpy(prompt_f0).unsqueeze(0).to(self.device)
@@ -334,6 +406,12 @@ class SoulXRenderer:
             "steps": int(request.get("steps", self.steps)),
             "prompt_start": prompt_start,
             "prompt_duration": len(prompt_audio) / SOULX_SAMPLE_RATE,
+            "prompt_source": str(prompt_source),
+            "voice_adapter": (
+                str(self.active_adapter_path)
+                if self.active_adapter_path is not None
+                else ""
+            ),
         }
 
 

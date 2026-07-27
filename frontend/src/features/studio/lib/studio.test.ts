@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { VocalClip } from "@/domain/studio";
 import {
+  chordPitchClasses,
+  snapClipToChord,
+  snapPitchToChord,
+} from "@/features/studio/lib/chord-snap";
+import {
   createMusicalTimeline,
   createTempoPath,
   formatMusicalPosition,
@@ -153,6 +158,28 @@ describe("studio value helpers", () => {
     expect(moved[0].pitch).toBe(62);
     expect(moved[1].pitch).toBe(72);
     expect(moved[0].pitchCurve?.[0]).toEqual({ x: 4, pitch: 62.25 });
+  });
+
+  it("snaps backing pitches to the active chord tones", () => {
+    expect(chordPitchClasses("Gm7")).toEqual([2, 5, 7, 10]);
+    expect(chordPitchClasses("E♭maj7")).toEqual([2, 3, 7, 10]);
+    expect(chordPitchClasses("Bm7b5")).toEqual([2, 5, 9, 11]);
+    expect(chordPitchClasses("C(5)")).toEqual([0, 7]);
+    expect(snapPitchToChord(61.8, "C", 48, 72)).toBe(60);
+    expect(snapPitchToChord(62.8, "C", 48, 72)).toBe(64);
+
+    const clip = createManualClip("n010", 55, 66, 8, "cyan");
+    const snapped = snapClipToChord(
+      clip,
+      [
+        { label: "C", width: 50 },
+        { label: "Dm", width: 50 },
+      ],
+      48,
+      72,
+    );
+    expect(snapped.pitch).toBe(65);
+    expect(snapped.pitchCurve?.map(({ pitch }) => pitch)).toEqual([65, 65]);
   });
 
   it("creates, stretches, splits, and joins manual clips", () => {

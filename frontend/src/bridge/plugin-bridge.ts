@@ -25,9 +25,84 @@ export type ProjectAction =
   | "export-midi"
   | "validate";
 
+export type VoiceTrainingSource = {
+  id: string;
+  name: string;
+  durationSeconds: number;
+  sampleRate: number;
+  channels: number;
+  status: "ready" | "warning" | "rejected";
+  message: string;
+};
+
+export type VoiceTrainingJob = {
+  jobId: string;
+  presetName: string;
+  quality: "balanced" | "high";
+  status:
+    | "queued"
+    | "preparing"
+    | "loading"
+    | "preprocessing"
+    | "training"
+    | "saving"
+    | "cancelling"
+    | "complete"
+    | "cancelled"
+    | "error";
+  stage: string;
+  message: string;
+  progress: number;
+  currentStep: number;
+  totalSteps: number;
+  createdAt: string;
+  updatedAt: string;
+  profileDirectory: string;
+  adapterFile: string;
+  canCancel: boolean;
+  loss?: number;
+};
+
+export type VoiceTrainingState = {
+  phase: "idle" | "ready" | "preparing" | "cancelling" | "complete" | "cancelled" | "error";
+  message: string;
+  progress: number;
+  device: string;
+  isAppleSilicon: boolean;
+  sources: VoiceTrainingSource[];
+  totalDurationSeconds: number;
+  minimumDurationSeconds: number;
+  recommendedDurationSeconds: number;
+  canCreateProfile: boolean;
+  activeProfileName: string;
+  outputDirectory: string;
+  fineTuningAvailable: boolean;
+  canStartTraining: boolean;
+  jobs: VoiceTrainingJob[];
+};
+
 export type PluginCommand =
   | { type: "frontend-ready" }
   | { type: "project-action"; action: ProjectAction }
+  | {
+      type: "voice-training";
+      action:
+        | "request-state"
+        | "add-files"
+        | "add-current-track"
+        | "remove-file"
+        | "clear-files"
+        | "create-profile"
+        | "start-training"
+        | "cancel-training"
+        | "reveal-training"
+        | "cancel"
+        | "reveal-profile";
+      sourceId?: string;
+      jobId?: string;
+      presetName?: string;
+      quality?: "balanced" | "high";
+    }
   | { type: "transport"; action: "return-to-start" | "play" | "pause" | "stop" }
   | { type: "set-loop"; active: boolean; range: CycleRange }
   | { type: "set-playhead"; position: number }
@@ -47,6 +122,11 @@ export type PluginCommand =
   | { type: "regenerate-backing-track"; track: BackingTrackName }
   | { type: "render-backing-track"; track: BackingTrackName }
   | {
+      type: "set-backing-voice-profile";
+      track: BackingTrackName;
+      profileId: string;
+    }
+  | {
       type: "pitch-history";
       action: "undo" | "redo";
       track: Exclude<TrackName, "Instrumental">;
@@ -56,11 +136,13 @@ export type PluginCommand =
       track: Exclude<TrackName, "Instrumental">;
       clipId: string;
       pitch: number;
+      snapToChord?: boolean;
     }
   | {
       type: "add-clip";
       track: Exclude<TrackName, "Instrumental">;
       clip: { id: string; x: number; pitch: number; width: number };
+      snapToChord?: boolean;
     }
   | {
       type: "delete-clips";
@@ -71,6 +153,7 @@ export type PluginCommand =
       type: "move-clips";
       track: Exclude<TrackName, "Instrumental">;
       clips: Array<{ clipId: string; pitch: number }>;
+      snapToChord?: boolean;
     }
   | {
       type: "preview-pitch-tone";
@@ -86,6 +169,7 @@ export type PluginCommand =
       clipId: string;
       x: number;
       width: number;
+      snapToChord?: boolean;
     }
   | {
       type: "split-clip";
@@ -93,11 +177,13 @@ export type PluginCommand =
       clipId: string;
       x: number;
       rightClipId: string;
+      snapToChord?: boolean;
     }
   | {
       type: "join-clips";
       track: Exclude<TrackName, "Instrumental">;
       clipIds: string[];
+      snapToChord?: boolean;
     }
   | {
       type: "set-clip-vibrato";
@@ -114,6 +200,7 @@ export type PluginCommand =
 
 export type PluginEvent =
   | { type: "project-state"; project: StudioProject }
+  | { type: "voice-training-state"; state: VoiceTrainingState }
   | {
       type: "status-state";
       message: string;

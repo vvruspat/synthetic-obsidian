@@ -57,6 +57,12 @@ target_link_libraries(VocalAnnotationTool
 )
 
 if(APPLE)
+    set(
+        SYNTHETIC_OBSIDIAN_MACOS_CODESIGN_IDENTITY
+        ""
+        CACHE STRING
+        "Optional signing identity for stable macOS privacy permissions during local builds"
+    )
     set_target_properties(VocalAnnotationTool PROPERTIES
         OSX_ARCHITECTURES "arm64;x86_64"
     )
@@ -64,6 +70,20 @@ if(APPLE)
         -Wall -Wextra -Wpedantic
         -Wno-unused-parameter
     )
+    if(SYNTHETIC_OBSIDIAN_MACOS_CODESIGN_IDENTITY)
+        add_custom_command(
+            TARGET VocalAnnotationTool
+            POST_BUILD
+            COMMAND
+                /usr/bin/codesign
+                --force
+                --deep
+                --sign "${SYNTHETIC_OBSIDIAN_MACOS_CODESIGN_IDENTITY}"
+                "$<TARGET_BUNDLE_DIR:VocalAnnotationTool>"
+            COMMENT "Signing VocalAnnotationTool for stable macOS privacy permissions"
+            VERBATIM
+        )
+    endif()
 elseif(WIN32)
     target_compile_options(VocalAnnotationTool PRIVATE
         /W4

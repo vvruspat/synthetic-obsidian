@@ -1,11 +1,13 @@
 import {
   ArrowUturnLeftIcon,
   ArrowUturnRightIcon,
+  MusicalNoteIcon,
   SpeakerWaveIcon,
 } from "@heroicons/react/24/outline";
 import type { CSSProperties } from "react";
 import type { WaveformData } from "@/domain/studio";
 import { CorrectionToolSelect } from "@/features/studio/components/CorrectionToolSelect";
+import { VoiceProfileSelect } from "@/features/studio/components/VoiceProfileSelect";
 import { PianoWaveform } from "@/features/studio/components/Waveforms";
 import type { StudioController } from "@/features/studio/hooks/useStudioController";
 import {
@@ -30,8 +32,11 @@ export function PianoToolbar({
     pianoCollapsed,
     leftCorrectionTool,
     rightCorrectionTool,
+    chordSnapEnabled,
+    chordSnapAvailable,
     pitchHistory,
     backingRenderAction,
+    voiceProfiles,
     actions,
   } = controller;
   const renderingSelectedTrack =
@@ -50,6 +55,22 @@ export function PianoToolbar({
           value={rightCorrectionTool}
           onChange={actions.setRightCorrectionTool}
         />
+        <button
+          type="button"
+          className={`chord-snap-toggle ${chordSnapEnabled ? "is-active" : ""}`}
+          aria-label="Snap backing notes to chord tones"
+          aria-pressed={chordSnapEnabled}
+          title={
+            chordSnapAvailable
+              ? "Snap backing notes to the current chord"
+              : "Select a backing track with analyzed chords"
+          }
+          disabled={!chordSnapAvailable}
+          onClick={() => actions.setChordSnapEnabled((current) => !current)}
+        >
+          <MusicalNoteIcon aria-hidden="true" />
+          <span>Chord</span>
+        </button>
       </div>
       <div className="piano-history-actions">
         <button
@@ -73,21 +94,32 @@ export function PianoToolbar({
           <ArrowUturnRightIcon aria-hidden="true" />
         </button>
         {backingRenderAction ? (
-          <button
-            type="button"
-            className={`piano-toolbar-action piano-render-action ${
-              backingRenderAction.label === "Re-render" ? "is-rerender" : ""
-            } ${renderingSelectedTrack ? "is-rendering" : ""}`}
-            disabled={backingRenderBusy}
-            onClick={() => actions.renderBackingTrack(backingRenderAction.track)}
-          >
-            <SpeakerWaveIcon aria-hidden="true" />
-            {renderingSelectedTrack
-              ? backingRenderAction.label === "Re-render"
-                ? "Re-rendering…"
-                : "Rendering…"
-              : backingRenderAction.label}
-          </button>
+          <>
+            <VoiceProfileSelect
+              track={backingRenderAction.track}
+              profiles={voiceProfiles}
+              value={backingRenderAction.voiceProfileId}
+              disabled={backingRenderBusy}
+              onChange={(profileId) =>
+                actions.setBackingVoiceProfile(backingRenderAction.track, profileId)
+              }
+            />
+            <button
+              type="button"
+              className={`piano-toolbar-action piano-render-action ${
+                backingRenderAction.label === "Re-render" ? "is-rerender" : ""
+              } ${renderingSelectedTrack ? "is-rendering" : ""}`}
+              disabled={backingRenderBusy}
+              onClick={() => actions.renderBackingTrack(backingRenderAction.track)}
+            >
+              <SpeakerWaveIcon aria-hidden="true" />
+              {renderingSelectedTrack
+                ? backingRenderAction.label === "Re-render"
+                  ? "Re-rendering…"
+                  : "Rendering…"
+                : backingRenderAction.label}
+            </button>
+          </>
         ) : null}
       </div>
       <button

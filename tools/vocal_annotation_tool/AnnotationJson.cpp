@@ -249,6 +249,7 @@ juce::Result AnnotationJson::load(const juce::File& jsonFile, AnnotationDocument
             BackingVocalTrack track;
             track.styleId = stringProperty(*trackObject, "style_id");
             track.styleName = stringProperty(*trackObject, "style_name");
+            track.voiceProfileId = stringProperty(*trackObject, "voice_profile_id");
             const auto trackAudioPath = stringProperty(*trackObject, "audio");
             track.audioFile = trackAudioPath.isEmpty()
                 ? juce::File()
@@ -287,7 +288,8 @@ juce::Result AnnotationJson::load(const juce::File& jsonFile, AnnotationDocument
             loaded.backingStyleName,
             loaded.backingNotes,
             loaded.backingNotes,
-            loaded.backingAudioFile
+            loaded.backingAudioFile,
+            {}
         });
     }
     else if (! loaded.backingTracks.empty())
@@ -431,6 +433,8 @@ juce::Result AnnotationJson::save(const AnnotationDocument& document, const juce
         auto* object = new juce::DynamicObject();
         object->setProperty("style_id", track.styleId);
         object->setProperty("style_name", track.styleName);
+        if (track.voiceProfileId.isNotEmpty())
+            object->setProperty("voice_profile_id", track.voiceProfileId);
         object->setProperty(
             "audio",
             projectPathForFile(track.audioFile, jsonFile));

@@ -35,6 +35,203 @@ constexpr int kWaveformPointCount = 65536;
 constexpr int kWaveformReadBlockSize = 32768;
 constexpr double kMinimumWebNoteLengthSeconds = 0.04;
 
+juce::String supportedAudioFileWildcard()
+{
+   #if JUCE_MAC || JUCE_IOS
+    // CoreAudioFormat, registered by registerBasicFormats(), provides the
+    // platform MP3 decoder without enabling JUCE's optional software decoder.
+    return "*.wav;*.aiff;*.aif;*.flac;*.mp3";
+   #else
+    return "*.wav;*.aiff;*.aif;*.flac";
+   #endif
+}
+
+std::optional<std::array<bool, 12>> chordPitchClasses(
+    const juce::String& chordName)
+{
+    const auto name = chordName.trim();
+    if (name.isEmpty())
+        return std::nullopt;
+
+    auto root = 0;
+    switch (juce::CharacterFunctions::toUpperCase(name[0]))
+    {
+        case 'C': root = 0; break;
+        case 'D': root = 2; break;
+        case 'E': root = 4; break;
+        case 'F': root = 5; break;
+        case 'G': root = 7; break;
+        case 'A': root = 9; break;
+        case 'B': root = 11; break;
+        default: return std::nullopt;
+    }
+
+    auto qualityStart = 1;
+    if (name.length() > 1)
+    {
+        const auto accidental = name[1];
+        if (accidental == '#' || accidental == 0x266f)
+        {
+            root = (root + 1) % 12;
+            ++qualityStart;
+        }
+        else if (accidental == 'b' || accidental == 0x266d)
+        {
+            root = (root + 11) % 12;
+            ++qualityStart;
+        }
+    }
+
+    const auto quality = name.substring(qualityStart).trim().toLowerCase();
+    const auto halfDiminished =
+        quality.contains("m7b5") || quality.containsChar(0x00f8);
+    const auto diminished = halfDiminished
+        || quality.contains("dim")
+        || quality.containsChar(0x00b0);
+    const auto augmented =
+        quality.contains("aug") || quality.startsWithChar('+');
+    const auto power =
+        quality == "5" || quality.startsWith("(5)");
+    const auto suspended2 = quality.contains("sus2");
+    const auto suspended4 =
+        ! suspended2 && quality.contains("sus");
+    const auto minor = ! diminished
+        && ((quality.startsWithChar('m') && ! quality.startsWith("maj"))
+            || quality.startsWith("min")
+            || quality.contains("minor"));
+
+    std::array<bool, 12> pitchClasses {};
+    const auto addInterval = [&pitchClasses, root](int interval)
+    {
+        pitchClasses[static_cast<size_t>((root + interval) % 12)] = true;
+    };
+    if (power)
+    {
+        addInterval(0);
+        addInterval(7);
+    }
+    else if (diminished)
+    {
+        addInterval(0);
+        addInterval(3);
+        addInterval(6);
+    }
+    else if (augmented)
+    {
+        addInterval(0);
+        addInterval(4);
+        addInterval(8);
+    }
+    else if (suspended2)
+    {
+        addInterval(0);
+        addInterval(2);
+        addInterval(7);
+    }
+    else if (suspended4)
+    {
+        addInterval(0);
+        addInterval(5);
+        addInterval(7);
+    }
+    else
+    {
+        addInterval(0);
+        addInterval(minor ? 3 : 4);
+        addInterval(7);
+    }
+
+    if (quality.contains("b5"))
+    {
+        pitchClasses[static_cast<size_t>((root + 7) % 12)] = false;
+        addInterval(6);
+    }
+    else if (quality.contains("#5"))
+    {
+        pitchClasses[static_cast<size_t>((root + 7) % 12)] = false;
+        addInterval(8);
+    }
+
+    const auto hasMajorSeventh =
+        quality.contains("maj7")
+        || quality.contains("major7")
+        || quality.containsChar(0x25b3);
+    if (hasMajorSeventh)
+        addInterval(11);
+    else if (halfDiminished
+             || quality.containsChar('7')
+             || quality.contains("9")
+             || quality.contains("11")
+             || quality.contains("13"))
+        addInterval(10);
+
+    if (quality.contains("6") || quality.contains("13"))
+        addInterval(9);
+    if (quality.contains("b9"))
+        addInterval(1);
+    else if (quality.contains("#9"))
+        addInterval(3);
+    else if (quality.contains("9"))
+        addInterval(2);
+    if (quality.contains("11"))
+        addInterval(5);
+
+    return pitchClasses;
+}
+
+double snapPitchToChord(
+    double requestedPitch,
+    double noteStart,
+    const std::vector<ChordSegment>& chords)
+{
+    const auto chord = std::find_if(
+        chords.begin(),
+        chords.end(),
+        [noteStart](const auto& candidate)
+        {
+            return noteStart >= candidate.start - 0.000001
+                && noteStart < candidate.end - 0.000001;
+        });
+    if (chord == chords.end())
+        return requestedPitch;
+
+    const auto pitchClasses = chordPitchClasses(chord->name);
+    if (! pitchClasses)
+        return requestedPitch;
+
+    auto bestPitch = requestedPitch;
+    auto bestDistance = std::numeric_limits<double>::infinity();
+    for (auto candidate = 0; candidate <= 127; ++candidate)
+    {
+        if (! (*pitchClasses)[static_cast<size_t>(candidate % 12)])
+            continue;
+        const auto distance =
+            std::abs(static_cast<double>(candidate) - requestedPitch);
+        if (distance < bestDistance)
+        {
+            bestDistance = distance;
+            bestPitch = static_cast<double>(candidate);
+        }
+    }
+    return bestPitch;
+}
+
+void moveNoteToPitch(NoteBlock& note, double requestedPitch)
+{
+    const auto pitch = juce::jlimit(0.0, 127.0, requestedPitch);
+    const auto pitchDelta = pitch - note.pitchExact;
+    note.pitchExact = pitch;
+    note.pitch = juce::jlimit(
+        0,
+        127,
+        static_cast<int>(std::lround(pitch)));
+    for (auto& point : note.curve)
+        point.midi = juce::jlimit(
+            0.0,
+            127.0,
+            point.midi + pitchDelta);
+}
+
 struct WaveformPoint
 {
     float minimum = 0.0f;
@@ -184,6 +381,28 @@ struct PitchTrackHistory
 {
     std::vector<PitchTrackSnapshot> undo;
     std::vector<PitchTrackSnapshot> redo;
+};
+
+struct VoiceTrainingSource
+{
+    juce::File file;
+    double durationSeconds = 0.0;
+    double sampleRate = 0.0;
+    int channels = 0;
+    bool usable = false;
+    juce::String status;
+    juce::String message;
+};
+
+struct VoiceProfileOption
+{
+    juce::String id;
+    juce::String name;
+    juce::String quality;
+    juce::File directory;
+    juce::File adapterFile;
+    std::vector<juce::File> sources;
+    bool active = false;
 };
 
 struct BackingStyleDefinition
@@ -912,6 +1131,7 @@ public:
           webView_([this](const juce::var& command) { handleWebCommand(command); })
     {
         formatManager_.registerBasicFormats();
+        loadActiveVoiceProfile();
         editor_.setListener(this);
 
         addToolbarButton(openAudioButton_, "Open Audio", [this] { chooseAudioFile(); });
@@ -1012,6 +1232,8 @@ public:
 
     ~MainComponent() override
     {
+        if (voiceProfileCancellation_ != nullptr)
+            voiceProfileCancellation_->store(true, std::memory_order_release);
         stopTimer();
         stopBackingVocalWorker();
         stopBackingAudioWorker();
@@ -1828,6 +2050,939 @@ private:
         webView_.dispatch(event);
     }
 
+    double voiceTrainingUsableDuration() const
+    {
+        double duration = 0.0;
+        for (const auto& source : voiceTrainingSources_)
+            if (source.usable)
+                duration += source.durationSeconds;
+        return duration;
+    }
+
+    static juce::File voiceProfilesRoot()
+    {
+        return juce::File::getSpecialLocation(juce::File::userHomeDirectory)
+            .getChildFile(".synthetic_obsidian")
+            .getChildFile("models")
+            .getChildFile("voice_profiles");
+    }
+
+    static juce::File voiceTrainingJobsRoot()
+    {
+        return juce::File::getSpecialLocation(juce::File::userHomeDirectory)
+            .getChildFile(".synthetic_obsidian")
+            .getChildFile("training")
+            .getChildFile("jobs");
+    }
+
+    std::vector<VoiceProfileOption> readVoiceProfileOptions() const
+    {
+        const auto profilesRoot = voiceProfilesRoot();
+        juce::Array<juce::File> directories;
+        profilesRoot.findChildFiles(
+            directories,
+            juce::File::findDirectories,
+            false);
+
+        std::vector<VoiceProfileOption> profiles;
+        profiles.reserve(static_cast<size_t>(directories.size()));
+        for (const auto& directory : directories)
+        {
+            const auto manifestValue =
+                juce::JSON::parse(directory.getChildFile("manifest.json"));
+            const auto* manifest = manifestValue.getDynamicObject();
+            if (manifest == nullptr)
+                continue;
+
+            const auto adapterRelativePath =
+                manifest->getProperty("adapterFile").toString();
+            if (adapterRelativePath.isEmpty())
+                continue;
+
+            const auto directoryPrefix =
+                directory.getFullPathName() + juce::File::getSeparatorString();
+            const auto adapterFile = directory.getChildFile(adapterRelativePath);
+            if (! adapterFile.existsAsFile()
+                || ! adapterFile.getFullPathName().startsWith(directoryPrefix))
+            {
+                continue;
+            }
+
+            VoiceProfileOption profile;
+            profile.id = directory.getFileName();
+            profile.name = manifest->getProperty("presetName").toString();
+            if (profile.name.isEmpty())
+                profile.name = profile.id;
+            profile.quality =
+                manifest->getProperty("quality").toString() == "high"
+                    ? "high"
+                    : "balanced";
+            profile.directory = directory;
+            profile.adapterFile = adapterFile;
+            profile.active = profile.id == activeVoiceProfileId_;
+
+            if (const auto* sourceValues =
+                    manifest->getProperty("sources").getArray())
+            {
+                for (const auto& sourceValue : *sourceValues)
+                {
+                    const auto* source = sourceValue.getDynamicObject();
+                    if (source == nullptr)
+                        continue;
+                    const auto sourceFile = directory.getChildFile(
+                        source->getProperty("file").toString());
+                    if (sourceFile.existsAsFile()
+                        && sourceFile.getFullPathName().startsWith(directoryPrefix))
+                    {
+                        profile.sources.push_back(sourceFile);
+                    }
+                }
+            }
+            profiles.push_back(std::move(profile));
+        }
+
+        std::sort(
+            profiles.begin(),
+            profiles.end(),
+            [](const auto& left, const auto& right)
+            {
+                if (left.active != right.active)
+                    return left.active;
+                const auto nameComparison =
+                    left.name.compareNatural(right.name);
+                return nameComparison != 0
+                    ? nameComparison < 0
+                    : left.id < right.id;
+            });
+        return profiles;
+    }
+
+    void loadActiveVoiceProfile()
+    {
+        const auto profilesRoot = voiceProfilesRoot();
+        const auto activeFile = profilesRoot.getChildFile("active.json");
+        if (! activeFile.existsAsFile())
+            return;
+
+        const auto activeValue = juce::JSON::parse(activeFile);
+        const auto* activeObject = activeValue.getDynamicObject();
+        if (activeObject == nullptr)
+            return;
+
+        const auto directoryName =
+            juce::File(activeObject->getProperty("directory").toString()).getFileName();
+        const auto profileDirectory = profilesRoot.getChildFile(directoryName);
+        const auto manifestFile = profileDirectory.getChildFile("manifest.json");
+        if (! profileDirectory.isDirectory() || ! manifestFile.existsAsFile())
+            return;
+
+        const auto manifestValue = juce::JSON::parse(manifestFile);
+        const auto* manifest = manifestValue.getDynamicObject();
+        if (manifest == nullptr)
+            return;
+
+        std::vector<juce::File> sources;
+        std::vector<VoiceTrainingSource> trainingSources;
+        if (const auto* sourceValues = manifest->getProperty("sources").getArray())
+        {
+            for (const auto& sourceValue : *sourceValues)
+            {
+                const auto* source = sourceValue.getDynamicObject();
+                if (source == nullptr)
+                    continue;
+                const auto relativePath = source->getProperty("file").toString();
+                const auto file = profileDirectory.getChildFile(relativePath);
+                if (file.existsAsFile()
+                    && file.getFullPathName().startsWith(
+                        profileDirectory.getFullPathName()
+                            + juce::File::getSeparatorString()))
+                {
+                    sources.push_back(file);
+                    trainingSources.push_back(inspectVoiceTrainingSource(file));
+                }
+            }
+        }
+        if (sources.empty())
+            return;
+
+        activeVoiceProfileName_ = manifest->getProperty("presetName").toString();
+        activeVoiceProfileId_ = directoryName;
+        activeVoiceProfileQuality_ =
+            manifest->getProperty("quality").toString() == "high" ? "high" : "balanced";
+        activeVoiceProfileDirectory_ = profileDirectory;
+        activeVoiceProfileSources_ = std::move(sources);
+        activeVoiceAdapterFile_ = juce::File();
+        const auto adapterRelativePath = manifest->getProperty("adapterFile").toString();
+        if (adapterRelativePath.isNotEmpty())
+        {
+            const auto adapterFile = profileDirectory.getChildFile(adapterRelativePath);
+            if (adapterFile.existsAsFile()
+                && adapterFile.getFullPathName().startsWith(
+                    profileDirectory.getFullPathName()
+                        + juce::File::getSeparatorString()))
+            {
+                activeVoiceAdapterFile_ = adapterFile;
+            }
+        }
+        if (voiceTrainingSources_.empty())
+            voiceTrainingSources_ = std::move(trainingSources);
+        voiceTrainingPhase_ = "complete";
+        voiceTrainingMessage_ =
+            "The active local profile is ready for new backing-vocal renders.";
+        voiceTrainingProgress_ = 1.0;
+        lastActiveProfilePointerModificationMs_ =
+            activeFile.getLastModificationTime().toMilliseconds();
+    }
+
+    VoiceTrainingSource inspectVoiceTrainingSource(const juce::File& file)
+    {
+        VoiceTrainingSource source;
+        source.file = file;
+        source.status = "rejected";
+        source.message = "The audio file could not be read.";
+
+        std::unique_ptr<juce::AudioFormatReader> reader(formatManager_.createReaderFor(file));
+        if (reader == nullptr || reader->sampleRate <= 0.0 || reader->lengthInSamples <= 0)
+            return source;
+
+        source.durationSeconds =
+            static_cast<double>(reader->lengthInSamples) / reader->sampleRate;
+        source.sampleRate = reader->sampleRate;
+        source.channels = static_cast<int>(reader->numChannels);
+
+        if (source.durationSeconds < 3.0)
+        {
+            source.message = "Too short. Use recordings that are at least 3 seconds long.";
+            return source;
+        }
+
+        source.usable = true;
+        if (source.sampleRate < 32000.0)
+        {
+            source.status = "warning";
+            source.message = "Usable, but 44.1 kHz or 48 kHz audio will preserve more detail.";
+        }
+        else if (source.channels > 1)
+        {
+            source.status = "warning";
+            source.message = "Usable. Mono dry vocals are preferred; this file will be downmixed.";
+        }
+        else
+        {
+            source.status = "ready";
+            source.message = "Ready for the local voice profile.";
+        }
+        return source;
+    }
+
+    void addVoiceTrainingSource(const juce::File& file)
+    {
+        if (! file.existsAsFile())
+            return;
+
+        const auto path = file.getFullPathName();
+        const auto duplicate = std::any_of(
+            voiceTrainingSources_.begin(),
+            voiceTrainingSources_.end(),
+            [&path](const auto& source)
+            {
+                return source.file.getFullPathName() == path;
+            });
+        if (! duplicate)
+            voiceTrainingSources_.push_back(inspectVoiceTrainingSource(file));
+    }
+
+    std::vector<juce::var> readVoiceTrainingJobStates() const
+    {
+        juce::Array<juce::File> directories;
+        voiceTrainingJobsRoot().findChildFiles(
+            directories,
+            juce::File::findDirectories,
+            false);
+
+        std::vector<juce::var> jobs;
+        jobs.reserve(static_cast<size_t>(directories.size()));
+        for (const auto& directory : directories)
+        {
+            const auto stateFile = directory.getChildFile("state.json");
+            if (! stateFile.existsAsFile())
+                continue;
+            const auto state = juce::JSON::parse(stateFile);
+            if (state.getDynamicObject() != nullptr)
+                jobs.push_back(state);
+        }
+        std::sort(
+            jobs.begin(),
+            jobs.end(),
+            [](const auto& left, const auto& right)
+            {
+                const auto* leftObject = left.getDynamicObject();
+                const auto* rightObject = right.getDynamicObject();
+                if (leftObject == nullptr || rightObject == nullptr)
+                    return leftObject != nullptr;
+                return leftObject->getProperty("createdAt").toString()
+                    > rightObject->getProperty("createdAt").toString();
+            });
+        return jobs;
+    }
+
+    static bool isVoiceTrainingJobActive(const juce::var& state)
+    {
+        const auto* object = state.getDynamicObject();
+        if (object == nullptr)
+            return false;
+        const auto status = object->getProperty("status").toString();
+        return status != "complete"
+            && status != "cancelled"
+            && status != "error";
+    }
+
+    bool voiceFineTuningAvailable() const
+    {
+       #if JUCE_MAC && (defined(__arm64__) || defined(__aarch64__))
+        const auto script = juce::File(SYNTHETIC_OBSIDIAN_ROOT)
+                                .getChildFile("tools")
+                                .getChildFile("vocal_annotation_tool")
+                                .getChildFile("voice_lora_training_worker.py");
+        const auto model = juce::File::getSpecialLocation(juce::File::userHomeDirectory)
+                               .getChildFile(".synthetic_obsidian")
+                               .getChildFile("models")
+                               .getChildFile("SoulX-Singer")
+                               .getChildFile("model-svc.pt");
+        return script.existsAsFile()
+            && model.existsAsFile()
+            && juce::File(soulXPythonExecutable()).existsAsFile();
+       #else
+        return false;
+       #endif
+    }
+
+    void sendWebVoiceTrainingState()
+    {
+        if (! webFrontendReady_)
+            return;
+
+        constexpr double minimumDurationSeconds = 30.0;
+        constexpr double recommendedDurationSeconds = 180.0;
+        const auto totalDuration = voiceTrainingUsableDuration();
+        const auto jobs = readVoiceTrainingJobStates();
+        const auto hasActiveJob = std::any_of(
+            jobs.begin(),
+            jobs.end(),
+            [](const auto& job) { return isVoiceTrainingJobActive(job); });
+        juce::Array<juce::var> sources;
+        for (size_t index = 0; index < voiceTrainingSources_.size(); ++index)
+        {
+            const auto& source = voiceTrainingSources_[index];
+            auto* item = new juce::DynamicObject();
+            item->setProperty("id", juce::String(static_cast<int>(index)));
+            item->setProperty("name", source.file.getFileName());
+            item->setProperty("durationSeconds", source.durationSeconds);
+            item->setProperty("sampleRate", source.sampleRate);
+            item->setProperty("channels", source.channels);
+            item->setProperty("status", source.status);
+            item->setProperty("message", source.message);
+            sources.add(item);
+        }
+
+        auto* state = new juce::DynamicObject();
+        state->setProperty("phase", voiceTrainingPhase_);
+        state->setProperty("message", voiceTrainingMessage_);
+        state->setProperty("progress", voiceTrainingProgress_);
+       #if JUCE_MAC && (defined(__arm64__) || defined(__aarch64__))
+        state->setProperty("device", "Apple Silicon / Local");
+        state->setProperty("isAppleSilicon", true);
+       #else
+        state->setProperty("device", "Local CPU");
+        state->setProperty("isAppleSilicon", false);
+       #endif
+        state->setProperty("sources", sources);
+        state->setProperty("totalDurationSeconds", totalDuration);
+        state->setProperty("minimumDurationSeconds", minimumDurationSeconds);
+        state->setProperty("recommendedDurationSeconds", recommendedDurationSeconds);
+        state->setProperty(
+            "canCreateProfile",
+            ! voiceProfileCreationRunning_ && totalDuration >= minimumDurationSeconds);
+        state->setProperty("activeProfileName", activeVoiceProfileName_);
+        state->setProperty("outputDirectory", activeVoiceProfileDirectory_.getFullPathName());
+        state->setProperty("fineTuningAvailable", voiceFineTuningAvailable());
+        state->setProperty(
+            "canStartTraining",
+            voiceFineTuningAvailable()
+                && ! hasActiveJob
+                && totalDuration >= minimumDurationSeconds);
+        juce::Array<juce::var> jobValues;
+        for (const auto& job : jobs)
+            jobValues.add(job);
+        state->setProperty("jobs", jobValues);
+
+        auto* event = new juce::DynamicObject();
+        event->setProperty("type", "voice-training-state");
+        event->setProperty("state", state);
+        webView_.dispatch(event);
+    }
+
+    void chooseVoiceTrainingFiles()
+    {
+        if (voiceProfileCreationRunning_)
+            return;
+
+        chooser_ = std::make_unique<juce::FileChooser>(
+            "Add clean vocal recordings",
+            juce::File(),
+            supportedAudioFileWildcard());
+        chooser_->launchAsync(
+            juce::FileBrowserComponent::openMode
+                | juce::FileBrowserComponent::canSelectFiles
+                | juce::FileBrowserComponent::canSelectMultipleItems,
+            [this](const juce::FileChooser& chooser)
+            {
+                for (const auto& file : chooser.getResults())
+                    addVoiceTrainingSource(file);
+
+                if (! voiceTrainingSources_.empty())
+                {
+                    voiceTrainingPhase_ = "ready";
+                    voiceTrainingMessage_ =
+                        voiceTrainingUsableDuration() >= 30.0
+                            ? "The recordings are ready to create a local voice profile."
+                            : "Add at least 30 seconds of usable solo vocal.";
+                    sendWebVoiceTrainingState();
+                }
+            });
+    }
+
+    void cancelVoiceProfileCreation()
+    {
+        if (! voiceProfileCreationRunning_ || voiceProfileCancellation_ == nullptr)
+            return;
+
+        voiceProfileCancellation_->store(true, std::memory_order_release);
+        voiceTrainingPhase_ = "cancelling";
+        voiceTrainingMessage_ = "Cancelling profile preparation...";
+        sendWebVoiceTrainingState();
+    }
+
+    void startVoiceLoRATraining(
+        const juce::String& requestedName,
+        const juce::String& requestedQuality)
+    {
+        constexpr double minimumDurationSeconds = 30.0;
+        if (! voiceFineTuningAvailable())
+        {
+            voiceTrainingPhase_ = "error";
+            voiceTrainingMessage_ = "The Apple Silicon LoRA training runtime is unavailable.";
+            sendWebVoiceTrainingState();
+            return;
+        }
+        const auto existingJobs = readVoiceTrainingJobStates();
+        if (std::any_of(
+                existingJobs.begin(),
+                existingJobs.end(),
+                [](const auto& job) { return isVoiceTrainingJobActive(job); }))
+        {
+            voiceTrainingPhase_ = "error";
+            voiceTrainingMessage_ =
+                "Another voice training job is already running. Cancel it or wait for it to finish.";
+            sendWebVoiceTrainingState();
+            return;
+        }
+        if (voiceTrainingUsableDuration() < minimumDurationSeconds)
+        {
+            voiceTrainingPhase_ = "error";
+            voiceTrainingMessage_ = "Add at least 30 seconds of usable solo vocal.";
+            sendWebVoiceTrainingState();
+            return;
+        }
+
+        auto presetName = requestedName.trim().substring(0, 64);
+        if (presetName.isEmpty())
+            presetName = "My Voice";
+        const juce::String quality =
+            requestedQuality == "high" ? "high" : "balanced";
+        const auto jobId =
+            "lora_" + juce::String(juce::Time::currentTimeMillis())
+                + "_" + juce::Uuid().toString().substring(0, 8);
+        const auto jobsRoot = voiceTrainingJobsRoot();
+        const auto jobDirectory = jobsRoot.getChildFile(jobId);
+        if (jobDirectory.createDirectory().failed())
+        {
+            voiceTrainingPhase_ = "error";
+            voiceTrainingMessage_ = "Could not create the persistent training job.";
+            sendWebVoiceTrainingState();
+            return;
+        }
+
+        auto profileName = juce::File::createLegalFileName(presetName).trim();
+        if (profileName.isEmpty())
+            profileName = "voice";
+        profileName << "-lora-" << juce::Uuid().toString().substring(0, 8);
+        const auto profileDirectory = voiceProfilesRoot().getChildFile(profileName);
+        const auto createdAt = juce::Time::getCurrentTime().toISO8601(true);
+
+        juce::Array<juce::var> sources;
+        double totalDurationSeconds = 0.0;
+        for (const auto& source : voiceTrainingSources_)
+        {
+            if (! source.usable || ! source.file.existsAsFile())
+                continue;
+            auto* item = new juce::DynamicObject();
+            item->setProperty("path", source.file.getFullPathName());
+            item->setProperty("originalName", source.file.getFileName());
+            item->setProperty("durationSeconds", source.durationSeconds);
+            item->setProperty("sampleRate", source.sampleRate);
+            item->setProperty("channels", source.channels);
+            sources.add(item);
+            totalDurationSeconds += source.durationSeconds;
+        }
+
+        auto* lora = new juce::DynamicObject();
+        lora->setProperty("rank", quality == "high" ? 16 : 8);
+        lora->setProperty("alpha", quality == "high" ? 16.0 : 8.0);
+        lora->setProperty("dropout", 0.05);
+        juce::Array<juce::var> targets;
+        targets.add("q_proj");
+        targets.add("v_proj");
+        if (quality == "high")
+        {
+            targets.add("k_proj");
+            targets.add("o_proj");
+        }
+        lora->setProperty("target_suffixes", targets);
+        lora->setProperty(
+            "module_prefix",
+            "cfm_decoder.model.diff_estimator.layers.");
+
+        auto* training = new juce::DynamicObject();
+        training->setProperty("steps", quality == "high" ? 800 : 400);
+        training->setProperty("segmentSeconds", quality == "high" ? 4.0 : 3.5);
+        training->setProperty("maximumSegments", quality == "high" ? 64 : 40);
+        training->setProperty("learningRate", quality == "high" ? 0.00005 : 0.0001);
+        training->setProperty("gradientAccumulation", 2);
+        training->setProperty("seed", 1337);
+        training->setProperty("lora", lora);
+
+        const auto sourceRoot = juce::File::getSpecialLocation(juce::File::userHomeDirectory)
+                                    .getChildFile(".synthetic_obsidian")
+                                    .getChildFile("runtime")
+                                    .getChildFile("soulx-singer")
+                                    .getChildFile("source");
+        const auto modelPath = juce::File::getSpecialLocation(juce::File::userHomeDirectory)
+                                   .getChildFile(".synthetic_obsidian")
+                                   .getChildFile("models")
+                                   .getChildFile("SoulX-Singer")
+                                   .getChildFile("model-svc.pt");
+        auto* request = new juce::DynamicObject();
+        request->setProperty("schemaVersion", 1);
+        request->setProperty("jobId", jobId);
+        request->setProperty("presetName", presetName);
+        request->setProperty("quality", quality);
+        request->setProperty("createdAt", createdAt);
+        request->setProperty("sources", sources);
+        request->setProperty("totalDurationSeconds", totalDurationSeconds);
+        request->setProperty("profileDirectory", profileDirectory.getFullPathName());
+        request->setProperty("sourceRoot", sourceRoot.getFullPathName());
+        request->setProperty("modelPath", modelPath.getFullPathName());
+        request->setProperty(
+            "configPath",
+            sourceRoot.getChildFile("soulxsinger")
+                .getChildFile("config")
+                .getChildFile("soulxsinger.yaml")
+                .getFullPathName());
+        request->setProperty("training", training);
+
+        const auto requestFile = jobDirectory.getChildFile("request.json");
+        if (! requestFile.replaceWithText(
+                juce::JSON::toString(juce::var(request), true)))
+        {
+            voiceTrainingPhase_ = "error";
+            voiceTrainingMessage_ = "Could not write the persistent training request.";
+            sendWebVoiceTrainingState();
+            return;
+        }
+
+        auto* state = new juce::DynamicObject();
+        state->setProperty("schemaVersion", 1);
+        state->setProperty("jobId", jobId);
+        state->setProperty("presetName", presetName);
+        state->setProperty("quality", quality);
+        state->setProperty("status", "queued");
+        state->setProperty("stage", "Queued");
+        state->setProperty("message", "Starting the independent training process...");
+        state->setProperty("progress", 0.0);
+        state->setProperty("currentStep", 0);
+        state->setProperty("totalSteps", quality == "high" ? 800 : 400);
+        state->setProperty("createdAt", createdAt);
+        state->setProperty("updatedAt", createdAt);
+        state->setProperty("profileDirectory", profileDirectory.getFullPathName());
+        state->setProperty("adapterFile", juce::String());
+        state->setProperty("canCancel", true);
+        const auto stateValue = juce::var(state);
+        jobDirectory.getChildFile("state.json").replaceWithText(
+            juce::JSON::toString(stateValue, true));
+
+        const auto script = juce::File(SYNTHETIC_OBSIDIAN_ROOT)
+                                .getChildFile("tools")
+                                .getChildFile("vocal_annotation_tool")
+                                .getChildFile("voice_lora_training_worker.py");
+        auto process = std::make_unique<juce::ChildProcess>();
+        juce::StringArray arguments;
+        arguments.add(soulXPythonExecutable());
+        arguments.add(script.getFullPathName());
+        arguments.add("--job-dir");
+        arguments.add(jobDirectory.getFullPathName());
+        if (! process->start(arguments, 0))
+        {
+            state->setProperty("status", "error");
+            state->setProperty("stage", "Failed");
+            state->setProperty("message", "Could not launch the independent training process.");
+            state->setProperty("canCancel", false);
+            jobDirectory.getChildFile("state.json").replaceWithText(
+                juce::JSON::toString(stateValue, true));
+            voiceTrainingPhase_ = "error";
+            voiceTrainingMessage_ = "Could not launch the independent training process.";
+            sendWebVoiceTrainingState();
+            return;
+        }
+
+        detachedTrainingProcesses_.push_back(std::move(process));
+        voiceTrainingPhase_ = "ready";
+        voiceTrainingMessage_ =
+            "LoRA training started. It will continue if the application closes.";
+        setStatus("Independent LoRA voice training started: " + presetName + ".");
+        sendWebVoiceTrainingState();
+    }
+
+    void cancelVoiceLoRATraining(const juce::String& requestedJobId)
+    {
+        const auto jobId = juce::File(requestedJobId).getFileName();
+        if (jobId.isEmpty() || jobId != requestedJobId)
+            return;
+        const auto jobDirectory = voiceTrainingJobsRoot().getChildFile(jobId);
+        const auto stateFile = jobDirectory.getChildFile("state.json");
+        if (! stateFile.existsAsFile())
+            return;
+        const auto state = juce::JSON::parse(stateFile);
+        if (! isVoiceTrainingJobActive(state))
+            return;
+
+        if (jobDirectory.getChildFile("cancel.request").replaceWithText(
+                "cancel\n"))
+        {
+            setStatus("Cancelling LoRA training: " + jobId + "...");
+            sendWebVoiceTrainingState();
+        }
+    }
+
+    void revealVoiceTrainingJob(const juce::String& requestedJobId)
+    {
+        const auto jobId = juce::File(requestedJobId).getFileName();
+        if (jobId.isEmpty() || jobId != requestedJobId)
+            return;
+        const auto jobDirectory = voiceTrainingJobsRoot().getChildFile(jobId);
+        if (jobDirectory.isDirectory())
+            jobDirectory.revealToUser();
+    }
+
+    void createVoiceProfile(const juce::String& requestedName, const juce::String& requestedQuality)
+    {
+        constexpr double minimumDurationSeconds = 30.0;
+        if (voiceProfileCreationRunning_)
+            return;
+        if (voiceTrainingUsableDuration() < minimumDurationSeconds)
+        {
+            voiceTrainingPhase_ = "error";
+            voiceTrainingMessage_ = "Add at least 30 seconds of usable solo vocal.";
+            sendWebVoiceTrainingState();
+            return;
+        }
+
+        auto presetName = requestedName.trim().substring(0, 64);
+        if (presetName.isEmpty())
+            presetName = "My Voice";
+        const auto quality = requestedQuality == "high" ? "high" : "balanced";
+
+        std::vector<VoiceTrainingSource> sources;
+        double totalDurationSeconds = 0.0;
+        for (const auto& source : voiceTrainingSources_)
+            if (source.usable)
+            {
+                sources.push_back(source);
+                totalDurationSeconds += source.durationSeconds;
+            }
+
+        const auto modelsRoot = voiceProfilesRoot();
+        auto directoryName = juce::File::createLegalFileName(presetName).trim();
+        if (directoryName.isEmpty())
+            directoryName = "voice";
+        directoryName << "-" << juce::Uuid().toString().substring(0, 8);
+        const auto profileDirectory = modelsRoot.getChildFile(directoryName);
+
+        voiceProfileCancellation_ = std::make_shared<std::atomic<bool>>(false);
+        const auto cancellation = voiceProfileCancellation_;
+        voiceProfileCreationRunning_ = true;
+        voiceTrainingPhase_ = "preparing";
+        voiceTrainingMessage_ = "Copying and indexing vocal recordings...";
+        voiceTrainingProgress_ = 0.0;
+        sendWebVoiceTrainingState();
+        setStatus("Preparing local voice profile: " + presetName + "...");
+
+        juce::WeakReference<MainComponent> safeThis(this);
+        const auto started = juce::Thread::launch(
+            [safeThis,
+             cancellation,
+             sources,
+             presetName,
+             quality,
+             totalDurationSeconds,
+             profileDirectory]
+            {
+                const auto finishWithError =
+                    [safeThis](const juce::String& message)
+                    {
+                        juce::MessageManager::callAsync(
+                            [safeThis, message]
+                            {
+                                if (safeThis == nullptr)
+                                    return;
+                                safeThis->voiceProfileCreationRunning_ = false;
+                                safeThis->voiceTrainingPhase_ = "error";
+                                safeThis->voiceTrainingMessage_ = message;
+                                safeThis->voiceTrainingProgress_ = 0.0;
+                                safeThis->setStatus("Voice profile failed: " + message);
+                                safeThis->sendWebVoiceTrainingState();
+                            });
+                    };
+
+                const auto sourcesDirectory = profileDirectory.getChildFile("sources");
+                if (sourcesDirectory.createDirectory().failed())
+                {
+                    finishWithError("Could not create the local voice profile directory.");
+                    return;
+                }
+
+                std::vector<juce::File> copiedSources;
+                copiedSources.reserve(sources.size());
+                juce::Array<juce::var> manifestSources;
+                for (size_t index = 0; index < sources.size(); ++index)
+                {
+                    if (cancellation->load(std::memory_order_acquire))
+                    {
+                        profileDirectory.deleteRecursively();
+                        juce::MessageManager::callAsync(
+                            [safeThis]
+                            {
+                                if (safeThis == nullptr)
+                                    return;
+                                safeThis->voiceProfileCreationRunning_ = false;
+                                safeThis->voiceTrainingPhase_ = "cancelled";
+                                safeThis->voiceTrainingMessage_ = "Profile preparation was cancelled.";
+                                safeThis->voiceTrainingProgress_ = 0.0;
+                                safeThis->setStatus("Voice profile preparation cancelled.");
+                                safeThis->sendWebVoiceTrainingState();
+                            });
+                        return;
+                    }
+
+                    const auto& source = sources[index];
+                    auto prefix = juce::String(static_cast<int>(index + 1)).paddedLeft('0', 2);
+                    const auto target = sourcesDirectory.getChildFile(
+                        prefix + "_" + juce::File::createLegalFileName(source.file.getFileName()));
+                    if (! source.file.copyFileTo(target))
+                    {
+                        profileDirectory.deleteRecursively();
+                        finishWithError("Could not copy " + source.file.getFileName() + ".");
+                        return;
+                    }
+                    copiedSources.push_back(target);
+
+                    auto* manifestSource = new juce::DynamicObject();
+                    manifestSource->setProperty(
+                        "file",
+                        target.getRelativePathFrom(profileDirectory));
+                    manifestSource->setProperty("originalName", source.file.getFileName());
+                    manifestSource->setProperty("durationSeconds", source.durationSeconds);
+                    manifestSource->setProperty("sampleRate", source.sampleRate);
+                    manifestSource->setProperty("channels", source.channels);
+                    manifestSources.add(manifestSource);
+
+                    const auto progress =
+                        0.08 + 0.82 * static_cast<double>(index + 1)
+                            / static_cast<double>(sources.size());
+                    juce::MessageManager::callAsync(
+                        [safeThis, progress, fileName = source.file.getFileName()]
+                        {
+                            if (safeThis == nullptr)
+                                return;
+                            safeThis->voiceTrainingProgress_ = progress;
+                            safeThis->voiceTrainingMessage_ = "Preparing " + fileName + "...";
+                            safeThis->sendWebVoiceTrainingState();
+                        });
+                }
+
+                if (cancellation->load(std::memory_order_acquire))
+                {
+                    profileDirectory.deleteRecursively();
+                    juce::MessageManager::callAsync(
+                        [safeThis]
+                        {
+                            if (safeThis == nullptr)
+                                return;
+                            safeThis->voiceProfileCreationRunning_ = false;
+                            safeThis->voiceTrainingPhase_ = "cancelled";
+                            safeThis->voiceTrainingMessage_ = "Profile preparation was cancelled.";
+                            safeThis->voiceTrainingProgress_ = 0.0;
+                            safeThis->setStatus("Voice profile preparation cancelled.");
+                            safeThis->sendWebVoiceTrainingState();
+                        });
+                    return;
+                }
+
+                auto* manifest = new juce::DynamicObject();
+                manifest->setProperty("schemaVersion", 1);
+                manifest->setProperty("presetName", presetName);
+                manifest->setProperty("kind", "reference_profile");
+                manifest->setProperty("engine", "soulx_reference");
+                manifest->setProperty("trainingStatus", "profile_ready");
+                manifest->setProperty("fineTuned", false);
+                manifest->setProperty("quality", quality);
+                manifest->setProperty("totalDurationSeconds", totalDurationSeconds);
+                manifest->setProperty(
+                    "createdAt",
+                    juce::Time::getCurrentTime().toISO8601(true));
+                manifest->setProperty("sources", manifestSources);
+                if (! copiedSources.empty())
+                {
+                    manifest->setProperty(
+                        "primaryReference",
+                        copiedSources.front().getRelativePathFrom(profileDirectory));
+                }
+
+                const auto manifestFile = profileDirectory.getChildFile("manifest.json");
+                if (! manifestFile.replaceWithText(
+                        juce::JSON::toString(juce::var(manifest), true)))
+                {
+                    profileDirectory.deleteRecursively();
+                    finishWithError("Could not write the voice profile manifest.");
+                    return;
+                }
+
+                auto* active = new juce::DynamicObject();
+                active->setProperty("directory", profileDirectory.getFileName());
+                active->setProperty("presetName", presetName);
+                profileDirectory.getParentDirectory()
+                    .getChildFile("active.json")
+                    .replaceWithText(juce::JSON::toString(juce::var(active), true));
+
+                juce::MessageManager::callAsync(
+                    [safeThis, presetName, quality, profileDirectory, copiedSources]
+                    {
+                        if (safeThis == nullptr)
+                            return;
+                        safeThis->voiceProfileCreationRunning_ = false;
+                        safeThis->voiceTrainingPhase_ = "complete";
+                        safeThis->voiceTrainingMessage_ =
+                            "The profile is active for new backing-vocal renders.";
+                        safeThis->voiceTrainingProgress_ = 1.0;
+                        safeThis->activeVoiceProfileName_ = presetName;
+                        safeThis->activeVoiceProfileQuality_ = quality;
+                        safeThis->activeVoiceProfileDirectory_ = profileDirectory;
+                        safeThis->activeVoiceProfileSources_ = copiedSources;
+                        safeThis->setStatus(
+                            "Voice profile ready and active: " + presetName + ".");
+                        safeThis->sendWebVoiceTrainingState();
+                    });
+            });
+
+        if (! started)
+        {
+            voiceProfileCreationRunning_ = false;
+            voiceTrainingPhase_ = "error";
+            voiceTrainingMessage_ = "Could not start the background profile task.";
+            voiceTrainingProgress_ = 0.0;
+            sendWebVoiceTrainingState();
+        }
+    }
+
+    void handleVoiceTrainingAction(juce::DynamicObject& root)
+    {
+        const auto action = root.getProperty("action").toString();
+        if (action == "request-state")
+        {
+            sendWebVoiceTrainingState();
+        }
+        else if (action == "add-files")
+        {
+            chooseVoiceTrainingFiles();
+        }
+        else if (action == "add-current-track")
+        {
+            if (! document_.audioFile.existsAsFile())
+            {
+                voiceTrainingPhase_ = "error";
+                voiceTrainingMessage_ = "Open a main vocal track before adding it.";
+            }
+            else
+            {
+                addVoiceTrainingSource(document_.audioFile);
+                voiceTrainingPhase_ = "ready";
+                voiceTrainingMessage_ =
+                    voiceTrainingUsableDuration() >= 30.0
+                        ? "The recordings are ready to create a local voice profile."
+                        : "Add at least 30 seconds of usable solo vocal.";
+            }
+            sendWebVoiceTrainingState();
+        }
+        else if (action == "remove-file" && ! voiceProfileCreationRunning_)
+        {
+            const auto index = root.getProperty("sourceId").toString().getIntValue();
+            if (index >= 0 && index < static_cast<int>(voiceTrainingSources_.size()))
+                voiceTrainingSources_.erase(voiceTrainingSources_.begin() + index);
+            voiceTrainingPhase_ = voiceTrainingSources_.empty() ? "idle" : "ready";
+            voiceTrainingMessage_ = voiceTrainingSources_.empty()
+                ? "Add clean, dry vocal recordings to build a reusable voice profile."
+                : "Review the remaining recordings.";
+            sendWebVoiceTrainingState();
+        }
+        else if (action == "clear-files" && ! voiceProfileCreationRunning_)
+        {
+            voiceTrainingSources_.clear();
+            voiceTrainingPhase_ = "idle";
+            voiceTrainingMessage_ =
+                "Add clean, dry vocal recordings to build a reusable voice profile.";
+            sendWebVoiceTrainingState();
+        }
+        else if (action == "create-profile")
+        {
+            createVoiceProfile(
+                root.getProperty("presetName").toString(),
+                root.getProperty("quality").toString());
+        }
+        else if (action == "start-training")
+        {
+            startVoiceLoRATraining(
+                root.getProperty("presetName").toString(),
+                root.getProperty("quality").toString());
+        }
+        else if (action == "cancel-training")
+        {
+            cancelVoiceLoRATraining(root.getProperty("jobId").toString());
+        }
+        else if (action == "reveal-training")
+        {
+            revealVoiceTrainingJob(root.getProperty("jobId").toString());
+        }
+        else if (action == "cancel")
+        {
+            cancelVoiceProfileCreation();
+        }
+        else if (action == "reveal-profile"
+                 && activeVoiceProfileDirectory_.isDirectory())
+        {
+            activeVoiceProfileDirectory_.revealToUser();
+        }
+    }
+
     void completeExport(const juce::String& summary, const juce::File& directory)
     {
         setStatus(summary + " to " + directory.getFullPathName() + ".");
@@ -2508,6 +3663,35 @@ private:
         if (! webFrontendReady_)
             return;
 
+        const auto voiceProfiles = readVoiceProfileOptions();
+        const auto effectiveVoiceProfileId =
+            [this, &voiceProfiles](const juce::String& requestedId)
+        {
+            if (std::any_of(
+                    voiceProfiles.begin(),
+                    voiceProfiles.end(),
+                    [&requestedId](const auto& profile)
+                    {
+                        return profile.id == requestedId;
+                    }))
+            {
+                return requestedId;
+            }
+            if (std::any_of(
+                    voiceProfiles.begin(),
+                    voiceProfiles.end(),
+                    [this](const auto& profile)
+                    {
+                        return profile.id == activeVoiceProfileId_;
+                    }))
+            {
+                return activeVoiceProfileId_;
+            }
+            return voiceProfiles.empty()
+                ? juce::String()
+                : voiceProfiles.front().id;
+        };
+
         juce::Array<juce::var> backingOptions;
         for (const auto& style : kBackingStyles)
             backingOptions.add(style.name);
@@ -2673,6 +3857,9 @@ private:
             auto* trackContent = new juce::DynamicObject();
             trackContent->setProperty("track", track.styleName);
             trackContent->setProperty("hasAudio", track.audioFile.existsAsFile());
+            trackContent->setProperty(
+                "voiceProfileId",
+                effectiveVoiceProfileId(track.voiceProfileId));
             const auto isActiveTrack = track.styleId == document_.backingStyleId
                 || track.styleName == document_.backingStyleName;
             const auto trackIndex = backingStyleIndex(track.styleId, track.styleName);
@@ -2807,6 +3994,17 @@ private:
         for (const auto& track : document_.backingTracks)
             addPitchHistoryState(track.styleName);
 
+        juce::Array<juce::var> voiceProfileValues;
+        for (const auto& profile : voiceProfiles)
+        {
+            auto* value = new juce::DynamicObject();
+            value->setProperty("id", profile.id);
+            value->setProperty("name", profile.name);
+            value->setProperty("quality", profile.quality);
+            value->setProperty("active", profile.active);
+            voiceProfileValues.add(value);
+        }
+
         auto* project = new juce::DynamicObject();
         project->setProperty("tempo", document_.bpm);
         project->setProperty("meter", meter);
@@ -2829,6 +4027,7 @@ private:
         project->setProperty("initialLoopActive", cycleLoopActive_);
         project->setProperty("initialCycleRange", cycleRange);
         project->setProperty("backingTrackOptions", backingOptions);
+        project->setProperty("voiceProfiles", voiceProfileValues);
         project->setProperty("initialBackingTracks", backingTracks);
         project->setProperty("initialTrackState", trackStates);
         project->setProperty("initialTrackLayerState", trackLayerState);
@@ -2939,6 +4138,16 @@ private:
         auto* targetNotes = notesForPitchTrack(trackName);
         if (trackName.isEmpty() || targetNotes == nullptr)
             return true;
+        const auto snapToChord =
+            trackName != "Voice Main"
+            && static_cast<bool>(root.getProperty("snapToChord"));
+        const auto snappedPitch =
+            [this, snapToChord](double pitch, double noteStart)
+        {
+            return snapToChord
+                ? snapPitchToChord(pitch, noteStart, document_.chords)
+                : pitch;
+        };
 
         const auto normaliseId = [this, &trackName](const juce::String& id)
         {
@@ -2998,10 +4207,12 @@ private:
                 start + kMinimumWebNoteLengthSeconds,
                 document_.duration,
                 start + juce::jmax(kMinimumWebNoteLengthSeconds, requestedLength));
-            const auto pitch = juce::jlimit(
-                0.0,
-                127.0,
-                static_cast<double>(clip->getProperty("pitch")));
+            const auto pitch = snappedPitch(
+                juce::jlimit(
+                    0.0,
+                    127.0,
+                    static_cast<double>(clip->getProperty("pitch"))),
+                start);
             if (end <= start)
                 return true;
 
@@ -3087,12 +4298,9 @@ private:
                 if (! index)
                     continue;
                 auto& note = (*targetNotes)[*index];
-                const auto pitchDelta = edit.pitch - note.pitchExact;
-
-                note.pitchExact = edit.pitch;
-                note.pitch = juce::jlimit(0, 127, static_cast<int>(std::lround(edit.pitch)));
-                for (auto& point : note.curve)
-                    point.midi = juce::jlimit(0.0, 127.0, point.midi + pitchDelta);
+                moveNoteToPitch(
+                    note,
+                    snappedPitch(edit.pitch, note.start));
             }
             sortNotes();
             finishPitchTrackEdit(trackName);
@@ -3143,6 +4351,10 @@ private:
             note.voicedEnd = juce::jlimit(note.voicedStart, note.end, mapTime(note.voicedEnd));
             for (auto& point : note.curve)
                 point.time = juce::jlimit(note.start, note.end, mapTime(point.time));
+            if (snapToChord)
+                moveNoteToPitch(
+                    note,
+                    snappedPitch(note.pitchExact, note.start));
             if (trackName == "Voice Main")
                 for (auto& region : document_.regions)
                     if (region.noteId == note.id)
@@ -3205,6 +4417,15 @@ private:
             right.curve = std::move(rightCurve);
             updateRepresentativePitch(source);
             updateRepresentativePitch(right);
+            if (snapToChord)
+            {
+                moveNoteToPitch(
+                    source,
+                    snappedPitch(source.pitchExact, source.start));
+                moveNoteToPitch(
+                    right,
+                    snappedPitch(right.pitchExact, right.start));
+            }
 
             if (trackName == "Voice Main")
             {
@@ -3282,6 +4503,10 @@ private:
                 return left.time < right.time;
             });
             updateRepresentativePitch(joined);
+            if (snapToChord)
+                moveNoteToPitch(
+                    joined,
+                    snappedPitch(joined.pitchExact, joined.start));
 
             targetNotes->erase(
                 std::remove_if(
@@ -3363,6 +4588,7 @@ private:
             webFrontendReady_ = true;
             sendWebProjectState();
             sendWebStatus();
+            sendWebVoiceTrainingState();
             sendWebTransportState();
             sendWebLoopState();
             sendWebVolumeState();
@@ -3372,6 +4598,12 @@ private:
         if (type == "project-action")
         {
             handleProjectAction(root->getProperty("action").toString());
+            return;
+        }
+
+        if (type == "voice-training")
+        {
+            handleVoiceTrainingAction(*root);
             return;
         }
 
@@ -3564,6 +4796,40 @@ private:
             return;
         }
 
+        if (type == "set-backing-voice-profile")
+        {
+            if (backingAudioRenderRunning_)
+                return;
+
+            const auto trackName = root->getProperty("track").toString();
+            const auto requestedProfileId =
+                root->getProperty("profileId").toString();
+            const auto profileId =
+                juce::File(requestedProfileId).getFileName();
+            if (profileId.isEmpty() || profileId != requestedProfileId)
+                return;
+
+            const auto profiles = readVoiceProfileOptions();
+            const auto profile = std::find_if(
+                profiles.begin(),
+                profiles.end(),
+                [&profileId](const auto& candidate)
+                {
+                    return candidate.id == profileId;
+                });
+            auto* backingTrack = findBackingTrack({}, trackName);
+            if (profile == profiles.end() || backingTrack == nullptr)
+                return;
+            if (backingTrack->voiceProfileId == profileId)
+                return;
+
+            beginUndoableAction();
+            backingTrack->voiceProfileId = profileId;
+            markChanged();
+            setStatus("Voice for " + trackName + ": " + profile->name + ".");
+            return;
+        }
+
         if (type == "render-backing-track")
         {
             const auto requestedTrack = root->getProperty("track").toString();
@@ -3590,7 +4856,7 @@ private:
             auto* notes = notesForPitchTrack(trackName);
             const auto webClipId = root->getProperty("clipId").toString();
             const auto clipId = normaliseWebClipId(trackName, webClipId);
-            const auto pitch = juce::jlimit(
+            auto pitch = juce::jlimit(
                 0.0,
                 127.0,
                 static_cast<double>(root->getProperty("pitch")));
@@ -3600,13 +4866,18 @@ private:
             if (! index)
                 return;
 
-            beginPitchTrackEdit(trackName);
             auto& note = (*notes)[*index];
-            const auto pitchDelta = pitch - note.pitchExact;
-            note.pitchExact = pitch;
-            note.pitch = juce::jlimit(0, 127, static_cast<int>(std::lround(pitch)));
-            for (auto& point : note.curve)
-                point.midi = juce::jlimit(0.0, 127.0, point.midi + pitchDelta);
+            if (trackName != "Voice Main"
+                && static_cast<bool>(root->getProperty("snapToChord")))
+            {
+                pitch = snapPitchToChord(
+                    pitch,
+                    note.start,
+                    document_.chords);
+            }
+
+            beginPitchTrackEdit(trackName);
+            moveNoteToPitch(note, pitch);
             finishPitchTrackEdit(trackName);
 
             auto* event = new juce::DynamicObject();
@@ -4050,7 +5321,42 @@ private:
 
         sendWebTransportState();
         sendWebOutputMeterState();
+        pollVoiceTrainingJobs();
         maybeAutosave();
+    }
+
+    void pollVoiceTrainingJobs()
+    {
+        const auto now = juce::Time::getMillisecondCounterHiRes();
+        if (now - lastVoiceTrainingPollMs_ < 500.0)
+            return;
+        lastVoiceTrainingPollMs_ = now;
+
+        detachedTrainingProcesses_.erase(
+            std::remove_if(
+                detachedTrainingProcesses_.begin(),
+                detachedTrainingProcesses_.end(),
+                [](const auto& process)
+                {
+                    return process == nullptr || ! process->isRunning();
+                }),
+            detachedTrainingProcesses_.end());
+
+        const auto activeFile = voiceProfilesRoot().getChildFile("active.json");
+        auto activeProfileChanged = false;
+        if (activeFile.existsAsFile())
+        {
+            const auto modificationMs =
+                activeFile.getLastModificationTime().toMilliseconds();
+            if (modificationMs > lastActiveProfilePointerModificationMs_)
+            {
+                loadActiveVoiceProfile();
+                activeProfileChanged = true;
+            }
+        }
+        if (activeProfileChanged)
+            sendWebProjectState();
+        sendWebVoiceTrainingState();
     }
 
     void maybeAutosave()
@@ -4083,7 +5389,10 @@ private:
             return;
         }
 
-        chooser_ = std::make_unique<juce::FileChooser>("Open vocal audio", juce::File(), "*.wav;*.aiff;*.aif;*.flac");
+        chooser_ = std::make_unique<juce::FileChooser>(
+            "Open vocal audio",
+            juce::File(),
+            supportedAudioFileWildcard());
         chooser_->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
                               [this](const juce::FileChooser& chooser)
                               {
@@ -4095,7 +5404,10 @@ private:
 
     void chooseInstrumentalFile()
     {
-        chooser_ = std::make_unique<juce::FileChooser>("Open instrumental audio", juce::File(), "*.wav;*.aiff;*.aif;*.flac");
+        chooser_ = std::make_unique<juce::FileChooser>(
+            "Open instrumental audio",
+            juce::File(),
+            supportedAudioFileWildcard());
         chooser_->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
                               [this](const juce::FileChooser& chooser)
                               {
@@ -4163,10 +5475,21 @@ private:
             "Open Synthetic Obsidian project",
             initialLocation,
             "*.json");
-        chooser_->launchAsync(
+       #if JUCE_MAC || JUCE_IOS
+        // A project owns sibling audio assets. Selecting its directory gives
+        // the native picker one user-authorized scope instead of prompting
+        // separately as each asset is restored.
+        constexpr auto projectChooserFlags =
             juce::FileBrowserComponent::openMode
-                | juce::FileBrowserComponent::canSelectFiles
-                | juce::FileBrowserComponent::canSelectDirectories,
+            | juce::FileBrowserComponent::canSelectDirectories;
+       #else
+        constexpr auto projectChooserFlags =
+            juce::FileBrowserComponent::openMode
+            | juce::FileBrowserComponent::canSelectFiles
+            | juce::FileBrowserComponent::canSelectDirectories;
+       #endif
+        chooser_->launchAsync(
+            projectChooserFlags,
             [this](const juce::FileChooser& chooser)
             {
                 const auto selected = chooser.getResult();
@@ -5815,7 +7138,14 @@ private:
         auto* backingTrack = findBackingTrack(styleId, styleName);
         if (backingTrack == nullptr)
         {
-            document_.backingTracks.push_back({ styleId, styleName, {}, {}, {} });
+            document_.backingTracks.push_back({
+                styleId,
+                styleName,
+                {},
+                {},
+                {},
+                activeVoiceProfileId_
+            });
             backingTrack = &document_.backingTracks.back();
         }
         backingTrack->notes.clear();
@@ -6236,8 +7566,66 @@ private:
             return;
         }
 
+        const auto profiles = readVoiceProfileOptions();
+        const auto* activeTrack =
+            findBackingTrack({}, document_.backingStyleName);
+        const auto requestedProfileId =
+            activeTrack != nullptr
+                ? activeTrack->voiceProfileId
+                : juce::String();
+        const auto findProfile =
+            [&profiles](const juce::String& profileId)
+                -> const VoiceProfileOption*
+        {
+            const auto profile = std::find_if(
+                profiles.begin(),
+                profiles.end(),
+                [&profileId](const auto& candidate)
+                {
+                    return candidate.id == profileId;
+                });
+            return profile != profiles.end() ? &*profile : nullptr;
+        };
+        const auto* renderProfile = findProfile(requestedProfileId);
+        if (renderProfile == nullptr)
+            renderProfile = findProfile(activeVoiceProfileId_);
+        if (renderProfile == nullptr && ! profiles.empty())
+            renderProfile = &profiles.front();
+
+        const auto& promptSources =
+            renderProfile != nullptr
+                ? renderProfile->sources
+                : activeVoiceProfileSources_;
+        const auto renderQuality =
+            renderProfile != nullptr
+                ? renderProfile->quality
+                : activeVoiceProfileQuality_;
+        const auto renderAdapter =
+            renderProfile != nullptr
+                ? renderProfile->adapterFile
+                : activeVoiceAdapterFile_;
+
         auto* root = new juce::DynamicObject();
         root->setProperty("audio", document_.audioFile.getFullPathName());
+        if (! promptSources.empty())
+        {
+            juce::Array<juce::var> promptCandidates;
+            const auto maximumCandidates =
+                renderQuality == "high" ? 8 : 4;
+            for (const auto& source : promptSources)
+            {
+                if (promptCandidates.size() >= maximumCandidates)
+                    break;
+                if (source.existsAsFile())
+                    promptCandidates.add(source.getFullPathName());
+            }
+            if (! promptCandidates.isEmpty())
+                root->setProperty("prompt_audio_candidates", promptCandidates);
+        }
+        if (renderAdapter.existsAsFile())
+            root->setProperty(
+                "voice_adapter",
+                renderAdapter.getFullPathName());
         const auto outputFile = juce::File::getSpecialLocation(juce::File::tempDirectory)
                                     .getNonexistentChildFile("synthetic_obsidian_backing_audio", ".wav");
         root->setProperty("output", outputFile.getFullPathName());
@@ -6306,6 +7694,9 @@ private:
         renderBackingAudioButton_.setEnabled(false);
         setStatus("Rendering backing vocal audio with SoulX-Singer-SVC: "
             + backingAudioRenderTrackName_
+            + (renderProfile != nullptr
+                ? " / voice " + renderProfile->name
+                : juce::String())
             + "...");
 
         juce::WeakReference<MainComponent> safeThis(this);
@@ -7206,6 +8597,14 @@ private:
         {
             setStatus(resultMessage("Load JSON", result));
             return false;
+        }
+
+        if (activeVoiceAdapterFile_.existsAsFile()
+            && activeVoiceProfileId_.isNotEmpty())
+        {
+            for (auto& track : document_.backingTracks)
+                if (track.voiceProfileId.isEmpty())
+                    track.voiceProfileId = activeVoiceProfileId_;
         }
 
         ++documentRevision_;
@@ -8245,6 +9644,23 @@ private:
     juce::File backingWorkerQueueDir_;
     std::unique_ptr<juce::ChildProcess> backingAudioWorkerProcess_;
     juce::File backingAudioWorkerQueueDir_;
+    std::vector<VoiceTrainingSource> voiceTrainingSources_;
+    std::vector<juce::File> activeVoiceProfileSources_;
+    juce::File activeVoiceProfileDirectory_;
+    juce::File activeVoiceAdapterFile_;
+    juce::String activeVoiceProfileId_;
+    juce::String activeVoiceProfileName_;
+    juce::String activeVoiceProfileQuality_ { "balanced" };
+    juce::String voiceTrainingPhase_ { "idle" };
+    juce::String voiceTrainingMessage_ {
+        "Add clean, dry vocal recordings to build a reusable voice profile."
+    };
+    double voiceTrainingProgress_ = 0.0;
+    bool voiceProfileCreationRunning_ = false;
+    std::shared_ptr<std::atomic<bool>> voiceProfileCancellation_;
+    std::vector<std::unique_ptr<juce::ChildProcess>> detachedTrainingProcesses_;
+    double lastVoiceTrainingPollMs_ = 0.0;
+    juce::int64 lastActiveProfilePointerModificationMs_ = 0;
 
     juce::TextButton openAudioButton_;
     juce::TextButton openInstrumentalButton_;

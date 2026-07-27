@@ -1,10 +1,14 @@
 import { useEffect, useRef, useState } from "react";
-import type { PluginBridge, ProjectAction } from "@/bridge/plugin-bridge";
+import type { PluginBridge, ProjectAction, VoiceTrainingState } from "@/bridge/plugin-bridge";
 import { Arrangement } from "@/features/studio/components/Arrangement";
 import { ExportToast, type ExportToastState } from "@/features/studio/components/ExportToast";
 import { ProjectStatusBar } from "@/features/studio/components/ProjectStatusBar";
 import { StudioHeader } from "@/features/studio/components/StudioHeader";
 import { TrackSidebar } from "@/features/studio/components/TrackSidebar";
+import {
+  EMPTY_VOICE_TRAINING_STATE,
+  VoiceTrainingDialog,
+} from "@/features/studio/components/VoiceTrainingDialog";
 import { useStudioController } from "@/features/studio/hooks/useStudioController";
 import { mockStudioProject } from "@/mocks/studio-project";
 
@@ -20,6 +24,7 @@ export function StudioApp({ bridge }: { bridge: PluginBridge }) {
     backingAudioRenderRunning: false,
     backingGenerationTrack: "",
     backingAudioRenderTrack: "",
+    voiceTraining: EMPTY_VOICE_TRAINING_STATE,
   });
 
   useEffect(() => {
@@ -39,6 +44,11 @@ export function StudioApp({ bridge }: { bridge: PluginBridge }) {
           backingAudioRenderRunning: event.backingAudioRenderRunning,
           backingGenerationTrack: event.backingGenerationTrack,
           backingAudioRenderTrack: event.backingAudioRenderTrack,
+        }));
+      } else if (event.type === "voice-training-state") {
+        setNativeState((current) => ({
+          ...current,
+          voiceTraining: event.state,
         }));
       } else if (event.type === "export-complete") {
         window.clearTimeout(exportToastTimeoutRef.current);
@@ -70,6 +80,7 @@ export function StudioApp({ bridge }: { bridge: PluginBridge }) {
       backingAudioRenderRunning={nativeState.backingAudioRenderRunning}
       backingGenerationTrack={nativeState.backingGenerationTrack}
       backingAudioRenderTrack={nativeState.backingAudioRenderTrack}
+      voiceTraining={nativeState.voiceTraining}
       exportToast={exportToast}
       onDismissExportToast={() => {
         window.clearTimeout(exportToastTimeoutRef.current);
@@ -89,6 +100,7 @@ function StudioWorkspace({
   backingAudioRenderRunning,
   backingGenerationTrack,
   backingAudioRenderTrack,
+  voiceTraining,
   exportToast,
   onDismissExportToast,
 }: {
@@ -101,10 +113,12 @@ function StudioWorkspace({
   backingAudioRenderRunning: boolean;
   backingGenerationTrack: string;
   backingAudioRenderTrack: string;
+  voiceTraining: VoiceTrainingState;
   exportToast: ExportToastState | null;
   onDismissExportToast(): void;
 }) {
   const controller = useStudioController(bridge, project);
+  const [voiceTrainingOpen, setVoiceTrainingOpen] = useState(false);
   const { pianoCollapsed, serviceTracksCollapsed } = controller;
   const sendProjectAction = (action: ProjectAction) => {
     bridge.send({ type: "project-action", action });
@@ -112,7 +126,11 @@ function StudioWorkspace({
 
   return (
     <main className="studio-shell">
-      <StudioHeader controller={controller} />
+      <StudioHeader
+        controller={controller}
+        voiceTraining={voiceTraining}
+        onOpenVoiceTraining={() => setVoiceTrainingOpen(true)}
+      />
       <section
         className={[
           "workspace",
@@ -138,6 +156,12 @@ function StudioWorkspace({
       </section>
       <ProjectStatusBar status={status} />
       {exportToast ? <ExportToast toast={exportToast} onDismiss={onDismissExportToast} /> : null}
+      <VoiceTrainingDialog
+        bridge={bridge}
+        state={voiceTraining}
+        open={voiceTrainingOpen}
+        onClose={() => setVoiceTrainingOpen(false)}
+      />
     </main>
   );
 }

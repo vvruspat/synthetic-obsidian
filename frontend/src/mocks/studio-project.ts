@@ -97,6 +97,14 @@ export const mockStudioProject: StudioProject = {
   initialLoopActive: true,
   initialCycleRange: { start: 25, end: 50 },
   backingTrackOptions: BACKING_TRACK_OPTIONS,
+  voiceProfiles: [
+    {
+      id: "lena-lora-demo",
+      name: "Lena",
+      quality: "high",
+      active: true,
+    },
+  ],
   initialBackingTracks: ["Third Above"],
   initialTrackState: [
     { track: "Instrumental", state: { mute: false, solo: false } },
@@ -114,6 +122,7 @@ export const mockStudioProject: StudioProject = {
   backingTrackContents: [
     {
       track: "Third Above",
+      voiceProfileId: "lena-lora-demo",
       hasAudio: false,
       audioDurationSeconds: 0,
       clips: mockClips
@@ -121,6 +130,10 @@ export const mockStudioProject: StudioProject = {
         .map((clip) => ({ ...clip, id: `third-above-${clip.id}`, pitch: clip.pitch + 4 })),
       waveform: [],
     },
+  ],
+  pitchEditorHistory: [
+    { track: "Voice Main", canUndo: false, canRedo: false },
+    { track: "Third Above", canUndo: false, canRedo: false },
   ],
   vocalWaveform: createWaveform(37),
   instrumentalWaveform: createWaveform(23),

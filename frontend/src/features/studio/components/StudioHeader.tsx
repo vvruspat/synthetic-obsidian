@@ -10,17 +10,25 @@ import {
   PlayIcon,
   Squares2X2Icon,
   StopIcon,
+  UserCircleIcon,
 } from "@heroicons/react/24/outline";
 import type { CSSProperties } from "react";
+import type { VoiceTrainingState } from "@/bridge/plugin-bridge";
 import type { StudioController } from "@/features/studio/hooks/useStudioController";
 import { gainToDecibels, gainToMeterPercent } from "@/features/studio/lib/output-meter";
 import { IconButton, RangeInput } from "@/ui";
 
 type StudioHeaderProps = {
   controller: StudioController;
+  voiceTraining: VoiceTrainingState;
+  onOpenVoiceTraining(): void;
 };
 
-export function StudioHeader({ controller }: StudioHeaderProps) {
+export function StudioHeader({
+  controller,
+  voiceTraining,
+  onOpenVoiceTraining,
+}: StudioHeaderProps) {
   const {
     playing,
     looping,
@@ -35,6 +43,10 @@ export function StudioHeader({ controller }: StudioHeaderProps) {
   const rightOutputDb = gainToDecibels(outputLevels.right);
   const outputPeakDb = Math.max(leftOutputDb, rightOutputDb);
   const outputPeakLabel = Number.isFinite(outputPeakDb) ? `${outputPeakDb.toFixed(1)} dB` : "−∞ dB";
+  const activeVoiceJob = voiceTraining.jobs.find(
+    (job) => !["complete", "cancelled", "error"].includes(job.status),
+  );
+  const voiceTrainingPercentage = activeVoiceJob ? Math.round(activeVoiceJob.progress * 100) : 0;
 
   return (
     <header className="topbar">
@@ -94,6 +106,24 @@ export function StudioHeader({ controller }: StudioHeaderProps) {
             </button>
           </div>
         </details>
+        <button
+          className={`header-voice-button ${activeVoiceJob ? "is-training" : ""}`}
+          type="button"
+          title={
+            activeVoiceJob
+              ? `${activeVoiceJob.presetName}: ${activeVoiceJob.message}`
+              : "Open Voice Lab"
+          }
+          onClick={onOpenVoiceTraining}
+        >
+          <UserCircleIcon aria-hidden="true" />
+          <span>{activeVoiceJob ? `Voice ${voiceTrainingPercentage}%` : "Voice"}</span>
+          {activeVoiceJob ? (
+            <i className="header-voice-progress" aria-hidden="true">
+              <b style={{ width: `${voiceTrainingPercentage}%` }} />
+            </i>
+          ) : null}
+        </button>
       </div>
       <fieldset className="main-transport">
         <legend className="sr-only">Transport controls</legend>

@@ -3,7 +3,7 @@ juce_add_gui_app(VocalAnnotationTool
     COMPANY_WEBSITE     "https://github.com/synthetic-obsidian"
     COMPANY_EMAIL       ""
     BUNDLE_ID           "com.syntheticobsidian.vocalannotationtool"
-    PRODUCT_NAME        "Vocal Annotation Tool"
+    PRODUCT_NAME        "Synthetic Obsidian"
     VERSION             "0.1.0"
     NEEDS_WEB_BROWSER   TRUE
     NEEDS_WEBVIEW2      TRUE
@@ -18,6 +18,7 @@ target_sources(VocalAnnotationTool
         AnnotationJson.cpp
         AnnotationValidator.cpp
         AnnotationEditorComponent.cpp
+        AlgorithmicPitchPreview.cpp
         ${CMAKE_SOURCE_DIR}/Source/web/SyntheticObsidianWebView.cpp
 )
 
@@ -43,6 +44,7 @@ target_link_libraries(VocalAnnotationTool
         juce::juce_audio_utils
         juce::juce_core
         juce::juce_data_structures
+        juce::juce_dsp
         juce::juce_events
         juce::juce_graphics
         juce::juce_gui_basics
@@ -55,6 +57,12 @@ target_link_libraries(VocalAnnotationTool
 )
 
 if(APPLE)
+    set(
+        SYNTHETIC_OBSIDIAN_MACOS_CODESIGN_IDENTITY
+        ""
+        CACHE STRING
+        "Optional signing identity for stable macOS privacy permissions during local builds"
+    )
     set_target_properties(VocalAnnotationTool PROPERTIES
         OSX_ARCHITECTURES "arm64;x86_64"
     )
@@ -62,6 +70,20 @@ if(APPLE)
         -Wall -Wextra -Wpedantic
         -Wno-unused-parameter
     )
+    if(SYNTHETIC_OBSIDIAN_MACOS_CODESIGN_IDENTITY)
+        add_custom_command(
+            TARGET VocalAnnotationTool
+            POST_BUILD
+            COMMAND
+                /usr/bin/codesign
+                --force
+                --deep
+                --sign "${SYNTHETIC_OBSIDIAN_MACOS_CODESIGN_IDENTITY}"
+                "$<TARGET_BUNDLE_DIR:VocalAnnotationTool>"
+            COMMENT "Signing VocalAnnotationTool for stable macOS privacy permissions"
+            VERBATIM
+        )
+    endif()
 elseif(WIN32)
     target_compile_options(VocalAnnotationTool PRIVATE
         /W4

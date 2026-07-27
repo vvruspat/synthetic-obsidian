@@ -1,9 +1,10 @@
 import { ArrowPathIcon, SpeakerWaveIcon } from "@heroicons/react/24/outline";
 import type { ProjectAction } from "@/bridge/plugin-bridge";
-import type { BackingTrackName, StudioProject } from "@/domain/studio";
+import type { BackingTrackName, StudioProject, VoiceProfileOption } from "@/domain/studio";
 import { BackingTrackSelect } from "@/features/studio/components/BackingTrackSelect";
 import { PianoRoll } from "@/features/studio/components/PianoRoll";
 import { TimelineRuler } from "@/features/studio/components/TimelineRuler";
+import { VoiceProfileSelect } from "@/features/studio/components/VoiceProfileSelect";
 import { TrackWaveform } from "@/features/studio/components/Waveforms";
 import { WebGLSurface } from "@/features/studio/components/WebGLSurface";
 import type { StudioController } from "@/features/studio/hooks/useStudioController";
@@ -76,22 +77,35 @@ function BackingTrackActionOverlay({
   rendering,
   disabled,
   status,
+  voiceProfiles,
+  voiceProfileId,
   onRender,
   onRegenerate,
+  onVoiceProfileChange,
 }: {
   track: BackingTrackName;
   generating: boolean;
   rendering: boolean;
   disabled: boolean;
   status: string;
+  voiceProfiles: VoiceProfileOption[];
+  voiceProfileId: string;
   onRender(): void;
   onRegenerate(): void;
+  onVoiceProfileChange(profileId: string): void;
 }) {
   const busy = generating || rendering;
 
   return (
     <div className={`backing-track-action-overlay ${busy ? "is-busy" : ""}`}>
       {busy ? <i className="track-analysis-spinner" aria-hidden="true" /> : null}
+      <VoiceProfileSelect
+        track={track}
+        profiles={voiceProfiles}
+        value={voiceProfileId}
+        disabled={busy || disabled}
+        onChange={onVoiceProfileChange}
+      />
       <button type="button" disabled={busy || disabled} onClick={onRender}>
         <SpeakerWaveIcon aria-hidden="true" />
         Render
@@ -339,8 +353,13 @@ export function Arrangement({
                         rendering={rendering}
                         disabled={anotherTrackBusy}
                         status={status}
+                        voiceProfiles={project.voiceProfiles}
+                        voiceProfileId={content?.voiceProfileId ?? ""}
                         onRender={() => actions.renderBackingTrack(name)}
                         onRegenerate={() => actions.regenerateBackingTrack(name)}
+                        onVoiceProfileChange={(profileId) =>
+                          actions.setBackingVoiceProfile(name, profileId)
+                        }
                       />
                     ) : null}
                     <span>{name}</span>
@@ -353,6 +372,10 @@ export function Arrangement({
             controller={controller}
             waveform={controller.editorWaveform}
             waveformDurationRatio={controller.editorWaveformDurationRatio}
+            backingRenderBusy={backingGenerationRunning || backingAudioRenderRunning}
+            backingRenderTrack={
+              backingAudioRenderRunning ? backingAudioRenderTrack : backingGenerationTrack
+            }
           />
         </div>
       </div>

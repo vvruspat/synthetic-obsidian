@@ -1,6 +1,7 @@
 #include "AnnotationValidator.h"
 
 #include <algorithm>
+#include <cmath>
 
 namespace vocal_annotation
 {
@@ -31,6 +32,9 @@ std::vector<ValidationIssue> AnnotationValidator::validate(const AnnotationDocum
 
         if (note.pitchExact < 0.0 || note.pitchExact > 127.0)
             issues.push_back({ "Note " + label + " exact pitch is outside MIDI range.", true });
+
+        if (! std::isfinite(note.gainDb) || note.gainDb < -24.0 || note.gainDb > 12.0)
+            issues.push_back({ "Note " + label + " gain is outside the -24..+12 dB range.", true });
 
         if (note.voicedStart < note.start || note.voicedEnd > note.end || note.voicedEnd < note.voicedStart)
             issues.push_back({ "Note " + label + " voiced range is outside note bounds.", true });

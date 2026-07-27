@@ -63,6 +63,7 @@ export type VocalClip = {
   pitch: number;
   width: number;
   color: ClipColor;
+  gainDb?: number;
   pitchCurve?: Array<{ x: number; pitch: number }>;
   legatoFromPrevious?: boolean;
   legatoToNext?: boolean;
@@ -109,10 +110,24 @@ export type TimeSignatureSegment = {
 
 export type BackingTrackContent = {
   track: BackingTrackName;
+  voiceProfileId: string;
   hasAudio: boolean;
   audioDurationSeconds: number;
   clips: VocalClip[];
   waveform: WaveformData;
+};
+
+export type VoiceProfileOption = {
+  id: string;
+  name: string;
+  quality: "balanced" | "high";
+  active: boolean;
+};
+
+export type PitchEditorHistoryState = {
+  track: Exclude<TrackName, "Instrumental">;
+  canUndo: boolean;
+  canRedo: boolean;
 };
 
 export type StudioProject = {
@@ -131,12 +146,14 @@ export type StudioProject = {
   initialLoopActive: boolean;
   initialCycleRange: CycleRange;
   backingTrackOptions: readonly BackingTrackName[];
+  voiceProfiles: VoiceProfileOption[];
   initialBackingTracks: BackingTrackName[];
   initialTrackState: Array<{ track: string; state: TrackChannelState }>;
   initialTrackLayerState: Array<{ track: string; state: TrackLayerState }>;
   clips: VocalClip[];
   backingClips: VocalClip[];
   backingTrackContents: BackingTrackContent[];
+  pitchEditorHistory: PitchEditorHistoryState[];
   vocalWaveform: WaveformData;
   instrumentalWaveform: WaveformData;
   backingWaveform: WaveformData;

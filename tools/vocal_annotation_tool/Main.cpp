@@ -1,6 +1,7 @@
 #include "AnnotationEditorComponent.h"
 #include "AnnotationJson.h"
 #include "AnnotationValidator.h"
+#include "AlgorithmicPitchPreview.h"
 #include "web/SyntheticObsidianWebView.h"
 
 #include <JuceHeader.h>
@@ -32,6 +33,204 @@ constexpr int kMaxPlaybackCurvePoints = 24;
 constexpr size_t kMaxBackingTracks = 36;
 constexpr int kWaveformPointCount = 65536;
 constexpr int kWaveformReadBlockSize = 32768;
+constexpr double kMinimumWebNoteLengthSeconds = 0.04;
+
+juce::String supportedAudioFileWildcard()
+{
+   #if JUCE_MAC || JUCE_IOS
+    // CoreAudioFormat, registered by registerBasicFormats(), provides the
+    // platform MP3 decoder without enabling JUCE's optional software decoder.
+    return "*.wav;*.aiff;*.aif;*.flac;*.mp3";
+   #else
+    return "*.wav;*.aiff;*.aif;*.flac";
+   #endif
+}
+
+std::optional<std::array<bool, 12>> chordPitchClasses(
+    const juce::String& chordName)
+{
+    const auto name = chordName.trim();
+    if (name.isEmpty())
+        return std::nullopt;
+
+    auto root = 0;
+    switch (juce::CharacterFunctions::toUpperCase(name[0]))
+    {
+        case 'C': root = 0; break;
+        case 'D': root = 2; break;
+        case 'E': root = 4; break;
+        case 'F': root = 5; break;
+        case 'G': root = 7; break;
+        case 'A': root = 9; break;
+        case 'B': root = 11; break;
+        default: return std::nullopt;
+    }
+
+    auto qualityStart = 1;
+    if (name.length() > 1)
+    {
+        const auto accidental = name[1];
+        if (accidental == '#' || accidental == 0x266f)
+        {
+            root = (root + 1) % 12;
+            ++qualityStart;
+        }
+        else if (accidental == 'b' || accidental == 0x266d)
+        {
+            root = (root + 11) % 12;
+            ++qualityStart;
+        }
+    }
+
+    const auto quality = name.substring(qualityStart).trim().toLowerCase();
+    const auto halfDiminished =
+        quality.contains("m7b5") || quality.containsChar(0x00f8);
+    const auto diminished = halfDiminished
+        || quality.contains("dim")
+        || quality.containsChar(0x00b0);
+    const auto augmented =
+        quality.contains("aug") || quality.startsWithChar('+');
+    const auto power =
+        quality == "5" || quality.startsWith("(5)");
+    const auto suspended2 = quality.contains("sus2");
+    const auto suspended4 =
+        ! suspended2 && quality.contains("sus");
+    const auto minor = ! diminished
+        && ((quality.startsWithChar('m') && ! quality.startsWith("maj"))
+            || quality.startsWith("min")
+            || quality.contains("minor"));
+
+    std::array<bool, 12> pitchClasses {};
+    const auto addInterval = [&pitchClasses, root](int interval)
+    {
+        pitchClasses[static_cast<size_t>((root + interval) % 12)] = true;
+    };
+    if (power)
+    {
+        addInterval(0);
+        addInterval(7);
+    }
+    else if (diminished)
+    {
+        addInterval(0);
+        addInterval(3);
+        addInterval(6);
+    }
+    else if (augmented)
+    {
+        addInterval(0);
+        addInterval(4);
+        addInterval(8);
+    }
+    else if (suspended2)
+    {
+        addInterval(0);
+        addInterval(2);
+        addInterval(7);
+    }
+    else if (suspended4)
+    {
+        addInterval(0);
+        addInterval(5);
+        addInterval(7);
+    }
+    else
+    {
+        addInterval(0);
+        addInterval(minor ? 3 : 4);
+        addInterval(7);
+    }
+
+    if (quality.contains("b5"))
+    {
+        pitchClasses[static_cast<size_t>((root + 7) % 12)] = false;
+        addInterval(6);
+    }
+    else if (quality.contains("#5"))
+    {
+        pitchClasses[static_cast<size_t>((root + 7) % 12)] = false;
+        addInterval(8);
+    }
+
+    const auto hasMajorSeventh =
+        quality.contains("maj7")
+        || quality.contains("major7")
+        || quality.containsChar(0x25b3);
+    if (hasMajorSeventh)
+        addInterval(11);
+    else if (halfDiminished
+             || quality.containsChar('7')
+             || quality.contains("9")
+             || quality.contains("11")
+             || quality.contains("13"))
+        addInterval(10);
+
+    if (quality.contains("6") || quality.contains("13"))
+        addInterval(9);
+    if (quality.contains("b9"))
+        addInterval(1);
+    else if (quality.contains("#9"))
+        addInterval(3);
+    else if (quality.contains("9"))
+        addInterval(2);
+    if (quality.contains("11"))
+        addInterval(5);
+
+    return pitchClasses;
+}
+
+double snapPitchToChord(
+    double requestedPitch,
+    double noteStart,
+    const std::vector<ChordSegment>& chords)
+{
+    const auto chord = std::find_if(
+        chords.begin(),
+        chords.end(),
+        [noteStart](const auto& candidate)
+        {
+            return noteStart >= candidate.start - 0.000001
+                && noteStart < candidate.end - 0.000001;
+        });
+    if (chord == chords.end())
+        return requestedPitch;
+
+    const auto pitchClasses = chordPitchClasses(chord->name);
+    if (! pitchClasses)
+        return requestedPitch;
+
+    auto bestPitch = requestedPitch;
+    auto bestDistance = std::numeric_limits<double>::infinity();
+    for (auto candidate = 0; candidate <= 127; ++candidate)
+    {
+        if (! (*pitchClasses)[static_cast<size_t>(candidate % 12)])
+            continue;
+        const auto distance =
+            std::abs(static_cast<double>(candidate) - requestedPitch);
+        if (distance < bestDistance)
+        {
+            bestDistance = distance;
+            bestPitch = static_cast<double>(candidate);
+        }
+    }
+    return bestPitch;
+}
+
+void moveNoteToPitch(NoteBlock& note, double requestedPitch)
+{
+    const auto pitch = juce::jlimit(0.0, 127.0, requestedPitch);
+    const auto pitchDelta = pitch - note.pitchExact;
+    note.pitchExact = pitch;
+    note.pitch = juce::jlimit(
+        0,
+        127,
+        static_cast<int>(std::lround(pitch)));
+    for (auto& point : note.curve)
+        point.midi = juce::jlimit(
+            0.0,
+            127.0,
+            point.midi + pitchDelta);
+}
 
 struct WaveformPoint
 {
@@ -157,6 +356,7 @@ struct PlaybackNote
     double start = 0.0;
     double end = 0.0;
     double frequency = 440.0;
+    float gain = 1.0f;
     bool isBacking = false;
     int backingTrackIndex = -1;
     bool legatoFromPrevious = false;
@@ -169,6 +369,40 @@ struct PlaybackNoteState
 {
     std::array<PlaybackNote, kMaxPlaybackNotes> notes {};
     int count = 0;
+};
+
+struct PitchTrackSnapshot
+{
+    std::vector<NoteBlock> notes;
+    std::vector<AnnotationRegion> regions;
+};
+
+struct PitchTrackHistory
+{
+    std::vector<PitchTrackSnapshot> undo;
+    std::vector<PitchTrackSnapshot> redo;
+};
+
+struct VoiceTrainingSource
+{
+    juce::File file;
+    double durationSeconds = 0.0;
+    double sampleRate = 0.0;
+    int channels = 0;
+    bool usable = false;
+    juce::String status;
+    juce::String message;
+};
+
+struct VoiceProfileOption
+{
+    juce::String id;
+    juce::String name;
+    juce::String quality;
+    juce::File directory;
+    juce::File adapterFile;
+    std::vector<juce::File> sources;
+    bool active = false;
 };
 
 struct BackingStyleDefinition
@@ -743,6 +977,38 @@ double playbackMidiAtTime(const PlaybackNote& note, double time)
     return note.curve[static_cast<size_t>(note.curveCount - 1)].midi;
 }
 
+double interpolatedNoteMidi(const NoteBlock& note, double time)
+{
+    if (note.curve.empty())
+        return note.pitchExact;
+
+    auto curve = note.curve;
+    std::sort(curve.begin(), curve.end(), [](const auto& left, const auto& right)
+    {
+        return left.time < right.time;
+    });
+    if (time <= curve.front().time)
+        return curve.front().midi;
+    if (time >= curve.back().time)
+        return curve.back().midi;
+
+    for (size_t index = 1; index < curve.size(); ++index)
+    {
+        const auto& previous = curve[index - 1];
+        const auto& next = curve[index];
+        if (time <= next.time)
+        {
+            const auto proportion = juce::jlimit(
+                0.0,
+                1.0,
+                (time - previous.time) / juce::jmax(0.001, next.time - previous.time));
+            return previous.midi + (next.midi - previous.midi) * proportion;
+        }
+    }
+
+    return curve.back().midi;
+}
+
 bool isLyricLetter(juce_wchar character)
 {
     return juce::CharacterFunctions::isLetter(character) || character == '\'';
@@ -865,6 +1131,7 @@ public:
           webView_([this](const juce::var& command) { handleWebCommand(command); })
     {
         formatManager_.registerBasicFormats();
+        loadActiveVoiceProfile();
         editor_.setListener(this);
 
         addToolbarButton(openAudioButton_, "Open Audio", [this] { chooseAudioFile(); });
@@ -965,6 +1232,8 @@ public:
 
     ~MainComponent() override
     {
+        if (voiceProfileCancellation_ != nullptr)
+            voiceProfileCancellation_->store(true, std::memory_order_release);
         stopTimer();
         stopBackingVocalWorker();
         stopBackingAudioWorker();
@@ -978,6 +1247,13 @@ public:
         readerSource_.reset();
         instrumentalReaderSource_.reset();
         backingAudioReaderSource_.reset();
+        if (leadPitchPreviewFile_.existsAsFile())
+            leadPitchPreviewFile_.deleteFile();
+        for (const auto& [trackName, previewFile] : backingPitchPreviewFiles_)
+        {
+            juce::ignoreUnused(trackName);
+            previewFile.deleteFile();
+        }
         shutdownAudio();
     }
 
@@ -1028,6 +1304,52 @@ public:
         accumulateOutputPeak(1, rightPeak);
     }
 
+    void applyLeadClipGains(juce::AudioBuffer<float>& buffer,
+                            int numSamples,
+                            double playheadStart) noexcept
+    {
+        const auto* state = activeNoteState_.load(std::memory_order_acquire);
+        const auto sampleRate = audioSampleRate_.load(std::memory_order_relaxed);
+        if (state == nullptr || state->count <= 0 || sampleRate <= 0.0)
+            return;
+
+        constexpr auto transitionSeconds = 0.005;
+        const auto blockEnd = playheadStart + static_cast<double>(numSamples) / sampleRate;
+        for (int noteIndex = 0; noteIndex < state->count; ++noteIndex)
+        {
+            const auto& note = state->notes[static_cast<size_t>(noteIndex)];
+            if (note.start >= blockEnd)
+                break;
+            if (note.isBacking
+                || note.end <= playheadStart
+                || std::abs(note.gain - 1.0f) <= 0.0001f)
+            {
+                continue;
+            }
+
+            const auto firstSample = juce::jlimit(
+                0,
+                numSamples,
+                static_cast<int>(std::floor((note.start - playheadStart) * sampleRate)));
+            const auto lastSample = juce::jlimit(
+                firstSample,
+                numSamples,
+                static_cast<int>(std::ceil((note.end - playheadStart) * sampleRate)));
+            for (int sample = firstSample; sample < lastSample; ++sample)
+            {
+                const auto time = playheadStart + static_cast<double>(sample) / sampleRate;
+                const auto edgeBlend = juce::jlimit(
+                    0.0,
+                    1.0,
+                    juce::jmin(time - note.start, note.end - time) / transitionSeconds);
+                const auto gain =
+                    1.0f + (note.gain - 1.0f) * static_cast<float>(edgeBlend);
+                for (int channel = 0; channel < buffer.getNumChannels(); ++channel)
+                    buffer.setSample(channel, sample, buffer.getSample(channel, sample) * gain);
+            }
+        }
+    }
+
     void getNextAudioBlock(const juce::AudioSourceChannelInfo& bufferToFill) override
     {
         const auto playheadStart = currentTransportPosition();
@@ -1041,6 +1363,7 @@ public:
                 leadAudioMixBuffer_.clear();
                 juce::AudioSourceChannelInfo leadInfo(&leadAudioMixBuffer_, 0, bufferToFill.numSamples);
                 transport_.getNextAudioBlock(leadInfo);
+                applyLeadClipGains(leadAudioMixBuffer_, bufferToFill.numSamples, playheadStart);
 
                 const auto anySolo = instrumentalSolo_.load()
                     || leadSolo_.load()
@@ -1238,7 +1561,7 @@ public:
                     : juce::jlimit(0.0, 1.0, (note.end - time) / fadeSeconds);
                 const auto frequency = midiNoteToFrequency(playbackMidiAtTime(note, time));
                 auto& phase = timelineNotePhases_[static_cast<size_t>(i)];
-                mixed += std::sin(phase) * juce::jmin(attack, release);
+                mixed += std::sin(phase) * juce::jmin(attack, release) * note.gain;
                 phase += kTwoPi * frequency / sampleRate;
                 if (phase >= kTwoPi)
                     phase = std::fmod(phase, kTwoPi);
@@ -1265,46 +1588,102 @@ public:
         if (buffer == nullptr)
             return;
 
-        const auto serial = clickedToneSerial_.load();
+        const auto serial = clickedToneSerial_.load(std::memory_order_acquire);
         if (serial != renderedClickedToneSerial_)
         {
             renderedClickedToneSerial_ = serial;
             clickedTonePhase_ = 0.0;
+            clickedToneDetunedPhase_ = 0.0;
             clickedToneElapsedSamples_ = 0;
+            clickedToneCurrentFrequency_ =
+                clickedToneFrequency_.load(std::memory_order_relaxed);
+            clickedToneWasHeld_ =
+                clickedToneHeld_.load(std::memory_order_relaxed);
         }
 
-        auto remaining = clickedToneSamplesRemaining_.load();
-        if (remaining <= 0)
-            return;
-
-        const auto totalSamples = juce::jmax(1, clickedToneTotalSamples_.load());
-        const auto sampleRate = audioSampleRate_.load();
+        auto remaining =
+            clickedToneSamplesRemaining_.load(std::memory_order_relaxed);
+        const auto sampleRate =
+            audioSampleRate_.load(std::memory_order_relaxed);
         if (sampleRate <= 0.0)
             return;
 
-        const auto frequency = clickedToneFrequency_.load();
+        const auto holdRequested =
+            clickedToneHeld_.load(std::memory_order_acquire);
+        const auto leaseAvailable =
+            clickedToneLeaseSamples_.load(std::memory_order_acquire);
+        const auto leaseBeforeBlock =
+            holdRequested && leaseAvailable > 0
+            ? clickedToneLeaseSamples_.fetch_sub(
+                bufferToFill.numSamples,
+                std::memory_order_acq_rel)
+            : 0;
+        const auto held = holdRequested && leaseBeforeBlock > 0;
+        const auto releaseSamples =
+            juce::jmax(1, static_cast<int>(sampleRate * 0.055));
+        if (clickedToneWasHeld_ && ! held)
+            remaining = releaseSamples;
+        clickedToneWasHeld_ = held;
+        if (! held && remaining <= 0)
+            return;
+
+        const auto targetFrequency =
+            clickedToneFrequency_.load(std::memory_order_relaxed);
+        const auto frequencySmoothing =
+            1.0 - std::exp(-1.0 / (sampleRate * 0.006));
         const auto channels = buffer->getNumChannels();
 
-        for (int sample = 0; sample < bufferToFill.numSamples && remaining > 0; ++sample)
+        for (int sample = 0;
+             sample < bufferToFill.numSamples && (held || remaining > 0);
+             ++sample)
         {
-            const auto attack = juce::jlimit(0.0, 1.0, static_cast<double>(clickedToneElapsedSamples_) / (sampleRate * 0.01));
-            const auto release = juce::jlimit(0.0, 1.0, static_cast<double>(remaining) / (sampleRate * 0.04));
-            const auto taper = 1.0 - static_cast<double>(clickedToneElapsedSamples_) / static_cast<double>(totalSamples);
-            const auto gain = 0.22f * static_cast<float>(juce::jmin(attack, release) * juce::jmax(0.0, taper));
-            const auto value = static_cast<float>(std::sin(clickedTonePhase_) * gain);
+            const auto elapsedSeconds =
+                static_cast<double>(clickedToneElapsedSamples_) / sampleRate;
+            const auto attack =
+                juce::jlimit(0.0, 1.0, elapsedSeconds / 0.004);
+            const auto release = held
+                ? 1.0
+                : juce::jlimit(
+                    0.0,
+                    1.0,
+                    static_cast<double>(remaining)
+                        / static_cast<double>(releaseSamples));
+            const auto decay = 0.38 + 0.62 * std::exp(-elapsedSeconds * 3.2);
+            const auto brightness = std::exp(-elapsedSeconds * 4.8);
+            const auto tone =
+                0.70 * std::sin(clickedTonePhase_)
+                + 0.20 * brightness * std::sin(2.0 * clickedTonePhase_ + 0.07)
+                + 0.09 * brightness * std::sin(3.0 * clickedTonePhase_ + 0.13)
+                + 0.04 * brightness * std::sin(4.0 * clickedTonePhase_ + 0.21)
+                + 0.12 * std::sin(clickedToneDetunedPhase_);
+            const auto gain =
+                0.21f * static_cast<float>(attack * release * decay);
+            const auto value = static_cast<float>(tone) * gain;
 
-            clickedTonePhase_ += kTwoPi * frequency / sampleRate;
+            clickedToneCurrentFrequency_ +=
+                (targetFrequency - clickedToneCurrentFrequency_)
+                * frequencySmoothing;
+            clickedTonePhase_ +=
+                kTwoPi * clickedToneCurrentFrequency_ / sampleRate;
+            clickedToneDetunedPhase_ +=
+                kTwoPi * clickedToneCurrentFrequency_ * 1.0025 / sampleRate;
             if (clickedTonePhase_ >= kTwoPi)
                 clickedTonePhase_ = std::fmod(clickedTonePhase_, kTwoPi);
+            if (clickedToneDetunedPhase_ >= kTwoPi)
+                clickedToneDetunedPhase_ =
+                    std::fmod(clickedToneDetunedPhase_, kTwoPi);
 
             for (int channel = 0; channel < channels; ++channel)
                 buffer->addSample(channel, bufferToFill.startSample + sample, value);
 
-            --remaining;
+            if (! held)
+                --remaining;
             ++clickedToneElapsedSamples_;
         }
 
-        clickedToneSamplesRemaining_.store(remaining);
+        clickedToneSamplesRemaining_.store(
+            held ? 1 : remaining,
+            std::memory_order_relaxed);
     }
 
     void resized() override
@@ -1671,6 +2050,939 @@ private:
         webView_.dispatch(event);
     }
 
+    double voiceTrainingUsableDuration() const
+    {
+        double duration = 0.0;
+        for (const auto& source : voiceTrainingSources_)
+            if (source.usable)
+                duration += source.durationSeconds;
+        return duration;
+    }
+
+    static juce::File voiceProfilesRoot()
+    {
+        return juce::File::getSpecialLocation(juce::File::userHomeDirectory)
+            .getChildFile(".synthetic_obsidian")
+            .getChildFile("models")
+            .getChildFile("voice_profiles");
+    }
+
+    static juce::File voiceTrainingJobsRoot()
+    {
+        return juce::File::getSpecialLocation(juce::File::userHomeDirectory)
+            .getChildFile(".synthetic_obsidian")
+            .getChildFile("training")
+            .getChildFile("jobs");
+    }
+
+    std::vector<VoiceProfileOption> readVoiceProfileOptions() const
+    {
+        const auto profilesRoot = voiceProfilesRoot();
+        juce::Array<juce::File> directories;
+        profilesRoot.findChildFiles(
+            directories,
+            juce::File::findDirectories,
+            false);
+
+        std::vector<VoiceProfileOption> profiles;
+        profiles.reserve(static_cast<size_t>(directories.size()));
+        for (const auto& directory : directories)
+        {
+            const auto manifestValue =
+                juce::JSON::parse(directory.getChildFile("manifest.json"));
+            const auto* manifest = manifestValue.getDynamicObject();
+            if (manifest == nullptr)
+                continue;
+
+            const auto adapterRelativePath =
+                manifest->getProperty("adapterFile").toString();
+            if (adapterRelativePath.isEmpty())
+                continue;
+
+            const auto directoryPrefix =
+                directory.getFullPathName() + juce::File::getSeparatorString();
+            const auto adapterFile = directory.getChildFile(adapterRelativePath);
+            if (! adapterFile.existsAsFile()
+                || ! adapterFile.getFullPathName().startsWith(directoryPrefix))
+            {
+                continue;
+            }
+
+            VoiceProfileOption profile;
+            profile.id = directory.getFileName();
+            profile.name = manifest->getProperty("presetName").toString();
+            if (profile.name.isEmpty())
+                profile.name = profile.id;
+            profile.quality =
+                manifest->getProperty("quality").toString() == "high"
+                    ? "high"
+                    : "balanced";
+            profile.directory = directory;
+            profile.adapterFile = adapterFile;
+            profile.active = profile.id == activeVoiceProfileId_;
+
+            if (const auto* sourceValues =
+                    manifest->getProperty("sources").getArray())
+            {
+                for (const auto& sourceValue : *sourceValues)
+                {
+                    const auto* source = sourceValue.getDynamicObject();
+                    if (source == nullptr)
+                        continue;
+                    const auto sourceFile = directory.getChildFile(
+                        source->getProperty("file").toString());
+                    if (sourceFile.existsAsFile()
+                        && sourceFile.getFullPathName().startsWith(directoryPrefix))
+                    {
+                        profile.sources.push_back(sourceFile);
+                    }
+                }
+            }
+            profiles.push_back(std::move(profile));
+        }
+
+        std::sort(
+            profiles.begin(),
+            profiles.end(),
+            [](const auto& left, const auto& right)
+            {
+                if (left.active != right.active)
+                    return left.active;
+                const auto nameComparison =
+                    left.name.compareNatural(right.name);
+                return nameComparison != 0
+                    ? nameComparison < 0
+                    : left.id < right.id;
+            });
+        return profiles;
+    }
+
+    void loadActiveVoiceProfile()
+    {
+        const auto profilesRoot = voiceProfilesRoot();
+        const auto activeFile = profilesRoot.getChildFile("active.json");
+        if (! activeFile.existsAsFile())
+            return;
+
+        const auto activeValue = juce::JSON::parse(activeFile);
+        const auto* activeObject = activeValue.getDynamicObject();
+        if (activeObject == nullptr)
+            return;
+
+        const auto directoryName =
+            juce::File(activeObject->getProperty("directory").toString()).getFileName();
+        const auto profileDirectory = profilesRoot.getChildFile(directoryName);
+        const auto manifestFile = profileDirectory.getChildFile("manifest.json");
+        if (! profileDirectory.isDirectory() || ! manifestFile.existsAsFile())
+            return;
+
+        const auto manifestValue = juce::JSON::parse(manifestFile);
+        const auto* manifest = manifestValue.getDynamicObject();
+        if (manifest == nullptr)
+            return;
+
+        std::vector<juce::File> sources;
+        std::vector<VoiceTrainingSource> trainingSources;
+        if (const auto* sourceValues = manifest->getProperty("sources").getArray())
+        {
+            for (const auto& sourceValue : *sourceValues)
+            {
+                const auto* source = sourceValue.getDynamicObject();
+                if (source == nullptr)
+                    continue;
+                const auto relativePath = source->getProperty("file").toString();
+                const auto file = profileDirectory.getChildFile(relativePath);
+                if (file.existsAsFile()
+                    && file.getFullPathName().startsWith(
+                        profileDirectory.getFullPathName()
+                            + juce::File::getSeparatorString()))
+                {
+                    sources.push_back(file);
+                    trainingSources.push_back(inspectVoiceTrainingSource(file));
+                }
+            }
+        }
+        if (sources.empty())
+            return;
+
+        activeVoiceProfileName_ = manifest->getProperty("presetName").toString();
+        activeVoiceProfileId_ = directoryName;
+        activeVoiceProfileQuality_ =
+            manifest->getProperty("quality").toString() == "high" ? "high" : "balanced";
+        activeVoiceProfileDirectory_ = profileDirectory;
+        activeVoiceProfileSources_ = std::move(sources);
+        activeVoiceAdapterFile_ = juce::File();
+        const auto adapterRelativePath = manifest->getProperty("adapterFile").toString();
+        if (adapterRelativePath.isNotEmpty())
+        {
+            const auto adapterFile = profileDirectory.getChildFile(adapterRelativePath);
+            if (adapterFile.existsAsFile()
+                && adapterFile.getFullPathName().startsWith(
+                    profileDirectory.getFullPathName()
+                        + juce::File::getSeparatorString()))
+            {
+                activeVoiceAdapterFile_ = adapterFile;
+            }
+        }
+        if (voiceTrainingSources_.empty())
+            voiceTrainingSources_ = std::move(trainingSources);
+        voiceTrainingPhase_ = "complete";
+        voiceTrainingMessage_ =
+            "The active local profile is ready for new backing-vocal renders.";
+        voiceTrainingProgress_ = 1.0;
+        lastActiveProfilePointerModificationMs_ =
+            activeFile.getLastModificationTime().toMilliseconds();
+    }
+
+    VoiceTrainingSource inspectVoiceTrainingSource(const juce::File& file)
+    {
+        VoiceTrainingSource source;
+        source.file = file;
+        source.status = "rejected";
+        source.message = "The audio file could not be read.";
+
+        std::unique_ptr<juce::AudioFormatReader> reader(formatManager_.createReaderFor(file));
+        if (reader == nullptr || reader->sampleRate <= 0.0 || reader->lengthInSamples <= 0)
+            return source;
+
+        source.durationSeconds =
+            static_cast<double>(reader->lengthInSamples) / reader->sampleRate;
+        source.sampleRate = reader->sampleRate;
+        source.channels = static_cast<int>(reader->numChannels);
+
+        if (source.durationSeconds < 3.0)
+        {
+            source.message = "Too short. Use recordings that are at least 3 seconds long.";
+            return source;
+        }
+
+        source.usable = true;
+        if (source.sampleRate < 32000.0)
+        {
+            source.status = "warning";
+            source.message = "Usable, but 44.1 kHz or 48 kHz audio will preserve more detail.";
+        }
+        else if (source.channels > 1)
+        {
+            source.status = "warning";
+            source.message = "Usable. Mono dry vocals are preferred; this file will be downmixed.";
+        }
+        else
+        {
+            source.status = "ready";
+            source.message = "Ready for the local voice profile.";
+        }
+        return source;
+    }
+
+    void addVoiceTrainingSource(const juce::File& file)
+    {
+        if (! file.existsAsFile())
+            return;
+
+        const auto path = file.getFullPathName();
+        const auto duplicate = std::any_of(
+            voiceTrainingSources_.begin(),
+            voiceTrainingSources_.end(),
+            [&path](const auto& source)
+            {
+                return source.file.getFullPathName() == path;
+            });
+        if (! duplicate)
+            voiceTrainingSources_.push_back(inspectVoiceTrainingSource(file));
+    }
+
+    std::vector<juce::var> readVoiceTrainingJobStates() const
+    {
+        juce::Array<juce::File> directories;
+        voiceTrainingJobsRoot().findChildFiles(
+            directories,
+            juce::File::findDirectories,
+            false);
+
+        std::vector<juce::var> jobs;
+        jobs.reserve(static_cast<size_t>(directories.size()));
+        for (const auto& directory : directories)
+        {
+            const auto stateFile = directory.getChildFile("state.json");
+            if (! stateFile.existsAsFile())
+                continue;
+            const auto state = juce::JSON::parse(stateFile);
+            if (state.getDynamicObject() != nullptr)
+                jobs.push_back(state);
+        }
+        std::sort(
+            jobs.begin(),
+            jobs.end(),
+            [](const auto& left, const auto& right)
+            {
+                const auto* leftObject = left.getDynamicObject();
+                const auto* rightObject = right.getDynamicObject();
+                if (leftObject == nullptr || rightObject == nullptr)
+                    return leftObject != nullptr;
+                return leftObject->getProperty("createdAt").toString()
+                    > rightObject->getProperty("createdAt").toString();
+            });
+        return jobs;
+    }
+
+    static bool isVoiceTrainingJobActive(const juce::var& state)
+    {
+        const auto* object = state.getDynamicObject();
+        if (object == nullptr)
+            return false;
+        const auto status = object->getProperty("status").toString();
+        return status != "complete"
+            && status != "cancelled"
+            && status != "error";
+    }
+
+    bool voiceFineTuningAvailable() const
+    {
+       #if JUCE_MAC && (defined(__arm64__) || defined(__aarch64__))
+        const auto script = juce::File(SYNTHETIC_OBSIDIAN_ROOT)
+                                .getChildFile("tools")
+                                .getChildFile("vocal_annotation_tool")
+                                .getChildFile("voice_lora_training_worker.py");
+        const auto model = juce::File::getSpecialLocation(juce::File::userHomeDirectory)
+                               .getChildFile(".synthetic_obsidian")
+                               .getChildFile("models")
+                               .getChildFile("SoulX-Singer")
+                               .getChildFile("model-svc.pt");
+        return script.existsAsFile()
+            && model.existsAsFile()
+            && juce::File(soulXPythonExecutable()).existsAsFile();
+       #else
+        return false;
+       #endif
+    }
+
+    void sendWebVoiceTrainingState()
+    {
+        if (! webFrontendReady_)
+            return;
+
+        constexpr double minimumDurationSeconds = 30.0;
+        constexpr double recommendedDurationSeconds = 180.0;
+        const auto totalDuration = voiceTrainingUsableDuration();
+        const auto jobs = readVoiceTrainingJobStates();
+        const auto hasActiveJob = std::any_of(
+            jobs.begin(),
+            jobs.end(),
+            [](const auto& job) { return isVoiceTrainingJobActive(job); });
+        juce::Array<juce::var> sources;
+        for (size_t index = 0; index < voiceTrainingSources_.size(); ++index)
+        {
+            const auto& source = voiceTrainingSources_[index];
+            auto* item = new juce::DynamicObject();
+            item->setProperty("id", juce::String(static_cast<int>(index)));
+            item->setProperty("name", source.file.getFileName());
+            item->setProperty("durationSeconds", source.durationSeconds);
+            item->setProperty("sampleRate", source.sampleRate);
+            item->setProperty("channels", source.channels);
+            item->setProperty("status", source.status);
+            item->setProperty("message", source.message);
+            sources.add(item);
+        }
+
+        auto* state = new juce::DynamicObject();
+        state->setProperty("phase", voiceTrainingPhase_);
+        state->setProperty("message", voiceTrainingMessage_);
+        state->setProperty("progress", voiceTrainingProgress_);
+       #if JUCE_MAC && (defined(__arm64__) || defined(__aarch64__))
+        state->setProperty("device", "Apple Silicon / Local");
+        state->setProperty("isAppleSilicon", true);
+       #else
+        state->setProperty("device", "Local CPU");
+        state->setProperty("isAppleSilicon", false);
+       #endif
+        state->setProperty("sources", sources);
+        state->setProperty("totalDurationSeconds", totalDuration);
+        state->setProperty("minimumDurationSeconds", minimumDurationSeconds);
+        state->setProperty("recommendedDurationSeconds", recommendedDurationSeconds);
+        state->setProperty(
+            "canCreateProfile",
+            ! voiceProfileCreationRunning_ && totalDuration >= minimumDurationSeconds);
+        state->setProperty("activeProfileName", activeVoiceProfileName_);
+        state->setProperty("outputDirectory", activeVoiceProfileDirectory_.getFullPathName());
+        state->setProperty("fineTuningAvailable", voiceFineTuningAvailable());
+        state->setProperty(
+            "canStartTraining",
+            voiceFineTuningAvailable()
+                && ! hasActiveJob
+                && totalDuration >= minimumDurationSeconds);
+        juce::Array<juce::var> jobValues;
+        for (const auto& job : jobs)
+            jobValues.add(job);
+        state->setProperty("jobs", jobValues);
+
+        auto* event = new juce::DynamicObject();
+        event->setProperty("type", "voice-training-state");
+        event->setProperty("state", state);
+        webView_.dispatch(event);
+    }
+
+    void chooseVoiceTrainingFiles()
+    {
+        if (voiceProfileCreationRunning_)
+            return;
+
+        chooser_ = std::make_unique<juce::FileChooser>(
+            "Add clean vocal recordings",
+            juce::File(),
+            supportedAudioFileWildcard());
+        chooser_->launchAsync(
+            juce::FileBrowserComponent::openMode
+                | juce::FileBrowserComponent::canSelectFiles
+                | juce::FileBrowserComponent::canSelectMultipleItems,
+            [this](const juce::FileChooser& chooser)
+            {
+                for (const auto& file : chooser.getResults())
+                    addVoiceTrainingSource(file);
+
+                if (! voiceTrainingSources_.empty())
+                {
+                    voiceTrainingPhase_ = "ready";
+                    voiceTrainingMessage_ =
+                        voiceTrainingUsableDuration() >= 30.0
+                            ? "The recordings are ready to create a local voice profile."
+                            : "Add at least 30 seconds of usable solo vocal.";
+                    sendWebVoiceTrainingState();
+                }
+            });
+    }
+
+    void cancelVoiceProfileCreation()
+    {
+        if (! voiceProfileCreationRunning_ || voiceProfileCancellation_ == nullptr)
+            return;
+
+        voiceProfileCancellation_->store(true, std::memory_order_release);
+        voiceTrainingPhase_ = "cancelling";
+        voiceTrainingMessage_ = "Cancelling profile preparation...";
+        sendWebVoiceTrainingState();
+    }
+
+    void startVoiceLoRATraining(
+        const juce::String& requestedName,
+        const juce::String& requestedQuality)
+    {
+        constexpr double minimumDurationSeconds = 30.0;
+        if (! voiceFineTuningAvailable())
+        {
+            voiceTrainingPhase_ = "error";
+            voiceTrainingMessage_ = "The Apple Silicon LoRA training runtime is unavailable.";
+            sendWebVoiceTrainingState();
+            return;
+        }
+        const auto existingJobs = readVoiceTrainingJobStates();
+        if (std::any_of(
+                existingJobs.begin(),
+                existingJobs.end(),
+                [](const auto& job) { return isVoiceTrainingJobActive(job); }))
+        {
+            voiceTrainingPhase_ = "error";
+            voiceTrainingMessage_ =
+                "Another voice training job is already running. Cancel it or wait for it to finish.";
+            sendWebVoiceTrainingState();
+            return;
+        }
+        if (voiceTrainingUsableDuration() < minimumDurationSeconds)
+        {
+            voiceTrainingPhase_ = "error";
+            voiceTrainingMessage_ = "Add at least 30 seconds of usable solo vocal.";
+            sendWebVoiceTrainingState();
+            return;
+        }
+
+        auto presetName = requestedName.trim().substring(0, 64);
+        if (presetName.isEmpty())
+            presetName = "My Voice";
+        const juce::String quality =
+            requestedQuality == "high" ? "high" : "balanced";
+        const auto jobId =
+            "lora_" + juce::String(juce::Time::currentTimeMillis())
+                + "_" + juce::Uuid().toString().substring(0, 8);
+        const auto jobsRoot = voiceTrainingJobsRoot();
+        const auto jobDirectory = jobsRoot.getChildFile(jobId);
+        if (jobDirectory.createDirectory().failed())
+        {
+            voiceTrainingPhase_ = "error";
+            voiceTrainingMessage_ = "Could not create the persistent training job.";
+            sendWebVoiceTrainingState();
+            return;
+        }
+
+        auto profileName = juce::File::createLegalFileName(presetName).trim();
+        if (profileName.isEmpty())
+            profileName = "voice";
+        profileName << "-lora-" << juce::Uuid().toString().substring(0, 8);
+        const auto profileDirectory = voiceProfilesRoot().getChildFile(profileName);
+        const auto createdAt = juce::Time::getCurrentTime().toISO8601(true);
+
+        juce::Array<juce::var> sources;
+        double totalDurationSeconds = 0.0;
+        for (const auto& source : voiceTrainingSources_)
+        {
+            if (! source.usable || ! source.file.existsAsFile())
+                continue;
+            auto* item = new juce::DynamicObject();
+            item->setProperty("path", source.file.getFullPathName());
+            item->setProperty("originalName", source.file.getFileName());
+            item->setProperty("durationSeconds", source.durationSeconds);
+            item->setProperty("sampleRate", source.sampleRate);
+            item->setProperty("channels", source.channels);
+            sources.add(item);
+            totalDurationSeconds += source.durationSeconds;
+        }
+
+        auto* lora = new juce::DynamicObject();
+        lora->setProperty("rank", quality == "high" ? 16 : 8);
+        lora->setProperty("alpha", quality == "high" ? 16.0 : 8.0);
+        lora->setProperty("dropout", 0.05);
+        juce::Array<juce::var> targets;
+        targets.add("q_proj");
+        targets.add("v_proj");
+        if (quality == "high")
+        {
+            targets.add("k_proj");
+            targets.add("o_proj");
+        }
+        lora->setProperty("target_suffixes", targets);
+        lora->setProperty(
+            "module_prefix",
+            "cfm_decoder.model.diff_estimator.layers.");
+
+        auto* training = new juce::DynamicObject();
+        training->setProperty("steps", quality == "high" ? 800 : 400);
+        training->setProperty("segmentSeconds", quality == "high" ? 4.0 : 3.5);
+        training->setProperty("maximumSegments", quality == "high" ? 64 : 40);
+        training->setProperty("learningRate", quality == "high" ? 0.00005 : 0.0001);
+        training->setProperty("gradientAccumulation", 2);
+        training->setProperty("seed", 1337);
+        training->setProperty("lora", lora);
+
+        const auto sourceRoot = juce::File::getSpecialLocation(juce::File::userHomeDirectory)
+                                    .getChildFile(".synthetic_obsidian")
+                                    .getChildFile("runtime")
+                                    .getChildFile("soulx-singer")
+                                    .getChildFile("source");
+        const auto modelPath = juce::File::getSpecialLocation(juce::File::userHomeDirectory)
+                                   .getChildFile(".synthetic_obsidian")
+                                   .getChildFile("models")
+                                   .getChildFile("SoulX-Singer")
+                                   .getChildFile("model-svc.pt");
+        auto* request = new juce::DynamicObject();
+        request->setProperty("schemaVersion", 1);
+        request->setProperty("jobId", jobId);
+        request->setProperty("presetName", presetName);
+        request->setProperty("quality", quality);
+        request->setProperty("createdAt", createdAt);
+        request->setProperty("sources", sources);
+        request->setProperty("totalDurationSeconds", totalDurationSeconds);
+        request->setProperty("profileDirectory", profileDirectory.getFullPathName());
+        request->setProperty("sourceRoot", sourceRoot.getFullPathName());
+        request->setProperty("modelPath", modelPath.getFullPathName());
+        request->setProperty(
+            "configPath",
+            sourceRoot.getChildFile("soulxsinger")
+                .getChildFile("config")
+                .getChildFile("soulxsinger.yaml")
+                .getFullPathName());
+        request->setProperty("training", training);
+
+        const auto requestFile = jobDirectory.getChildFile("request.json");
+        if (! requestFile.replaceWithText(
+                juce::JSON::toString(juce::var(request), true)))
+        {
+            voiceTrainingPhase_ = "error";
+            voiceTrainingMessage_ = "Could not write the persistent training request.";
+            sendWebVoiceTrainingState();
+            return;
+        }
+
+        auto* state = new juce::DynamicObject();
+        state->setProperty("schemaVersion", 1);
+        state->setProperty("jobId", jobId);
+        state->setProperty("presetName", presetName);
+        state->setProperty("quality", quality);
+        state->setProperty("status", "queued");
+        state->setProperty("stage", "Queued");
+        state->setProperty("message", "Starting the independent training process...");
+        state->setProperty("progress", 0.0);
+        state->setProperty("currentStep", 0);
+        state->setProperty("totalSteps", quality == "high" ? 800 : 400);
+        state->setProperty("createdAt", createdAt);
+        state->setProperty("updatedAt", createdAt);
+        state->setProperty("profileDirectory", profileDirectory.getFullPathName());
+        state->setProperty("adapterFile", juce::String());
+        state->setProperty("canCancel", true);
+        const auto stateValue = juce::var(state);
+        jobDirectory.getChildFile("state.json").replaceWithText(
+            juce::JSON::toString(stateValue, true));
+
+        const auto script = juce::File(SYNTHETIC_OBSIDIAN_ROOT)
+                                .getChildFile("tools")
+                                .getChildFile("vocal_annotation_tool")
+                                .getChildFile("voice_lora_training_worker.py");
+        auto process = std::make_unique<juce::ChildProcess>();
+        juce::StringArray arguments;
+        arguments.add(soulXPythonExecutable());
+        arguments.add(script.getFullPathName());
+        arguments.add("--job-dir");
+        arguments.add(jobDirectory.getFullPathName());
+        if (! process->start(arguments, 0))
+        {
+            state->setProperty("status", "error");
+            state->setProperty("stage", "Failed");
+            state->setProperty("message", "Could not launch the independent training process.");
+            state->setProperty("canCancel", false);
+            jobDirectory.getChildFile("state.json").replaceWithText(
+                juce::JSON::toString(stateValue, true));
+            voiceTrainingPhase_ = "error";
+            voiceTrainingMessage_ = "Could not launch the independent training process.";
+            sendWebVoiceTrainingState();
+            return;
+        }
+
+        detachedTrainingProcesses_.push_back(std::move(process));
+        voiceTrainingPhase_ = "ready";
+        voiceTrainingMessage_ =
+            "LoRA training started. It will continue if the application closes.";
+        setStatus("Independent LoRA voice training started: " + presetName + ".");
+        sendWebVoiceTrainingState();
+    }
+
+    void cancelVoiceLoRATraining(const juce::String& requestedJobId)
+    {
+        const auto jobId = juce::File(requestedJobId).getFileName();
+        if (jobId.isEmpty() || jobId != requestedJobId)
+            return;
+        const auto jobDirectory = voiceTrainingJobsRoot().getChildFile(jobId);
+        const auto stateFile = jobDirectory.getChildFile("state.json");
+        if (! stateFile.existsAsFile())
+            return;
+        const auto state = juce::JSON::parse(stateFile);
+        if (! isVoiceTrainingJobActive(state))
+            return;
+
+        if (jobDirectory.getChildFile("cancel.request").replaceWithText(
+                "cancel\n"))
+        {
+            setStatus("Cancelling LoRA training: " + jobId + "...");
+            sendWebVoiceTrainingState();
+        }
+    }
+
+    void revealVoiceTrainingJob(const juce::String& requestedJobId)
+    {
+        const auto jobId = juce::File(requestedJobId).getFileName();
+        if (jobId.isEmpty() || jobId != requestedJobId)
+            return;
+        const auto jobDirectory = voiceTrainingJobsRoot().getChildFile(jobId);
+        if (jobDirectory.isDirectory())
+            jobDirectory.revealToUser();
+    }
+
+    void createVoiceProfile(const juce::String& requestedName, const juce::String& requestedQuality)
+    {
+        constexpr double minimumDurationSeconds = 30.0;
+        if (voiceProfileCreationRunning_)
+            return;
+        if (voiceTrainingUsableDuration() < minimumDurationSeconds)
+        {
+            voiceTrainingPhase_ = "error";
+            voiceTrainingMessage_ = "Add at least 30 seconds of usable solo vocal.";
+            sendWebVoiceTrainingState();
+            return;
+        }
+
+        auto presetName = requestedName.trim().substring(0, 64);
+        if (presetName.isEmpty())
+            presetName = "My Voice";
+        const auto quality = requestedQuality == "high" ? "high" : "balanced";
+
+        std::vector<VoiceTrainingSource> sources;
+        double totalDurationSeconds = 0.0;
+        for (const auto& source : voiceTrainingSources_)
+            if (source.usable)
+            {
+                sources.push_back(source);
+                totalDurationSeconds += source.durationSeconds;
+            }
+
+        const auto modelsRoot = voiceProfilesRoot();
+        auto directoryName = juce::File::createLegalFileName(presetName).trim();
+        if (directoryName.isEmpty())
+            directoryName = "voice";
+        directoryName << "-" << juce::Uuid().toString().substring(0, 8);
+        const auto profileDirectory = modelsRoot.getChildFile(directoryName);
+
+        voiceProfileCancellation_ = std::make_shared<std::atomic<bool>>(false);
+        const auto cancellation = voiceProfileCancellation_;
+        voiceProfileCreationRunning_ = true;
+        voiceTrainingPhase_ = "preparing";
+        voiceTrainingMessage_ = "Copying and indexing vocal recordings...";
+        voiceTrainingProgress_ = 0.0;
+        sendWebVoiceTrainingState();
+        setStatus("Preparing local voice profile: " + presetName + "...");
+
+        juce::WeakReference<MainComponent> safeThis(this);
+        const auto started = juce::Thread::launch(
+            [safeThis,
+             cancellation,
+             sources,
+             presetName,
+             quality,
+             totalDurationSeconds,
+             profileDirectory]
+            {
+                const auto finishWithError =
+                    [safeThis](const juce::String& message)
+                    {
+                        juce::MessageManager::callAsync(
+                            [safeThis, message]
+                            {
+                                if (safeThis == nullptr)
+                                    return;
+                                safeThis->voiceProfileCreationRunning_ = false;
+                                safeThis->voiceTrainingPhase_ = "error";
+                                safeThis->voiceTrainingMessage_ = message;
+                                safeThis->voiceTrainingProgress_ = 0.0;
+                                safeThis->setStatus("Voice profile failed: " + message);
+                                safeThis->sendWebVoiceTrainingState();
+                            });
+                    };
+
+                const auto sourcesDirectory = profileDirectory.getChildFile("sources");
+                if (sourcesDirectory.createDirectory().failed())
+                {
+                    finishWithError("Could not create the local voice profile directory.");
+                    return;
+                }
+
+                std::vector<juce::File> copiedSources;
+                copiedSources.reserve(sources.size());
+                juce::Array<juce::var> manifestSources;
+                for (size_t index = 0; index < sources.size(); ++index)
+                {
+                    if (cancellation->load(std::memory_order_acquire))
+                    {
+                        profileDirectory.deleteRecursively();
+                        juce::MessageManager::callAsync(
+                            [safeThis]
+                            {
+                                if (safeThis == nullptr)
+                                    return;
+                                safeThis->voiceProfileCreationRunning_ = false;
+                                safeThis->voiceTrainingPhase_ = "cancelled";
+                                safeThis->voiceTrainingMessage_ = "Profile preparation was cancelled.";
+                                safeThis->voiceTrainingProgress_ = 0.0;
+                                safeThis->setStatus("Voice profile preparation cancelled.");
+                                safeThis->sendWebVoiceTrainingState();
+                            });
+                        return;
+                    }
+
+                    const auto& source = sources[index];
+                    auto prefix = juce::String(static_cast<int>(index + 1)).paddedLeft('0', 2);
+                    const auto target = sourcesDirectory.getChildFile(
+                        prefix + "_" + juce::File::createLegalFileName(source.file.getFileName()));
+                    if (! source.file.copyFileTo(target))
+                    {
+                        profileDirectory.deleteRecursively();
+                        finishWithError("Could not copy " + source.file.getFileName() + ".");
+                        return;
+                    }
+                    copiedSources.push_back(target);
+
+                    auto* manifestSource = new juce::DynamicObject();
+                    manifestSource->setProperty(
+                        "file",
+                        target.getRelativePathFrom(profileDirectory));
+                    manifestSource->setProperty("originalName", source.file.getFileName());
+                    manifestSource->setProperty("durationSeconds", source.durationSeconds);
+                    manifestSource->setProperty("sampleRate", source.sampleRate);
+                    manifestSource->setProperty("channels", source.channels);
+                    manifestSources.add(manifestSource);
+
+                    const auto progress =
+                        0.08 + 0.82 * static_cast<double>(index + 1)
+                            / static_cast<double>(sources.size());
+                    juce::MessageManager::callAsync(
+                        [safeThis, progress, fileName = source.file.getFileName()]
+                        {
+                            if (safeThis == nullptr)
+                                return;
+                            safeThis->voiceTrainingProgress_ = progress;
+                            safeThis->voiceTrainingMessage_ = "Preparing " + fileName + "...";
+                            safeThis->sendWebVoiceTrainingState();
+                        });
+                }
+
+                if (cancellation->load(std::memory_order_acquire))
+                {
+                    profileDirectory.deleteRecursively();
+                    juce::MessageManager::callAsync(
+                        [safeThis]
+                        {
+                            if (safeThis == nullptr)
+                                return;
+                            safeThis->voiceProfileCreationRunning_ = false;
+                            safeThis->voiceTrainingPhase_ = "cancelled";
+                            safeThis->voiceTrainingMessage_ = "Profile preparation was cancelled.";
+                            safeThis->voiceTrainingProgress_ = 0.0;
+                            safeThis->setStatus("Voice profile preparation cancelled.");
+                            safeThis->sendWebVoiceTrainingState();
+                        });
+                    return;
+                }
+
+                auto* manifest = new juce::DynamicObject();
+                manifest->setProperty("schemaVersion", 1);
+                manifest->setProperty("presetName", presetName);
+                manifest->setProperty("kind", "reference_profile");
+                manifest->setProperty("engine", "soulx_reference");
+                manifest->setProperty("trainingStatus", "profile_ready");
+                manifest->setProperty("fineTuned", false);
+                manifest->setProperty("quality", quality);
+                manifest->setProperty("totalDurationSeconds", totalDurationSeconds);
+                manifest->setProperty(
+                    "createdAt",
+                    juce::Time::getCurrentTime().toISO8601(true));
+                manifest->setProperty("sources", manifestSources);
+                if (! copiedSources.empty())
+                {
+                    manifest->setProperty(
+                        "primaryReference",
+                        copiedSources.front().getRelativePathFrom(profileDirectory));
+                }
+
+                const auto manifestFile = profileDirectory.getChildFile("manifest.json");
+                if (! manifestFile.replaceWithText(
+                        juce::JSON::toString(juce::var(manifest), true)))
+                {
+                    profileDirectory.deleteRecursively();
+                    finishWithError("Could not write the voice profile manifest.");
+                    return;
+                }
+
+                auto* active = new juce::DynamicObject();
+                active->setProperty("directory", profileDirectory.getFileName());
+                active->setProperty("presetName", presetName);
+                profileDirectory.getParentDirectory()
+                    .getChildFile("active.json")
+                    .replaceWithText(juce::JSON::toString(juce::var(active), true));
+
+                juce::MessageManager::callAsync(
+                    [safeThis, presetName, quality, profileDirectory, copiedSources]
+                    {
+                        if (safeThis == nullptr)
+                            return;
+                        safeThis->voiceProfileCreationRunning_ = false;
+                        safeThis->voiceTrainingPhase_ = "complete";
+                        safeThis->voiceTrainingMessage_ =
+                            "The profile is active for new backing-vocal renders.";
+                        safeThis->voiceTrainingProgress_ = 1.0;
+                        safeThis->activeVoiceProfileName_ = presetName;
+                        safeThis->activeVoiceProfileQuality_ = quality;
+                        safeThis->activeVoiceProfileDirectory_ = profileDirectory;
+                        safeThis->activeVoiceProfileSources_ = copiedSources;
+                        safeThis->setStatus(
+                            "Voice profile ready and active: " + presetName + ".");
+                        safeThis->sendWebVoiceTrainingState();
+                    });
+            });
+
+        if (! started)
+        {
+            voiceProfileCreationRunning_ = false;
+            voiceTrainingPhase_ = "error";
+            voiceTrainingMessage_ = "Could not start the background profile task.";
+            voiceTrainingProgress_ = 0.0;
+            sendWebVoiceTrainingState();
+        }
+    }
+
+    void handleVoiceTrainingAction(juce::DynamicObject& root)
+    {
+        const auto action = root.getProperty("action").toString();
+        if (action == "request-state")
+        {
+            sendWebVoiceTrainingState();
+        }
+        else if (action == "add-files")
+        {
+            chooseVoiceTrainingFiles();
+        }
+        else if (action == "add-current-track")
+        {
+            if (! document_.audioFile.existsAsFile())
+            {
+                voiceTrainingPhase_ = "error";
+                voiceTrainingMessage_ = "Open a main vocal track before adding it.";
+            }
+            else
+            {
+                addVoiceTrainingSource(document_.audioFile);
+                voiceTrainingPhase_ = "ready";
+                voiceTrainingMessage_ =
+                    voiceTrainingUsableDuration() >= 30.0
+                        ? "The recordings are ready to create a local voice profile."
+                        : "Add at least 30 seconds of usable solo vocal.";
+            }
+            sendWebVoiceTrainingState();
+        }
+        else if (action == "remove-file" && ! voiceProfileCreationRunning_)
+        {
+            const auto index = root.getProperty("sourceId").toString().getIntValue();
+            if (index >= 0 && index < static_cast<int>(voiceTrainingSources_.size()))
+                voiceTrainingSources_.erase(voiceTrainingSources_.begin() + index);
+            voiceTrainingPhase_ = voiceTrainingSources_.empty() ? "idle" : "ready";
+            voiceTrainingMessage_ = voiceTrainingSources_.empty()
+                ? "Add clean, dry vocal recordings to build a reusable voice profile."
+                : "Review the remaining recordings.";
+            sendWebVoiceTrainingState();
+        }
+        else if (action == "clear-files" && ! voiceProfileCreationRunning_)
+        {
+            voiceTrainingSources_.clear();
+            voiceTrainingPhase_ = "idle";
+            voiceTrainingMessage_ =
+                "Add clean, dry vocal recordings to build a reusable voice profile.";
+            sendWebVoiceTrainingState();
+        }
+        else if (action == "create-profile")
+        {
+            createVoiceProfile(
+                root.getProperty("presetName").toString(),
+                root.getProperty("quality").toString());
+        }
+        else if (action == "start-training")
+        {
+            startVoiceLoRATraining(
+                root.getProperty("presetName").toString(),
+                root.getProperty("quality").toString());
+        }
+        else if (action == "cancel-training")
+        {
+            cancelVoiceLoRATraining(root.getProperty("jobId").toString());
+        }
+        else if (action == "reveal-training")
+        {
+            revealVoiceTrainingJob(root.getProperty("jobId").toString());
+        }
+        else if (action == "cancel")
+        {
+            cancelVoiceProfileCreation();
+        }
+        else if (action == "reveal-profile"
+                 && activeVoiceProfileDirectory_.isDirectory())
+        {
+            activeVoiceProfileDirectory_.revealToUser();
+        }
+    }
+
     void completeExport(const juce::String& summary, const juce::File& directory)
     {
         setStatus(summary + " to " + directory.getFullPathName() + ".");
@@ -1812,6 +3124,146 @@ private:
         return track != document_.backingTracks.end() ? &*track : nullptr;
     }
 
+    std::vector<NoteBlock>* notesForPitchTrack(const juce::String& trackName)
+    {
+        if (trackName == "Voice Main")
+            return &document_.notes;
+        if (auto* track = findBackingTrack({}, trackName))
+            return &track->notes;
+        return nullptr;
+    }
+
+    const std::vector<NoteBlock>* notesForPitchTrack(const juce::String& trackName) const
+    {
+        if (trackName == "Voice Main")
+            return &document_.notes;
+        if (const auto* track = findBackingTrack({}, trackName))
+            return &track->notes;
+        return nullptr;
+    }
+
+    juce::String normaliseWebClipId(const juce::String& trackName,
+                                    const juce::String& clipId) const
+    {
+        if (trackName == "Voice Main")
+            return clipId;
+        if (const auto* track = findBackingTrack({}, trackName))
+        {
+            const auto prefix = track->styleId + ":";
+            if (track->styleId.isNotEmpty() && clipId.startsWith(prefix))
+                return clipId.substring(prefix.length());
+        }
+        return clipId;
+    }
+
+    static std::optional<size_t> findPitchNoteIndex(const std::vector<NoteBlock>& notes,
+                                                    const juce::String& noteId)
+    {
+        const auto note = std::find_if(notes.begin(), notes.end(), [&noteId](const auto& candidate)
+        {
+            return candidate.id == noteId;
+        });
+        if (note == notes.end())
+            return std::nullopt;
+        return static_cast<size_t>(std::distance(notes.begin(), note));
+    }
+
+    static juce::String nextPitchNoteId(const std::vector<NoteBlock>& notes)
+    {
+        for (int suffix = static_cast<int>(notes.size()) + 1; ; ++suffix)
+        {
+            const auto candidate = "web-note-" + juce::String(suffix);
+            if (! findPitchNoteIndex(notes, candidate))
+                return candidate;
+        }
+    }
+
+    PitchTrackSnapshot capturePitchTrackSnapshot(const juce::String& trackName) const
+    {
+        PitchTrackSnapshot snapshot;
+        if (const auto* notes = notesForPitchTrack(trackName))
+            snapshot.notes = *notes;
+        if (trackName == "Voice Main")
+            snapshot.regions = document_.regions;
+        return snapshot;
+    }
+
+    void beginPitchTrackEdit(const juce::String& trackName)
+    {
+        auto& history = pitchTrackHistories_[trackName];
+        history.undo.push_back(capturePitchTrackSnapshot(trackName));
+        if (history.undo.size() > kMaxUndoSnapshots)
+            history.undo.erase(history.undo.begin());
+        history.redo.clear();
+    }
+
+    void syncActiveBackingTrackNotes(const juce::String& trackName)
+    {
+        if (trackName == "Voice Main")
+            return;
+        if (auto* track = findBackingTrack({}, trackName))
+            if (track->styleId == document_.backingStyleId
+                || track->styleName == document_.backingStyleName)
+            {
+                document_.backingNotes = track->notes;
+            }
+    }
+
+    void applyPitchTrackSnapshot(const juce::String& trackName,
+                                 const PitchTrackSnapshot& snapshot)
+    {
+        if (auto* notes = notesForPitchTrack(trackName))
+            *notes = snapshot.notes;
+        if (trackName == "Voice Main")
+            document_.regions = snapshot.regions;
+        syncActiveBackingTrackNotes(trackName);
+    }
+
+    void finishPitchTrackEdit(const juce::String& trackName)
+    {
+        syncActiveBackingTrackNotes(trackName);
+        markChanged();
+        if (trackName == "Voice Main")
+            scheduleLeadPitchPreview();
+        else
+            scheduleBackingPitchPreview(trackName);
+    }
+
+    void undoPitchTrack(const juce::String& trackName)
+    {
+        auto history = pitchTrackHistories_.find(trackName);
+        if (history == pitchTrackHistories_.end() || history->second.undo.empty())
+            return;
+
+        history->second.redo.push_back(capturePitchTrackSnapshot(trackName));
+        applyPitchTrackSnapshot(trackName, history->second.undo.back());
+        history->second.undo.pop_back();
+        finishPitchTrackEdit(trackName);
+    }
+
+    void redoPitchTrack(const juce::String& trackName)
+    {
+        auto history = pitchTrackHistories_.find(trackName);
+        if (history == pitchTrackHistories_.end() || history->second.redo.empty())
+            return;
+
+        history->second.undo.push_back(capturePitchTrackSnapshot(trackName));
+        applyPitchTrackSnapshot(trackName, history->second.redo.back());
+        history->second.redo.pop_back();
+        finishPitchTrackEdit(trackName);
+    }
+
+    void clearPitchTrackHistory(const juce::String& trackName)
+    {
+        pitchTrackHistories_.erase(trackName);
+    }
+
+    bool hasPitchTrackUndo(const juce::String& trackName) const
+    {
+        const auto history = pitchTrackHistories_.find(trackName);
+        return history != pitchTrackHistories_.end() && ! history->second.undo.empty();
+    }
+
     void makeBackingTrackActive(const BackingVocalTrack& track)
     {
         document_.backingStyleId = track.styleId;
@@ -1847,15 +3299,22 @@ private:
 
         const auto transportPosition = currentTransportPosition();
         const auto shouldKeepPlaying = isPlaybackRunning();
+        const auto preview = backingPitchPreviewFiles_.find(trackName);
+        const auto auditionFile =
+            hasPitchTrackUndo(trackName)
+                && preview != backingPitchPreviewFiles_.end()
+                && preview->second.existsAsFile()
+            ? preview->second
+            : track->audioFile;
         const auto sourceAlreadyConfigured =
-            backingAudioReaderSource_ != nullptr && backingAudioTransportFile_ == track->audioFile;
+            backingAudioReaderSource_ != nullptr && backingAudioTransportFile_ == auditionFile;
         makeBackingTrackActive(*track);
 
-        if (track->audioFile.existsAsFile())
+        if (auditionFile.existsAsFile())
         {
-            editor_.setBackingAudioFile(track->audioFile);
+            editor_.setBackingAudioFile(auditionFile);
             if (! sourceAlreadyConfigured)
-                configureBackingAudioTransportForFile(track->audioFile);
+                configureBackingAudioTransportForFile(auditionFile);
             backingAudioTransport_.setPosition(transportPosition);
             if (shouldKeepPlaying)
                 backingAudioTransport_.start();
@@ -1868,6 +3327,304 @@ private:
         {
             clearBackingAudioTrack();
         }
+    }
+
+    std::vector<AlgorithmicPitchCorrection> buildPitchCorrections(
+        const std::vector<NoteBlock>& currentNotes,
+        const std::vector<NoteBlock>& sourceNotes) const
+    {
+        std::vector<AlgorithmicPitchCorrection> corrections;
+        corrections.reserve(currentNotes.size());
+        for (const auto& note : currentNotes)
+        {
+            if (note.end <= note.start)
+                continue;
+
+            const NoteBlock* renderedNote = nullptr;
+            const auto sameId = std::find_if(
+                sourceNotes.begin(),
+                sourceNotes.end(),
+                [&note](const auto& candidate) { return candidate.id == note.id; });
+            if (sameId != sourceNotes.end())
+            {
+                renderedNote = &*sameId;
+            }
+            else
+            {
+                auto bestOverlap = 0.0;
+                for (const auto& candidate : sourceNotes)
+                {
+                    const auto overlap = juce::jmax(
+                        0.0,
+                        juce::jmin(note.end, candidate.end)
+                            - juce::jmax(note.start, candidate.start));
+                    if (overlap > bestOverlap)
+                    {
+                        bestOverlap = overlap;
+                        renderedNote = &candidate;
+                    }
+                }
+            }
+            if (renderedNote == nullptr || renderedNote->end <= renderedNote->start)
+                continue;
+
+            const auto noteProgress = 0.5;
+            const auto targetTime = note.start + (note.end - note.start) * noteProgress;
+            const auto renderedTime = renderedNote->start
+                + (renderedNote->end - renderedNote->start) * noteProgress;
+            const auto pitchDelta = interpolatedNoteMidi(note, targetTime)
+                - interpolatedNoteMidi(*renderedNote, renderedTime);
+            if (std::abs(pitchDelta) < 0.02)
+                continue;
+
+            corrections.push_back({
+                note.start,
+                note.end,
+                juce::jlimit(
+                    0.5f,
+                    2.0f,
+                    static_cast<float>(std::pow(2.0, pitchDelta / 12.0)))
+            });
+        }
+        return corrections;
+    }
+
+    void restoreOriginalLeadAudio()
+    {
+        if (! leadPitchPreviewFile_.existsAsFile())
+        {
+            leadPitchPreviewFile_ = juce::File();
+            return;
+        }
+
+        const auto previewFile = leadPitchPreviewFile_;
+        leadPitchPreviewFile_ = juce::File();
+        const auto position = currentTransportPosition();
+        const auto wasPlaying = transport_.isPlaying();
+        if (document_.audioFile.existsAsFile())
+        {
+            editor_.setAudioFile(document_.audioFile);
+            configureTransportForFile(document_.audioFile);
+            transport_.setPosition(position);
+            if (wasPlaying)
+            {
+                transport_.start();
+                playButton_.setButtonText("Stop");
+            }
+        }
+        previewFile.deleteFile();
+        setStatus("Restored original main vocal audio.");
+    }
+
+    void scheduleLeadPitchPreview()
+    {
+        const auto revision = ++leadPitchPreviewRevision_;
+        const auto history = pitchTrackHistories_.find("Voice Main");
+        if (history == pitchTrackHistories_.end()
+            || history->second.undo.empty()
+            || ! document_.audioFile.existsAsFile()
+            || history->second.undo.front().notes.empty())
+        {
+            restoreOriginalLeadAudio();
+            return;
+        }
+
+        const auto sourceFile = document_.audioFile;
+        const auto outputFile = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                                    .getNonexistentChildFile(
+                                        "synthetic_obsidian_lead_pitch_preview",
+                                        ".wav");
+        const auto corrections = buildPitchCorrections(
+            document_.notes,
+            history->second.undo.front().notes);
+        setStatus("Preparing algorithmic pitch preview for Voice Main...");
+
+        juce::WeakReference<MainComponent> safeThis(this);
+        juce::Thread::launch(
+            [safeThis, sourceFile, outputFile, corrections, revision]
+            {
+                const auto result =
+                    AlgorithmicPitchPreview::render(sourceFile, outputFile, corrections);
+                const auto error = result.failed() ? result.getErrorMessage() : juce::String();
+                juce::MessageManager::callAsync(
+                    [safeThis, sourceFile, outputFile, revision, error]
+                    {
+                        if (safeThis != nullptr)
+                            safeThis->applyLeadPitchPreview(
+                                sourceFile,
+                                outputFile,
+                                revision,
+                                error);
+                        else
+                            outputFile.deleteFile();
+                    });
+            });
+    }
+
+    void applyLeadPitchPreview(const juce::File& sourceFile,
+                               const juce::File& outputFile,
+                               unsigned int revision,
+                               const juce::String& error)
+    {
+        if (revision != leadPitchPreviewRevision_
+            || document_.audioFile != sourceFile
+            || ! hasPitchTrackUndo("Voice Main"))
+        {
+            outputFile.deleteFile();
+            return;
+        }
+
+        if (error.isNotEmpty() || ! outputFile.existsAsFile())
+        {
+            outputFile.deleteFile();
+            setStatus(
+                "Could not prepare algorithmic pitch preview for Voice Main: "
+                + (error.isNotEmpty() ? error : "preview WAV was not created."));
+            return;
+        }
+
+        const auto previousFile = leadPitchPreviewFile_;
+        leadPitchPreviewFile_ = outputFile;
+        const auto position = currentTransportPosition();
+        const auto wasPlaying = transport_.isPlaying();
+        editor_.setAudioFile(outputFile);
+        configureTransportForFile(outputFile);
+        transport_.setPosition(position);
+        if (wasPlaying)
+        {
+            transport_.start();
+            playButton_.setButtonText("Stop");
+        }
+        if (previousFile.existsAsFile() && previousFile != outputFile)
+            previousFile.deleteFile();
+        setStatus("Algorithmic pitch preview ready for Voice Main.");
+    }
+
+    void restoreRenderedBackingAudio(const juce::String& trackName)
+    {
+        auto preview = backingPitchPreviewFiles_.find(trackName);
+        if (preview == backingPitchPreviewFiles_.end())
+        {
+            if (selectedWebTrack_ == trackName)
+                if (const auto* track = findBackingTrack({}, trackName);
+                    track != nullptr && track->audioFile.existsAsFile())
+                {
+                    setStatus("Using rendered backing audio for " + trackName + ".");
+                }
+            return;
+        }
+
+        const auto previewFile = preview->second;
+        backingPitchPreviewFiles_.erase(preview);
+        if (selectedWebTrack_ == trackName)
+        {
+            if (const auto* track = findBackingTrack({}, trackName))
+            {
+                const auto position = currentTransportPosition();
+                const auto wasPlaying = isPlaybackRunning();
+                editor_.setBackingAudioFile(track->audioFile);
+                configureBackingAudioTransportForFile(track->audioFile);
+                backingAudioTransport_.setPosition(position);
+                if (wasPlaying)
+                    backingAudioTransport_.start();
+            }
+        }
+        previewFile.deleteFile();
+        setStatus("Restored rendered backing audio for " + trackName + ".");
+    }
+
+    void scheduleBackingPitchPreview(const juce::String& trackName)
+    {
+        const auto revision = ++backingPitchPreviewRevisions_[trackName];
+        const auto* track = findBackingTrack({}, trackName);
+        if (track == nullptr
+            || ! hasPitchTrackUndo(trackName)
+            || ! track->audioFile.existsAsFile()
+            || track->renderedNotes.empty())
+        {
+            restoreRenderedBackingAudio(trackName);
+            return;
+        }
+
+        const auto sourceFile = track->audioFile;
+        const auto outputFile = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                                    .getNonexistentChildFile(
+                                        "synthetic_obsidian_pitch_preview",
+                                        ".wav");
+        const auto corrections = buildPitchCorrections(track->notes, track->renderedNotes);
+        setStatus("Preparing algorithmic pitch preview for " + trackName + "...");
+
+        juce::WeakReference<MainComponent> safeThis(this);
+        juce::Thread::launch(
+            [safeThis, trackName, sourceFile, outputFile, corrections, revision]
+            {
+                const auto result =
+                    AlgorithmicPitchPreview::render(sourceFile, outputFile, corrections);
+                const auto error = result.failed() ? result.getErrorMessage() : juce::String();
+                juce::MessageManager::callAsync(
+                    [safeThis, trackName, sourceFile, outputFile, revision, error]
+                    {
+                        if (safeThis != nullptr)
+                            safeThis->applyBackingPitchPreview(
+                                trackName,
+                                sourceFile,
+                                outputFile,
+                                revision,
+                                error);
+                        else
+                            outputFile.deleteFile();
+                    });
+            });
+    }
+
+    void applyBackingPitchPreview(const juce::String& trackName,
+                                  const juce::File& sourceFile,
+                                  const juce::File& outputFile,
+                                  unsigned int revision,
+                                  const juce::String& error)
+    {
+        const auto latestRevision = backingPitchPreviewRevisions_.find(trackName);
+        const auto* track = findBackingTrack({}, trackName);
+        if (latestRevision == backingPitchPreviewRevisions_.end()
+            || latestRevision->second != revision
+            || track == nullptr
+            || track->audioFile != sourceFile
+            || ! hasPitchTrackUndo(trackName))
+        {
+            outputFile.deleteFile();
+            return;
+        }
+
+        if (error.isNotEmpty() || ! outputFile.existsAsFile())
+        {
+            outputFile.deleteFile();
+            setStatus(
+                "Could not prepare algorithmic pitch preview for "
+                + trackName
+                + ": "
+                + (error.isNotEmpty() ? error : "preview WAV was not created."));
+            return;
+        }
+
+        const auto previousPreview = backingPitchPreviewFiles_.find(trackName);
+        const auto previousFile = previousPreview != backingPitchPreviewFiles_.end()
+            ? previousPreview->second
+            : juce::File();
+        backingPitchPreviewFiles_[trackName] = outputFile;
+
+        if (selectedWebTrack_ == trackName)
+        {
+            const auto position = currentTransportPosition();
+            const auto wasPlaying = isPlaybackRunning();
+            editor_.setBackingAudioFile(outputFile);
+            configureBackingAudioTransportForFile(outputFile);
+            backingAudioTransport_.setPosition(position);
+            if (wasPlaying)
+                backingAudioTransport_.start();
+        }
+        if (previousFile.existsAsFile() && previousFile != outputFile)
+            previousFile.deleteFile();
+        setStatus("Algorithmic pitch preview ready for " + trackName + ".");
     }
 
     bool anyBackingTrackSoloed() const noexcept
@@ -1905,6 +3662,35 @@ private:
     {
         if (! webFrontendReady_)
             return;
+
+        const auto voiceProfiles = readVoiceProfileOptions();
+        const auto effectiveVoiceProfileId =
+            [this, &voiceProfiles](const juce::String& requestedId)
+        {
+            if (std::any_of(
+                    voiceProfiles.begin(),
+                    voiceProfiles.end(),
+                    [&requestedId](const auto& profile)
+                    {
+                        return profile.id == requestedId;
+                    }))
+            {
+                return requestedId;
+            }
+            if (std::any_of(
+                    voiceProfiles.begin(),
+                    voiceProfiles.end(),
+                    [this](const auto& profile)
+                    {
+                        return profile.id == activeVoiceProfileId_;
+                    }))
+            {
+                return activeVoiceProfileId_;
+            }
+            return voiceProfiles.empty()
+                ? juce::String()
+                : voiceProfiles.front().id;
+        };
 
         juce::Array<juce::var> backingOptions;
         for (const auto& style : kBackingStyles)
@@ -1989,6 +3775,7 @@ private:
             clip->setProperty("label", note.lyric.isNotEmpty() ? note.lyric : note.id);
             clip->setProperty("x", juce::jlimit(0.0, 100.0, note.start * 100.0 / duration));
             clip->setProperty("pitch", juce::jlimit(0.0, 127.0, note.pitchExact));
+            clip->setProperty("gainDb", juce::jlimit(-24.0, 12.0, note.gainDb));
             clip->setProperty(
                 "width",
                 juce::jlimit(
@@ -2053,6 +3840,7 @@ private:
             clip->setProperty("label", note.lyric.isNotEmpty() ? note.lyric : note.id);
             clip->setProperty("x", juce::jlimit(0.0, 100.0, note.start * 100.0 / duration));
             clip->setProperty("pitch", juce::jlimit(0.0, 127.0, note.pitchExact));
+            clip->setProperty("gainDb", juce::jlimit(-24.0, 12.0, note.gainDb));
             clip->setProperty(
                 "width",
                 juce::jlimit(
@@ -2069,6 +3857,9 @@ private:
             auto* trackContent = new juce::DynamicObject();
             trackContent->setProperty("track", track.styleName);
             trackContent->setProperty("hasAudio", track.audioFile.existsAsFile());
+            trackContent->setProperty(
+                "voiceProfileId",
+                effectiveVoiceProfileId(track.voiceProfileId));
             const auto isActiveTrack = track.styleId == document_.backingStyleId
                 || track.styleName == document_.backingStyleName;
             const auto trackIndex = backingStyleIndex(track.styleId, track.styleName);
@@ -2106,6 +3897,7 @@ private:
                 clip->setProperty("label", note.lyric.isNotEmpty() ? note.lyric : note.id);
                 clip->setProperty("x", juce::jlimit(0.0, 100.0, note.start * 100.0 / duration));
                 clip->setProperty("pitch", juce::jlimit(0.0, 127.0, note.pitchExact));
+                clip->setProperty("gainDb", juce::jlimit(-24.0, 12.0, note.gainDb));
                 clip->setProperty(
                     "width",
                     juce::jlimit(
@@ -2184,6 +3976,35 @@ private:
                 ? normalisedTimelinePosition(loopEndTime_)
                 : 25.0);
 
+        juce::Array<juce::var> pitchEditorHistory;
+        const auto addPitchHistoryState = [this, &pitchEditorHistory](const juce::String& trackName)
+        {
+            const auto history = pitchTrackHistories_.find(trackName);
+            auto* state = new juce::DynamicObject();
+            state->setProperty("track", trackName);
+            state->setProperty(
+                "canUndo",
+                history != pitchTrackHistories_.end() && ! history->second.undo.empty());
+            state->setProperty(
+                "canRedo",
+                history != pitchTrackHistories_.end() && ! history->second.redo.empty());
+            pitchEditorHistory.add(state);
+        };
+        addPitchHistoryState("Voice Main");
+        for (const auto& track : document_.backingTracks)
+            addPitchHistoryState(track.styleName);
+
+        juce::Array<juce::var> voiceProfileValues;
+        for (const auto& profile : voiceProfiles)
+        {
+            auto* value = new juce::DynamicObject();
+            value->setProperty("id", profile.id);
+            value->setProperty("name", profile.name);
+            value->setProperty("quality", profile.quality);
+            value->setProperty("active", profile.active);
+            voiceProfileValues.add(value);
+        }
+
         auto* project = new juce::DynamicObject();
         project->setProperty("tempo", document_.bpm);
         project->setProperty("meter", meter);
@@ -2206,12 +4027,14 @@ private:
         project->setProperty("initialLoopActive", cycleLoopActive_);
         project->setProperty("initialCycleRange", cycleRange);
         project->setProperty("backingTrackOptions", backingOptions);
+        project->setProperty("voiceProfiles", voiceProfileValues);
         project->setProperty("initialBackingTracks", backingTracks);
         project->setProperty("initialTrackState", trackStates);
         project->setProperty("initialTrackLayerState", trackLayerState);
         project->setProperty("clips", clips);
         project->setProperty("backingClips", backingClips);
         project->setProperty("backingTrackContents", backingTrackContents);
+        project->setProperty("pitchEditorHistory", pitchEditorHistory);
         project->setProperty(
             "vocalWaveform",
             makeWaveformState(vocalWaveform_, vocalPackedWaveform_));
@@ -2244,8 +4067,34 @@ private:
         else if (action == "generate-backing")  runBackingVocalGeneration();
         else if (action == "render-backing")    runBackingAudioRender();
         else if (action == "save")              saveProject();
-        else if (action == "undo")              undo();
-        else if (action == "redo")              redo();
+        else if (action == "undo")
+        {
+            if (selectedWebTrack_.isNotEmpty()
+                && selectedWebTrack_ != "Instrumental"
+                && hasPitchTrackUndo(selectedWebTrack_))
+            {
+                undoPitchTrack(selectedWebTrack_);
+            }
+            else
+            {
+                undo();
+            }
+        }
+        else if (action == "redo")
+        {
+            const auto history = pitchTrackHistories_.find(selectedWebTrack_);
+            if (selectedWebTrack_.isNotEmpty()
+                && selectedWebTrack_ != "Instrumental"
+                && history != pitchTrackHistories_.end()
+                && ! history->second.redo.empty())
+            {
+                redoPitchTrack(selectedWebTrack_);
+            }
+            else
+            {
+                redo();
+            }
+        }
         else if (action == "export-all-tracks") exportAllTracks();
         else if (action == "export-midi")       exportMidi();
         else if (action == "validate")          updateValidationStatus();
@@ -2272,6 +4121,461 @@ private:
         sendWebTransportState();
     }
 
+    bool handleWebPitchEdit(juce::DynamicObject& root, const juce::String& type)
+    {
+        const auto isPitchEdit = type == "add-clip"
+            || type == "delete-clips"
+            || type == "move-clips"
+            || type == "set-clip-time"
+            || type == "split-clip"
+            || type == "join-clips"
+            || type == "set-clip-vibrato"
+            || type == "set-clip-gain";
+        if (! isPitchEdit)
+            return false;
+
+        const auto trackName = root.getProperty("track").toString();
+        auto* targetNotes = notesForPitchTrack(trackName);
+        if (trackName.isEmpty() || targetNotes == nullptr)
+            return true;
+        const auto snapToChord =
+            trackName != "Voice Main"
+            && static_cast<bool>(root.getProperty("snapToChord"));
+        const auto snappedPitch =
+            [this, snapToChord](double pitch, double noteStart)
+        {
+            return snapToChord
+                ? snapPitchToChord(pitch, noteStart, document_.chords)
+                : pitch;
+        };
+
+        const auto normaliseId = [this, &trackName](const juce::String& id)
+        {
+            return normaliseWebClipId(trackName, id);
+        };
+        const auto readClipIds = [&normaliseId](const juce::var& value)
+        {
+            std::vector<juce::String> ids;
+            if (auto* array = value.getArray())
+                for (const auto& item : *array)
+                {
+                    const auto id = normaliseId(item.toString());
+                    if (id.isNotEmpty()
+                        && std::find(ids.begin(), ids.end(), id) == ids.end())
+                    {
+                        ids.push_back(id);
+                    }
+                }
+            return ids;
+        };
+        const auto containsId = [](const std::vector<juce::String>& ids, const juce::String& id)
+        {
+            return std::find(ids.begin(), ids.end(), id) != ids.end();
+        };
+        const auto findNoteIndex = [targetNotes](const juce::String& id)
+        {
+            return findPitchNoteIndex(*targetNotes, id);
+        };
+        const auto sortNotes = [targetNotes]
+        {
+            std::sort(targetNotes->begin(), targetNotes->end(), [](const auto& left, const auto& right)
+            {
+                return left.start < right.start;
+            });
+        };
+
+        if (type == "add-clip")
+        {
+            if (document_.duration <= 0.0)
+                return true;
+
+            auto* clip = root.getProperty("clip").getDynamicObject();
+            if (clip == nullptr)
+                return true;
+
+            auto id = normaliseId(clip->getProperty("id").toString());
+            if (id.isEmpty() || findNoteIndex(id))
+                id = nextPitchNoteId(*targetNotes);
+            const auto duration = timelineDuration();
+            const auto start = juce::jlimit(
+                0.0,
+                juce::jmax(0.0, document_.duration - kMinimumWebNoteLengthSeconds),
+                static_cast<double>(clip->getProperty("x")) * duration / 100.0);
+            const auto requestedLength =
+                static_cast<double>(clip->getProperty("width")) * duration / 100.0;
+            const auto end = juce::jlimit(
+                start + kMinimumWebNoteLengthSeconds,
+                document_.duration,
+                start + juce::jmax(kMinimumWebNoteLengthSeconds, requestedLength));
+            const auto pitch = snappedPitch(
+                juce::jlimit(
+                    0.0,
+                    127.0,
+                    static_cast<double>(clip->getProperty("pitch"))),
+                start);
+            if (end <= start)
+                return true;
+
+            beginPitchTrackEdit(trackName);
+            NoteBlock note;
+            note.id = id;
+            note.start = start;
+            note.end = end;
+            note.pitch = juce::jlimit(0, 127, static_cast<int>(std::lround(pitch)));
+            note.pitchExact = pitch;
+            note.voicedStart = start;
+            note.voicedEnd = end;
+            note.flags.add("manual");
+            note.curve.push_back({ start, pitch, 1.0 });
+            note.curve.push_back({ end, pitch, 1.0 });
+            targetNotes->push_back(std::move(note));
+            sortNotes();
+            finishPitchTrackEdit(trackName);
+            return true;
+        }
+
+        if (type == "delete-clips")
+        {
+            const auto ids = readClipIds(root.getProperty("clipIds"));
+            const auto hasMatchingNote = std::any_of(
+                targetNotes->begin(),
+                targetNotes->end(),
+                [&ids, &containsId](const auto& note) { return containsId(ids, note.id); });
+            if (! hasMatchingNote)
+                return true;
+
+            beginPitchTrackEdit(trackName);
+            targetNotes->erase(
+                std::remove_if(
+                    targetNotes->begin(),
+                    targetNotes->end(),
+                    [&ids, &containsId](const auto& note) { return containsId(ids, note.id); }),
+                targetNotes->end());
+            if (trackName == "Voice Main")
+            {
+                document_.regions.erase(
+                    std::remove_if(
+                        document_.regions.begin(),
+                        document_.regions.end(),
+                        [&ids, &containsId](const auto& region)
+                        {
+                            return region.noteId.isNotEmpty() && containsId(ids, region.noteId);
+                        }),
+                    document_.regions.end());
+            }
+            finishPitchTrackEdit(trackName);
+            return true;
+        }
+
+        if (type == "move-clips")
+        {
+            struct MoveEdit
+            {
+                juce::String id;
+                double pitch = 60.0;
+            };
+            std::vector<MoveEdit> edits;
+            if (auto* values = root.getProperty("clips").getArray())
+                for (const auto& value : *values)
+                    if (auto* edit = value.getDynamicObject())
+                    {
+                        const auto id = normaliseId(edit->getProperty("clipId").toString());
+                        if (findNoteIndex(id))
+                        {
+                            edits.push_back({
+                                id,
+                                juce::jlimit(0.0, 127.0, static_cast<double>(edit->getProperty("pitch")))
+                            });
+                        }
+                    }
+            if (edits.empty())
+                return true;
+
+            beginPitchTrackEdit(trackName);
+            for (const auto& edit : edits)
+            {
+                const auto index = findNoteIndex(edit.id);
+                if (! index)
+                    continue;
+                auto& note = (*targetNotes)[*index];
+                moveNoteToPitch(
+                    note,
+                    snappedPitch(edit.pitch, note.start));
+            }
+            sortNotes();
+            finishPitchTrackEdit(trackName);
+            return true;
+        }
+
+        if (type == "set-clip-time")
+        {
+            const auto id = normaliseId(root.getProperty("clipId").toString());
+            const auto index = findNoteIndex(id);
+            if (! index)
+                return true;
+
+            const auto duration = timelineDuration();
+            const auto nextStart = juce::jlimit(
+                0.0,
+                juce::jmax(0.0, document_.duration - kMinimumWebNoteLengthSeconds),
+                static_cast<double>(root.getProperty("x")) * duration / 100.0);
+            const auto requestedLength =
+                static_cast<double>(root.getProperty("width")) * duration / 100.0;
+            const auto nextEnd = juce::jlimit(
+                nextStart + kMinimumWebNoteLengthSeconds,
+                document_.duration,
+                nextStart + juce::jmax(kMinimumWebNoteLengthSeconds, requestedLength));
+            if (nextEnd <= nextStart)
+                return true;
+
+            auto& note = (*targetNotes)[*index];
+            if (std::abs(note.start - nextStart) < 0.0001
+                && std::abs(note.end - nextEnd) < 0.0001)
+            {
+                return true;
+            }
+
+            beginPitchTrackEdit(trackName);
+            const auto previousStart = note.start;
+            const auto previousLength = juce::jmax(
+                kMinimumWebNoteLengthSeconds,
+                note.end - note.start);
+            const auto nextLength = nextEnd - nextStart;
+            const auto mapTime = [previousStart, previousLength, nextStart, nextLength](double time)
+            {
+                return nextStart + (time - previousStart) * nextLength / previousLength;
+            };
+            note.start = nextStart;
+            note.end = nextEnd;
+            note.voicedStart = juce::jlimit(note.start, note.end, mapTime(note.voicedStart));
+            note.voicedEnd = juce::jlimit(note.voicedStart, note.end, mapTime(note.voicedEnd));
+            for (auto& point : note.curve)
+                point.time = juce::jlimit(note.start, note.end, mapTime(point.time));
+            if (snapToChord)
+                moveNoteToPitch(
+                    note,
+                    snappedPitch(note.pitchExact, note.start));
+            if (trackName == "Voice Main")
+                for (auto& region : document_.regions)
+                    if (region.noteId == note.id)
+                    {
+                        region.start = juce::jlimit(note.start, note.end, mapTime(region.start));
+                        region.end = juce::jlimit(region.start, note.end, mapTime(region.end));
+                    }
+            sortNotes();
+            finishPitchTrackEdit(trackName);
+            return true;
+        }
+
+        if (type == "split-clip")
+        {
+            const auto id = normaliseId(root.getProperty("clipId").toString());
+            const auto index = findNoteIndex(id);
+            if (! index)
+                return true;
+
+            const auto splitTime = juce::jlimit(
+                0.0,
+                document_.duration,
+                static_cast<double>(root.getProperty("x")) * timelineDuration() / 100.0);
+            auto& source = (*targetNotes)[*index];
+            if (splitTime <= source.start + kMinimumWebNoteLengthSeconds
+                || splitTime >= source.end - kMinimumWebNoteLengthSeconds)
+            {
+                return true;
+            }
+
+            beginPitchTrackEdit(trackName);
+            const auto splitPitch = interpolatedNoteMidi(source, splitTime);
+            auto right = source;
+            auto rightId = normaliseId(root.getProperty("rightClipId").toString());
+            if (rightId.isEmpty() || findNoteIndex(rightId))
+                rightId = nextPitchNoteId(*targetNotes);
+            right.id = rightId;
+            right.start = splitTime;
+            right.voicedStart = juce::jmax(splitTime, right.voicedStart);
+            if (source.syllableId.isNotEmpty())
+            {
+                right.lyric.clear();
+                right.flags.addIfNotAlreadyThere("melisma_continuation");
+                right.flags.addIfNotAlreadyThere("legato_from_previous");
+                source.flags.addIfNotAlreadyThere("legato_to_next");
+            }
+
+            std::vector<PitchCurvePoint> leftCurve;
+            std::vector<PitchCurvePoint> rightCurve;
+            for (const auto& point : source.curve)
+                if (point.time < splitTime)
+                    leftCurve.push_back(point);
+                else if (point.time > splitTime)
+                    rightCurve.push_back(point);
+            leftCurve.push_back({ splitTime, splitPitch, 0.65 });
+            rightCurve.insert(rightCurve.begin(), { splitTime, splitPitch, 0.65 });
+            source.end = splitTime;
+            source.voicedEnd = juce::jmin(splitTime, source.voicedEnd);
+            source.curve = std::move(leftCurve);
+            right.curve = std::move(rightCurve);
+            updateRepresentativePitch(source);
+            updateRepresentativePitch(right);
+            if (snapToChord)
+            {
+                moveNoteToPitch(
+                    source,
+                    snappedPitch(source.pitchExact, source.start));
+                moveNoteToPitch(
+                    right,
+                    snappedPitch(right.pitchExact, right.start));
+            }
+
+            if (trackName == "Voice Main")
+            {
+                std::vector<AnnotationRegion> rightRegions;
+                for (auto& region : document_.regions)
+                    if (region.noteId == id)
+                    {
+                        if (region.start >= splitTime)
+                        {
+                            region.noteId = rightId;
+                        }
+                        else if (region.end > splitTime)
+                        {
+                            auto rightRegion = region;
+                            rightRegion.start = splitTime;
+                            rightRegion.noteId = rightId;
+                            region.end = splitTime;
+                            rightRegions.push_back(std::move(rightRegion));
+                        }
+                    }
+                document_.regions.insert(
+                    document_.regions.end(),
+                    std::make_move_iterator(rightRegions.begin()),
+                    std::make_move_iterator(rightRegions.end()));
+            }
+            targetNotes->push_back(std::move(right));
+            sortNotes();
+            finishPitchTrackEdit(trackName);
+            return true;
+        }
+
+        if (type == "join-clips")
+        {
+            const auto ids = readClipIds(root.getProperty("clipIds"));
+            std::vector<NoteBlock> selected;
+            for (const auto& note : *targetNotes)
+                if (containsId(ids, note.id))
+                    selected.push_back(note);
+            std::sort(selected.begin(), selected.end(), [](const auto& left, const auto& right)
+            {
+                return left.start < right.start;
+            });
+            if (selected.size() < 2)
+                return true;
+
+            beginPitchTrackEdit(trackName);
+            auto joined = selected.front();
+            const auto joinedId = joined.id;
+            auto weightedGain = 0.0;
+            auto totalDuration = 0.0;
+            juce::StringArray lyrics;
+            std::vector<PitchCurvePoint> joinedCurve;
+            for (const auto& note : selected)
+            {
+                const auto noteDuration = juce::jmax(0.0, note.end - note.start);
+                weightedGain += note.gainDb * noteDuration;
+                totalDuration += noteDuration;
+                if (note.lyric.trim().isNotEmpty())
+                    lyrics.addIfNotAlreadyThere(note.lyric.trim());
+                joined.end = juce::jmax(joined.end, note.end);
+                joined.voicedStart = juce::jmin(joined.voicedStart, note.voicedStart);
+                joined.voicedEnd = juce::jmax(joined.voicedEnd, note.voicedEnd);
+                if (joined.syllableId.isEmpty())
+                    joined.syllableId = note.syllableId;
+                joinedCurve.insert(joinedCurve.end(), note.curve.begin(), note.curve.end());
+            }
+            joined.lyric = lyrics.joinIntoString(" ");
+            joined.gainDb = totalDuration > 0.0 ? weightedGain / totalDuration : joined.gainDb;
+            joined.flags.removeString("legato_to_next");
+            if (selected.back().flags.contains("legato_to_next"))
+                joined.flags.addIfNotAlreadyThere("legato_to_next");
+            joined.curve = std::move(joinedCurve);
+            std::sort(joined.curve.begin(), joined.curve.end(), [](const auto& left, const auto& right)
+            {
+                return left.time < right.time;
+            });
+            updateRepresentativePitch(joined);
+            if (snapToChord)
+                moveNoteToPitch(
+                    joined,
+                    snappedPitch(joined.pitchExact, joined.start));
+
+            targetNotes->erase(
+                std::remove_if(
+                    targetNotes->begin(),
+                    targetNotes->end(),
+                    [&ids, &containsId](const auto& note) { return containsId(ids, note.id); }),
+                targetNotes->end());
+            targetNotes->push_back(std::move(joined));
+            if (trackName == "Voice Main")
+                for (auto& region : document_.regions)
+                    if (containsId(ids, region.noteId))
+                        region.noteId = joinedId;
+            sortNotes();
+            finishPitchTrackEdit(trackName);
+            return true;
+        }
+
+        if (type == "set-clip-vibrato")
+        {
+            const auto id = normaliseId(root.getProperty("clipId").toString());
+            const auto index = findNoteIndex(id);
+            if (! index)
+                return true;
+            const auto scale = juce::jlimit(
+                0.0,
+                4.0,
+                static_cast<double>(root.getProperty("scale")));
+            if (std::abs(scale - 1.0) < 0.0001)
+                return true;
+
+            beginPitchTrackEdit(trackName);
+            auto& note = (*targetNotes)[*index];
+            if (note.curve.empty())
+            {
+                note.curve.push_back({ note.start, note.pitchExact, 1.0 });
+                note.curve.push_back({ note.end, note.pitchExact, 1.0 });
+            }
+            for (auto& point : note.curve)
+                point.midi = juce::jlimit(
+                    0.0,
+                    127.0,
+                    note.pitchExact + (point.midi - note.pitchExact) * scale);
+            finishPitchTrackEdit(trackName);
+            return true;
+        }
+
+        if (type == "set-clip-gain")
+        {
+            const auto id = normaliseId(root.getProperty("clipId").toString());
+            const auto index = findNoteIndex(id);
+            if (! index)
+                return true;
+            const auto gainDb = juce::jlimit(
+                -24.0,
+                12.0,
+                static_cast<double>(root.getProperty("gainDb")));
+            auto& note = (*targetNotes)[*index];
+            if (std::abs(note.gainDb - gainDb) < 0.0001)
+                return true;
+
+            beginPitchTrackEdit(trackName);
+            note.gainDb = gainDb;
+            finishPitchTrackEdit(trackName);
+            return true;
+        }
+
+        return false;
+    }
+
     void handleWebCommand(const juce::var& command)
     {
         auto* root = command.getDynamicObject();
@@ -2284,6 +4588,7 @@ private:
             webFrontendReady_ = true;
             sendWebProjectState();
             sendWebStatus();
+            sendWebVoiceTrainingState();
             sendWebTransportState();
             sendWebLoopState();
             sendWebVolumeState();
@@ -2293,6 +4598,12 @@ private:
         if (type == "project-action")
         {
             handleProjectAction(root->getProperty("action").toString());
+            return;
+        }
+
+        if (type == "voice-training")
+        {
+            handleVoiceTrainingAction(*root);
             return;
         }
 
@@ -2343,6 +4654,22 @@ private:
                 static_cast<double>(root->getProperty("value")));
             masterVolume_.store(static_cast<float>(value / 100.0));
             sendWebVolumeState();
+            return;
+        }
+
+        if (type == "preview-pitch-tone")
+        {
+            previewPitchTone(juce::jlimit(
+                0.0,
+                127.0,
+                static_cast<double>(root->getProperty("pitch"))),
+                static_cast<bool>(root->getProperty("restart")));
+            return;
+        }
+
+        if (type == "stop-pitch-tone")
+        {
+            stopPitchTone();
             return;
         }
 
@@ -2430,9 +4757,25 @@ private:
             if (tracks != nullptr && tracks->size() == 1)
             {
                 const auto track = tracks->getFirst().toString();
+                selectedWebTrack_ = track;
                 if (track != "Instrumental" && track != "Voice Main")
                     selectBackingTrackForEditing(track);
             }
+            else
+            {
+                selectedWebTrack_.clear();
+            }
+            return;
+        }
+
+        if (type == "pitch-history")
+        {
+            const auto track = root->getProperty("track").toString();
+            const auto action = root->getProperty("action").toString();
+            if (action == "undo")
+                undoPitchTrack(track);
+            else if (action == "redo")
+                redoPitchTrack(track);
             return;
         }
 
@@ -2453,6 +4796,40 @@ private:
             return;
         }
 
+        if (type == "set-backing-voice-profile")
+        {
+            if (backingAudioRenderRunning_)
+                return;
+
+            const auto trackName = root->getProperty("track").toString();
+            const auto requestedProfileId =
+                root->getProperty("profileId").toString();
+            const auto profileId =
+                juce::File(requestedProfileId).getFileName();
+            if (profileId.isEmpty() || profileId != requestedProfileId)
+                return;
+
+            const auto profiles = readVoiceProfileOptions();
+            const auto profile = std::find_if(
+                profiles.begin(),
+                profiles.end(),
+                [&profileId](const auto& candidate)
+                {
+                    return candidate.id == profileId;
+                });
+            auto* backingTrack = findBackingTrack({}, trackName);
+            if (profile == profiles.end() || backingTrack == nullptr)
+                return;
+            if (backingTrack->voiceProfileId == profileId)
+                return;
+
+            beginUndoableAction();
+            backingTrack->voiceProfileId = profileId;
+            markChanged();
+            setStatus("Voice for " + trackName + ": " + profile->name + ".");
+            return;
+        }
+
         if (type == "render-backing-track")
         {
             const auto requestedTrack = root->getProperty("track").toString();
@@ -2464,35 +4841,49 @@ private:
             }
 
             makeBackingTrackActive(*backingTrack);
-            clearBackingAudioTrack();
+            ++backingPitchPreviewRevisions_[requestedTrack];
             updatePlaybackNotes();
             runBackingAudioRender();
             return;
         }
 
+        if (handleWebPitchEdit(*root, type))
+            return;
+
         if (type == "set-clip-pitch")
         {
-            const auto clipId = root->getProperty("clipId").toString();
-            const auto pitch = juce::jlimit(
+            const auto trackName = root->getProperty("track").toString();
+            auto* notes = notesForPitchTrack(trackName);
+            const auto webClipId = root->getProperty("clipId").toString();
+            const auto clipId = normaliseWebClipId(trackName, webClipId);
+            auto pitch = juce::jlimit(
                 0.0,
                 127.0,
                 static_cast<double>(root->getProperty("pitch")));
-            const auto index = document_.findNoteIndex(clipId);
+            if (notes == nullptr)
+                return;
+            const auto index = findPitchNoteIndex(*notes, clipId);
             if (! index)
                 return;
 
-            beginUndoableAction();
-            auto& note = document_.notes[static_cast<size_t>(*index)];
-            const auto pitchDelta = pitch - note.pitchExact;
-            note.pitchExact = pitch;
-            note.pitch = juce::jlimit(0, 127, static_cast<int>(std::lround(pitch)));
-            for (auto& point : note.curve)
-                point.midi = juce::jlimit(0.0, 127.0, point.midi + pitchDelta);
-            markChanged();
+            auto& note = (*notes)[*index];
+            if (trackName != "Voice Main"
+                && static_cast<bool>(root->getProperty("snapToChord")))
+            {
+                pitch = snapPitchToChord(
+                    pitch,
+                    note.start,
+                    document_.chords);
+            }
+
+            beginPitchTrackEdit(trackName);
+            moveNoteToPitch(note, pitch);
+            finishPitchTrackEdit(trackName);
 
             auto* event = new juce::DynamicObject();
             event->setProperty("type", "clip-pitch-state");
-            event->setProperty("clipId", clipId);
+            event->setProperty("track", trackName);
+            event->setProperty("clipId", webClipId);
             event->setProperty("pitch", pitch);
             webView_.dispatch(event);
         }
@@ -2502,6 +4893,16 @@ private:
     {
         undoStack_.clear();
         redoStack_.clear();
+        pitchTrackHistories_.clear();
+        ++leadPitchPreviewRevision_;
+        restoreOriginalLeadAudio();
+        backingPitchPreviewRevisions_.clear();
+        for (const auto& [trackName, previewFile] : backingPitchPreviewFiles_)
+        {
+            juce::ignoreUnused(trackName);
+            previewFile.deleteFile();
+        }
+        backingPitchPreviewFiles_.clear();
         undoButton_.setEnabled(false);
         redoButton_.setEnabled(false);
     }
@@ -2519,6 +4920,8 @@ private:
             playbackNote.start = note.start;
             playbackNote.end = note.end;
             playbackNote.frequency = midiNoteToFrequency(note.pitchExact);
+            playbackNote.gain = static_cast<float>(
+                std::pow(10.0, juce::jlimit(-24.0, 12.0, note.gainDb) / 20.0));
             playbackNote.isBacking = backingTrackIndex >= 0;
             playbackNote.backingTrackIndex = backingTrackIndex;
             playbackNote.legatoFromPrevious = note.flags.contains("legato_from_previous");
@@ -2842,12 +5245,36 @@ private:
             backingAudioTransport_.stop();
 
         clickedToneFrequency_.store(midiNoteToFrequency(note.pitchExact));
+        clickedToneHeld_.store(false, std::memory_order_release);
+        clickedToneLeaseSamples_.store(0, std::memory_order_release);
         const auto totalSamples = juce::jmax(1, static_cast<int>(audioSampleRate_.load() * 0.55));
-        clickedToneTotalSamples_.store(totalSamples);
         clickedToneSamplesRemaining_.store(totalSamples);
         clickedToneSerial_.fetch_add(1);
         playButton_.setButtonText("Play");
         setStatus("Auditioning note " + note.id + " at MIDI " + juce::String(note.pitchExact, 2) + ".");
+    }
+
+    void previewPitchTone(double midiPitch, bool restart) noexcept
+    {
+        clickedToneFrequency_.store(
+            midiNoteToFrequency(midiPitch),
+            std::memory_order_relaxed);
+        clickedToneHeld_.store(true, std::memory_order_release);
+        clickedToneLeaseSamples_.store(
+            juce::jmax(
+                1,
+                static_cast<int>(
+                    audioSampleRate_.load(std::memory_order_relaxed) * 0.45)),
+            std::memory_order_release);
+        clickedToneSamplesRemaining_.store(1, std::memory_order_relaxed);
+        if (restart)
+            clickedToneSerial_.fetch_add(1, std::memory_order_release);
+    }
+
+    void stopPitchTone() noexcept
+    {
+        clickedToneLeaseSamples_.store(0, std::memory_order_release);
+        clickedToneHeld_.store(false, std::memory_order_release);
     }
 
     void auditionWaveformLoop(double startTime, double endTime)
@@ -2894,7 +5321,42 @@ private:
 
         sendWebTransportState();
         sendWebOutputMeterState();
+        pollVoiceTrainingJobs();
         maybeAutosave();
+    }
+
+    void pollVoiceTrainingJobs()
+    {
+        const auto now = juce::Time::getMillisecondCounterHiRes();
+        if (now - lastVoiceTrainingPollMs_ < 500.0)
+            return;
+        lastVoiceTrainingPollMs_ = now;
+
+        detachedTrainingProcesses_.erase(
+            std::remove_if(
+                detachedTrainingProcesses_.begin(),
+                detachedTrainingProcesses_.end(),
+                [](const auto& process)
+                {
+                    return process == nullptr || ! process->isRunning();
+                }),
+            detachedTrainingProcesses_.end());
+
+        const auto activeFile = voiceProfilesRoot().getChildFile("active.json");
+        auto activeProfileChanged = false;
+        if (activeFile.existsAsFile())
+        {
+            const auto modificationMs =
+                activeFile.getLastModificationTime().toMilliseconds();
+            if (modificationMs > lastActiveProfilePointerModificationMs_)
+            {
+                loadActiveVoiceProfile();
+                activeProfileChanged = true;
+            }
+        }
+        if (activeProfileChanged)
+            sendWebProjectState();
+        sendWebVoiceTrainingState();
     }
 
     void maybeAutosave()
@@ -2927,7 +5389,10 @@ private:
             return;
         }
 
-        chooser_ = std::make_unique<juce::FileChooser>("Open vocal audio", juce::File(), "*.wav;*.aiff;*.aif;*.flac");
+        chooser_ = std::make_unique<juce::FileChooser>(
+            "Open vocal audio",
+            juce::File(),
+            supportedAudioFileWildcard());
         chooser_->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
                               [this](const juce::FileChooser& chooser)
                               {
@@ -2939,7 +5404,10 @@ private:
 
     void chooseInstrumentalFile()
     {
-        chooser_ = std::make_unique<juce::FileChooser>("Open instrumental audio", juce::File(), "*.wav;*.aiff;*.aif;*.flac");
+        chooser_ = std::make_unique<juce::FileChooser>(
+            "Open instrumental audio",
+            juce::File(),
+            supportedAudioFileWildcard());
         chooser_->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
                               [this](const juce::FileChooser& chooser)
                               {
@@ -3007,10 +5475,21 @@ private:
             "Open Synthetic Obsidian project",
             initialLocation,
             "*.json");
-        chooser_->launchAsync(
+       #if JUCE_MAC || JUCE_IOS
+        // A project owns sibling audio assets. Selecting its directory gives
+        // the native picker one user-authorized scope instead of prompting
+        // separately as each asset is restored.
+        constexpr auto projectChooserFlags =
             juce::FileBrowserComponent::openMode
-                | juce::FileBrowserComponent::canSelectFiles
-                | juce::FileBrowserComponent::canSelectDirectories,
+            | juce::FileBrowserComponent::canSelectDirectories;
+       #else
+        constexpr auto projectChooserFlags =
+            juce::FileBrowserComponent::openMode
+            | juce::FileBrowserComponent::canSelectFiles
+            | juce::FileBrowserComponent::canSelectDirectories;
+       #endif
+        chooser_->launchAsync(
+            projectChooserFlags,
             [this](const juce::FileChooser& chooser)
             {
                 const auto selected = chooser.getResult();
@@ -3906,7 +6385,8 @@ private:
             {
                 std::array<double, 5> neighbourhood {};
                 auto count = 0;
-                const auto first = static_cast<int>(juce::jmax<size_t>(0, pointIndex > 2 ? pointIndex - 2 : 0));
+                const auto first = static_cast<int>(
+                    std::max<size_t>(0, pointIndex > 2 ? pointIndex - 2 : 0));
                 const auto last = juce::jmin(static_cast<int>(usableCurve.size()) - 1, static_cast<int>(pointIndex) + 2);
                 for (int i = first; i <= last; ++i)
                     neighbourhood[static_cast<size_t>(count++)] = usableCurve[static_cast<size_t>(i)].midi;
@@ -4041,7 +6521,8 @@ private:
                 {
                     std::array<double, 5> neighbourhood {};
                     auto count = 0;
-                    const auto first = static_cast<int>(juce::jmax<size_t>(0, pointIndex > 2 ? pointIndex - 2 : 0));
+                    const auto first = static_cast<int>(
+                        std::max<size_t>(0, pointIndex > 2 ? pointIndex - 2 : 0));
                     const auto last = juce::jmin(static_cast<int>(usableCurve.size()) - 1, static_cast<int>(pointIndex) + 2);
                     for (int i = first; i <= last; ++i)
                         neighbourhood[static_cast<size_t>(count++)] = usableCurve[static_cast<size_t>(i)].midi;
@@ -4650,18 +7131,34 @@ private:
         const juce::String styleName(style->name);
         backingGenerationRunning_ = true;
         backingGenerationTrackName_ = styleName;
+        clearPitchTrackHistory(styleName);
+        ++backingPitchPreviewRevisions_[styleName];
         addBackingVocalButton_.setEnabled(false);
         beginUndoableAction();
         auto* backingTrack = findBackingTrack(styleId, styleName);
         if (backingTrack == nullptr)
         {
-            document_.backingTracks.push_back({ styleId, styleName, {}, {} });
+            document_.backingTracks.push_back({
+                styleId,
+                styleName,
+                {},
+                {},
+                {},
+                activeVoiceProfileId_
+            });
             backingTrack = &document_.backingTracks.back();
         }
         backingTrack->notes.clear();
+        backingTrack->renderedNotes.clear();
         backingTrack->audioFile = juce::File();
         makeBackingTrackActive(*backingTrack);
         clearBackingAudioTrack();
+        if (const auto preview = backingPitchPreviewFiles_.find(styleName);
+            preview != backingPitchPreviewFiles_.end())
+        {
+            preview->second.deleteFile();
+            backingPitchPreviewFiles_.erase(preview);
+        }
         markChanged();
         const auto expectedRevision = documentRevision_;
         editor_.repaint();
@@ -4809,6 +7306,7 @@ private:
         }
 
         backingTrack->notes = std::move(generatedNotes);
+        backingTrack->renderedNotes.clear();
         backingTrack->audioFile = juce::File();
         makeBackingTrackActive(*backingTrack);
         backingAudioMuted_.store(false);
@@ -5068,8 +7566,66 @@ private:
             return;
         }
 
+        const auto profiles = readVoiceProfileOptions();
+        const auto* activeTrack =
+            findBackingTrack({}, document_.backingStyleName);
+        const auto requestedProfileId =
+            activeTrack != nullptr
+                ? activeTrack->voiceProfileId
+                : juce::String();
+        const auto findProfile =
+            [&profiles](const juce::String& profileId)
+                -> const VoiceProfileOption*
+        {
+            const auto profile = std::find_if(
+                profiles.begin(),
+                profiles.end(),
+                [&profileId](const auto& candidate)
+                {
+                    return candidate.id == profileId;
+                });
+            return profile != profiles.end() ? &*profile : nullptr;
+        };
+        const auto* renderProfile = findProfile(requestedProfileId);
+        if (renderProfile == nullptr)
+            renderProfile = findProfile(activeVoiceProfileId_);
+        if (renderProfile == nullptr && ! profiles.empty())
+            renderProfile = &profiles.front();
+
+        const auto& promptSources =
+            renderProfile != nullptr
+                ? renderProfile->sources
+                : activeVoiceProfileSources_;
+        const auto renderQuality =
+            renderProfile != nullptr
+                ? renderProfile->quality
+                : activeVoiceProfileQuality_;
+        const auto renderAdapter =
+            renderProfile != nullptr
+                ? renderProfile->adapterFile
+                : activeVoiceAdapterFile_;
+
         auto* root = new juce::DynamicObject();
         root->setProperty("audio", document_.audioFile.getFullPathName());
+        if (! promptSources.empty())
+        {
+            juce::Array<juce::var> promptCandidates;
+            const auto maximumCandidates =
+                renderQuality == "high" ? 8 : 4;
+            for (const auto& source : promptSources)
+            {
+                if (promptCandidates.size() >= maximumCandidates)
+                    break;
+                if (source.existsAsFile())
+                    promptCandidates.add(source.getFullPathName());
+            }
+            if (! promptCandidates.isEmpty())
+                root->setProperty("prompt_audio_candidates", promptCandidates);
+        }
+        if (renderAdapter.existsAsFile())
+            root->setProperty(
+                "voice_adapter",
+                renderAdapter.getFullPathName());
         const auto outputFile = juce::File::getSpecialLocation(juce::File::tempDirectory)
                                     .getNonexistentChildFile("synthetic_obsidian_backing_audio", ".wav");
         root->setProperty("output", outputFile.getFullPathName());
@@ -5134,9 +7690,13 @@ private:
 
         backingAudioRenderRunning_ = true;
         backingAudioRenderTrackName_ = document_.backingStyleName;
+        backingAudioRenderSourceNotes_ = document_.backingNotes;
         renderBackingAudioButton_.setEnabled(false);
         setStatus("Rendering backing vocal audio with SoulX-Singer-SVC: "
             + backingAudioRenderTrackName_
+            + (renderProfile != nullptr
+                ? " / voice " + renderProfile->name
+                : juce::String())
             + "...");
 
         juce::WeakReference<MainComponent> safeThis(this);
@@ -5250,6 +7810,8 @@ private:
                                  unsigned int expectedRevision)
     {
         const auto renderedTrackName = backingAudioRenderTrackName_;
+        auto renderedNotes = std::move(backingAudioRenderSourceNotes_);
+        backingAudioRenderSourceNotes_.clear();
         finishBackingAudioRender();
 
         if (error.isNotEmpty())
@@ -5264,7 +7826,8 @@ private:
             return;
         }
 
-        if (expectedRevision != documentRevision_)
+        const auto sourceChangedDuringRender = expectedRevision != documentRevision_;
+        if (sourceChangedDuringRender)
             setStatus("Applied rendered backing audio to the current document; source annotation changed during render.");
 
         auto* backingTrack = findBackingTrack({}, renderedTrackName);
@@ -5275,7 +7838,29 @@ private:
         }
 
         beginUndoableAction();
+        const auto previousPreview = backingPitchPreviewFiles_.find(renderedTrackName);
+        const auto previousPreviewFile =
+            previousPreview != backingPitchPreviewFiles_.end()
+            ? previousPreview->second
+            : juce::File();
+        if (previousPreview != backingPitchPreviewFiles_.end())
+            backingPitchPreviewFiles_.erase(previousPreview);
+        ++backingPitchPreviewRevisions_[renderedTrackName];
         backingTrack->audioFile = outputFile;
+        backingTrack->renderedNotes = renderedNotes.empty()
+            ? backingTrack->notes
+            : std::move(renderedNotes);
+        if (sourceChangedDuringRender)
+        {
+            auto& history = pitchTrackHistories_[renderedTrackName];
+            history.undo.clear();
+            history.redo.clear();
+            history.undo.push_back({ backingTrack->renderedNotes, {} });
+        }
+        else
+        {
+            clearPitchTrackHistory(renderedTrackName);
+        }
         makeBackingTrackActive(*backingTrack);
         backingAudioMuted_.store(false);
         const auto renderedTrackIndex = activeBackingTrackIndex_.load(std::memory_order_relaxed);
@@ -5288,8 +7873,12 @@ private:
         }
         editor_.setBackingAudioFile(outputFile);
         configureBackingAudioTransportForFile(outputFile);
+        if (previousPreviewFile.existsAsFile())
+            previousPreviewFile.deleteFile();
         requestWaveformData(WaveformTrack::backing, outputFile);
         markChanged();
+        if (sourceChangedDuringRender)
+            scheduleBackingPitchPreview(renderedTrackName);
         updateInfoText();
 
         auto jsonText = output.trim();
@@ -6008,6 +8597,14 @@ private:
         {
             setStatus(resultMessage("Load JSON", result));
             return false;
+        }
+
+        if (activeVoiceAdapterFile_.existsAsFile()
+            && activeVoiceProfileId_.isNotEmpty())
+        {
+            for (auto& track : document_.backingTracks)
+                if (track.voiceProfileId.isEmpty())
+                    track.voiceProfileId = activeVoiceProfileId_;
         }
 
         ++documentRevision_;
@@ -6985,12 +9582,16 @@ private:
     const PlaybackNoteState* renderedNoteState_ = nullptr;
     double lastTimelineRenderEnd_ = -1.0;
     std::atomic<double> clickedToneFrequency_ { 440.0 };
+    std::atomic<bool> clickedToneHeld_ { false };
+    std::atomic<int> clickedToneLeaseSamples_ { 0 };
     std::atomic<int> clickedToneSamplesRemaining_ { 0 };
-    std::atomic<int> clickedToneTotalSamples_ { 0 };
     std::atomic<unsigned int> clickedToneSerial_ { 0 };
     unsigned int renderedClickedToneSerial_ = 0;
     double clickedTonePhase_ = 0.0;
+    double clickedToneDetunedPhase_ = 0.0;
+    double clickedToneCurrentFrequency_ = 440.0;
     int clickedToneElapsedSamples_ = 0;
+    bool clickedToneWasHeld_ = false;
     bool loopAuditionActive_ = false;
     bool cycleLoopActive_ = false;
     double loopStartTime_ = 0.0;
@@ -7017,6 +9618,12 @@ private:
     std::unique_ptr<juce::FileChooser> chooser_;
     std::vector<AnnotationDocument> undoStack_;
     std::vector<AnnotationDocument> redoStack_;
+    std::map<juce::String, PitchTrackHistory> pitchTrackHistories_;
+    unsigned int leadPitchPreviewRevision_ = 0;
+    juce::File leadPitchPreviewFile_;
+    std::map<juce::String, unsigned int> backingPitchPreviewRevisions_;
+    std::map<juce::String, juce::File> backingPitchPreviewFiles_;
+    juce::String selectedWebTrack_ { "Voice Main" };
     bool dirty_ = false;
     bool analysisRunning_ = false;
     bool aiPartsAnalysisRunning_ = false;
@@ -7025,6 +9632,7 @@ private:
     bool backingAudioRenderRunning_ = false;
     juce::String backingGenerationTrackName_;
     juce::String backingAudioRenderTrackName_;
+    std::vector<NoteBlock> backingAudioRenderSourceNotes_;
     bool analyzeAfterAiParts_ = false;
     bool lyricsAlignmentRunning_ = false;
     bool noteRecalculationRunning_ = false;
@@ -7036,6 +9644,23 @@ private:
     juce::File backingWorkerQueueDir_;
     std::unique_ptr<juce::ChildProcess> backingAudioWorkerProcess_;
     juce::File backingAudioWorkerQueueDir_;
+    std::vector<VoiceTrainingSource> voiceTrainingSources_;
+    std::vector<juce::File> activeVoiceProfileSources_;
+    juce::File activeVoiceProfileDirectory_;
+    juce::File activeVoiceAdapterFile_;
+    juce::String activeVoiceProfileId_;
+    juce::String activeVoiceProfileName_;
+    juce::String activeVoiceProfileQuality_ { "balanced" };
+    juce::String voiceTrainingPhase_ { "idle" };
+    juce::String voiceTrainingMessage_ {
+        "Add clean, dry vocal recordings to build a reusable voice profile."
+    };
+    double voiceTrainingProgress_ = 0.0;
+    bool voiceProfileCreationRunning_ = false;
+    std::shared_ptr<std::atomic<bool>> voiceProfileCancellation_;
+    std::vector<std::unique_ptr<juce::ChildProcess>> detachedTrainingProcesses_;
+    double lastVoiceTrainingPollMs_ = 0.0;
+    juce::int64 lastActiveProfilePointerModificationMs_ = 0;
 
     juce::TextButton openAudioButton_;
     juce::TextButton openInstrumentalButton_;
@@ -7073,7 +9698,7 @@ class MainWindow final : public juce::DocumentWindow
 {
 public:
     MainWindow()
-        : DocumentWindow("Vocal Annotation Tool",
+        : DocumentWindow("Synthetic Obsidian",
                          juce::Desktop::getInstance().getDefaultLookAndFeel().findColour(juce::ResizableWindow::backgroundColourId),
                          DocumentWindow::allButtons)
     {
@@ -7093,7 +9718,7 @@ public:
 class VocalAnnotationToolApplication final : public juce::JUCEApplication
 {
 public:
-    const juce::String getApplicationName() override { return "Vocal Annotation Tool"; }
+    const juce::String getApplicationName() override { return "Synthetic Obsidian"; }
     const juce::String getApplicationVersion() override { return "0.1.0"; }
     bool moreThanOneInstanceAllowed() override { return true; }
 

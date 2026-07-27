@@ -22,6 +22,7 @@ struct NoteBlock
     double end = 0.25;
     int pitch = 60;
     double pitchExact = 60.0;
+    double gainDb = 0.0;
     double voicedStart = 0.0;
     double voicedEnd = 0.25;
     juce::String lyric;
@@ -89,7 +90,9 @@ struct BackingVocalTrack
     juce::String styleId;
     juce::String styleName;
     std::vector<NoteBlock> notes;
+    std::vector<NoteBlock> renderedNotes;
     juce::File audioFile;
+    juce::String voiceProfileId;
 };
 
 struct AnnotationDocument

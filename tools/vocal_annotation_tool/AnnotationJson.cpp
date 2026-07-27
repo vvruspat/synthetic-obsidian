@@ -53,6 +53,7 @@ juce::var makeNoteVar(const NoteBlock& note)
     object->setProperty("end", note.end);
     object->setProperty("pitch", note.pitch);
     object->setProperty("pitch_exact", note.pitchExact);
+    object->setProperty("gain_db", note.gainDb);
     object->setProperty("voiced_start", note.voicedStart);
     object->setProperty("voiced_end", note.voicedEnd);
     object->setProperty("lyric", note.lyric);
@@ -83,6 +84,7 @@ std::optional<NoteBlock> readNoteBlock(const juce::var& value, AnnotationDocumen
     note.start = numberProperty(*noteObject, "start", 0.0);
     note.end = numberProperty(*noteObject, "end", note.start + 0.25);
     note.pitch = static_cast<int>(numberProperty(*noteObject, "pitch", 60.0));
+    note.gainDb = juce::jlimit(-24.0, 12.0, numberProperty(*noteObject, "gain_db", 0.0));
     note.voicedStart = numberProperty(*noteObject, "voiced_start", note.start);
     note.voicedEnd = numberProperty(*noteObject, "voiced_end", note.end);
     note.lyric = stringProperty(*noteObject, "lyric");
@@ -247,6 +249,7 @@ juce::Result AnnotationJson::load(const juce::File& jsonFile, AnnotationDocument
             BackingVocalTrack track;
             track.styleId = stringProperty(*trackObject, "style_id");
             track.styleName = stringProperty(*trackObject, "style_name");
+            track.voiceProfileId = stringProperty(*trackObject, "voice_profile_id");
             const auto trackAudioPath = stringProperty(*trackObject, "audio");
             track.audioFile = trackAudioPath.isEmpty()
                 ? juce::File()
@@ -260,6 +263,14 @@ juce::Result AnnotationJson::load(const juce::File& jsonFile, AnnotationDocument
                     if (auto note = readNoteBlock(noteValue, loaded))
                         track.notes.push_back(std::move(*note));
             }
+            if (auto* renderedNotes = trackObject->getProperty("rendered_notes").getArray())
+            {
+                for (const auto& noteValue : *renderedNotes)
+                    if (auto note = readNoteBlock(noteValue, loaded))
+                        track.renderedNotes.push_back(std::move(*note));
+            }
+            if (track.renderedNotes.empty() && track.audioFile.existsAsFile())
+                track.renderedNotes = track.notes;
 
             if (track.styleId.isNotEmpty() || track.styleName.isNotEmpty())
                 loaded.backingTracks.push_back(std::move(track));
@@ -276,7 +287,9 @@ juce::Result AnnotationJson::load(const juce::File& jsonFile, AnnotationDocument
             loaded.backingStyleId,
             loaded.backingStyleName,
             loaded.backingNotes,
-            loaded.backingAudioFile
+            loaded.backingNotes,
+            loaded.backingAudioFile,
+            {}
         });
     }
     else if (! loaded.backingTracks.empty())
@@ -420,6 +433,8 @@ juce::Result AnnotationJson::save(const AnnotationDocument& document, const juce
         auto* object = new juce::DynamicObject();
         object->setProperty("style_id", track.styleId);
         object->setProperty("style_name", track.styleName);
+        if (track.voiceProfileId.isNotEmpty())
+            object->setProperty("voice_profile_id", track.voiceProfileId);
         object->setProperty(
             "audio",
             projectPathForFile(track.audioFile, jsonFile));
@@ -428,6 +443,11 @@ juce::Result AnnotationJson::save(const AnnotationDocument& document, const juce
         for (const auto& note : track.notes)
             trackNotes.add(makeNoteVar(note));
         object->setProperty("notes", trackNotes);
+
+        juce::Array<juce::var> renderedNotes;
+        for (const auto& note : track.renderedNotes)
+            renderedNotes.add(makeNoteVar(note));
+        object->setProperty("rendered_notes", renderedNotes);
         backingTracks.add(object);
     }
     root->setProperty("backing_tracks", backingTracks);

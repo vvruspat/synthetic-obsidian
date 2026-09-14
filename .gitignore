@@ -31,6 +31,9 @@ data/*
 !data/gtsinger_alignment/
 data/gtsinger_alignment/*
 !data/gtsinger_alignment/multilingual_mps_full_breath_diffcut_encoder_thr075_tcn.pt
+!data/user_boundary_alignment/
+data/user_boundary_alignment/*
+!data/user_boundary_alignment/sasha_manual_boundary_tcn.pt
 checkpoints/
 research/checkpoints*/
 research/logs/

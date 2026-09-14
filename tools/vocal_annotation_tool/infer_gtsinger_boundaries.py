@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the offline GTSinger TCN boundary model on one audio file."""
+"""Run the offline BoundaryNet TCN model on one audio file."""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("audio", type=Path)
     parser.add_argument("--checkpoint", type=Path, required=True)
+    parser.add_argument("--non-vocal-checkpoint", type=Path)
     return parser.parse_args()
 
 
@@ -344,6 +345,33 @@ def main() -> int:
     with torch.inference_mode():
         tensor = torch.from_numpy(features).unsqueeze(0).to(device)
         probabilities = torch.sigmoid(model(tensor)).squeeze(0).cpu().numpy()
+
+    non_vocal_checkpoint = checkpoint
+    non_vocal_probabilities = probabilities
+    if args.non_vocal_checkpoint is not None:
+        non_vocal_checkpoint = torch.load(
+            args.non_vocal_checkpoint.expanduser().resolve(),
+            map_location="cpu",
+            weights_only=True,
+        )
+        non_vocal_metadata = non_vocal_checkpoint.get("model", {})
+        if non_vocal_metadata.get("type") != "BoundaryNetResidualTCN":
+            raise RuntimeError(
+                "non-vocal checkpoint does not contain the supported residual TCN"
+            )
+        for name, value in expected.items():
+            if non_vocal_metadata.get(name) != value:
+                raise RuntimeError(
+                    f"non-vocal checkpoint {name}={non_vocal_metadata.get(name)!r}, "
+                    f"expected {value!r}"
+                )
+        non_vocal_model = model_api.BoundaryNet(model_api.N_MELS)
+        non_vocal_model.load_state_dict(non_vocal_checkpoint["model_state"])
+        non_vocal_model.to(device).eval()
+        with torch.inference_mode():
+            non_vocal_probabilities = (
+                torch.sigmoid(non_vocal_model(tensor)).squeeze(0).cpu().numpy()
+            )
     onset_novelty, rms_novelty, rms_energy = acoustic_novelty(
         args.audio.expanduser().resolve(),
         model_api.TARGET_SAMPLE_RATE,
@@ -353,7 +381,10 @@ def main() -> int:
     )
 
     training = checkpoint["training"]
-    thresholds = training["calibrated_thresholds"]
+    thresholds = dict(training["calibrated_thresholds"])
+    non_vocal_thresholds = non_vocal_checkpoint["training"]["calibrated_thresholds"]
+    for name in model_api.INTERVAL_HEADS:
+        thresholds[name] = non_vocal_thresholds[name]
     frame_seconds = model_api.HOP_LENGTH / model_api.TARGET_SAMPLE_RATE
     min_distance_frames = max(
         1,
@@ -397,7 +428,7 @@ def main() -> int:
     interval_indices = [
         model_api.EVENT_NAMES.index(name) for name in model_api.INTERVAL_HEADS
     ]
-    interval_probabilities = probabilities[interval_indices]
+    interval_probabilities = non_vocal_probabilities[interval_indices]
     interval_thresholds = tuple(
         float(thresholds[name]) for name in model_api.INTERVAL_HEADS
     )
@@ -418,6 +449,7 @@ def main() -> int:
         json.dumps(
             {
                 "model": checkpoint["model"]["type"],
+                "non_vocal_model": non_vocal_checkpoint["model"]["type"],
                 "device": str(device),
                 "frame_seconds": frame_seconds,
                 "onset_refinement": {

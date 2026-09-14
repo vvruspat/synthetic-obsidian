@@ -27,26 +27,36 @@ export function TrackSidebar({ controller }: { controller: StudioController }) {
     trackLayerAvailability,
     horizontalZoom,
     verticalZoom,
+    instrumentalVolume,
+    dragChordPitchClasses,
     serviceTracksCollapsed,
     refs,
     actions,
   } = controller;
-  const renderTrackHeader = (name: Parameters<typeof actions.toggleTrack>[0]) => (
+  const renderTrackHeader = (
+    id: Parameters<typeof actions.toggleTrack>[0],
+    name = id,
+    onDelete?: () => void,
+  ) => (
     <TrackHeader
+      id={id}
       name={name}
-      state={trackState[name] ?? { mute: false, solo: false }}
-      onToggle={(mode) => actions.toggleTrack(name, mode)}
+      state={trackState[id] ?? { mute: false, solo: false }}
+      onToggle={(mode) => actions.toggleTrack(id, mode)}
+      volume={id === "Instrumental" ? instrumentalVolume : undefined}
+      onVolumeChange={id === "Instrumental" ? actions.setInstrumentalVolumeValue : undefined}
       layerState={
-        name === "Instrumental"
+        id === "Instrumental"
           ? undefined
-          : (trackLayerState[name] ?? { audioMuted: false, notesMuted: false })
+          : (trackLayerState[id] ?? { audioMuted: false, notesMuted: false })
       }
-      layerAvailability={name === "Instrumental" ? undefined : trackLayerAvailability[name]}
+      layerAvailability={id === "Instrumental" ? undefined : trackLayerAvailability[id]}
       onToggleLayer={
-        name === "Instrumental" ? undefined : (layer) => actions.toggleTrackLayer(name, layer)
+        id === "Instrumental" ? undefined : (layer) => actions.toggleTrackLayer(id, layer)
       }
-      selected={selectedTracks.includes(name)}
-      onSelect={(additive) => actions.selectTrack(name, additive)}
+      selected={selectedTracks.includes(id)}
+      onSelect={(additive) => actions.selectTrack(id, additive)}
+      onDelete={onDelete}
     />
   );
 
@@ -101,8 +111,14 @@ export function TrackSidebar({ controller }: { controller: StudioController }) {
           ref={refs.sidebarTrackScrollRef}
           onScroll={() => actions.syncTrackScroll("sidebar")}
         >
-          {backingTracks.map((name) => (
-            <Fragment key={name}>{renderTrackHeader(name)}</Fragment>
+          {backingTracks.map((track) => (
+            <Fragment key={track.id}>
+              {renderTrackHeader(track.id, track.name, () => {
+                if (window.confirm(`Delete backing track “${track.name}”?`)) {
+                  actions.removeBackingTrack(track.id);
+                }
+              })}
+            </Fragment>
           ))}
         </div>
       </div>
@@ -161,7 +177,9 @@ export function TrackSidebar({ controller }: { controller: StudioController }) {
                   const bounds = getWhiteKeyBounds(index);
                   return (
                     <i
-                      className="piano-white-key"
+                      className={`piano-white-key ${
+                        dragChordPitchClasses.includes(pitch % 12) ? "is-chord-tone" : ""
+                      }`}
                       key={`white-${pitch}`}
                       style={{
                         top: `${bounds.top}%`,
@@ -175,7 +193,9 @@ export function TrackSidebar({ controller }: { controller: StudioController }) {
               </div>
               {BLACK_KEY_PITCHES.map((pitch) => (
                 <i
-                  className="piano-black-key"
+                  className={`piano-black-key ${
+                    dragChordPitchClasses.includes(pitch % 12) ? "is-chord-tone" : ""
+                  }`}
                   key={`black-${pitch}`}
                   style={{
                     top: `${pitchToTop(pitch)}%`,

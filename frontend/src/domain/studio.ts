@@ -13,8 +13,6 @@ export const BACKING_TRACK_OPTIONS = [
   "Drone Root",
   "Drone Fifth",
   "Drone Third",
-  "Pedal Tone Root",
-  "Pedal Tone Fifth",
   "Contrary Motion Harmony",
   "Oblique Motion Harmony",
   "Parallel Thirds",
@@ -23,14 +21,6 @@ export const BACKING_TRACK_OPTIONS = [
   "Choir Alto",
   "Choir Tenor",
   "Choir Bass",
-  "Two-Part Harmony",
-  "Three-Part Harmony",
-  "Four-Part Harmony",
-  "Pop Harmony",
-  "Folk Harmony",
-  "Gospel Harmony",
-  "Classical Choral Harmony",
-  "Barbershop Harmony",
   "Suspension Harmony",
   "Passing Tone Harmony",
   "Tension-Resolution Harmony",
@@ -38,7 +28,13 @@ export const BACKING_TRACK_OPTIONS = [
 ] as const;
 
 export type BackingTrackName = (typeof BACKING_TRACK_OPTIONS)[number];
-export type TrackName = "Instrumental" | "Voice Main" | BackingTrackName;
+export type BackingGenerator = "local" | "luna" | "terra";
+export type TrackName = string;
+export type BackingTrackInstance = {
+  id: string;
+  name: string;
+  style: BackingTrackName;
+};
 export type ClipColor = "cyan" | "violet" | "pink" | "amber" | "lime" | "silver";
 
 export type TrackChannelState = {
@@ -109,7 +105,9 @@ export type TimeSignatureSegment = {
 };
 
 export type BackingTrackContent = {
+  id: string;
   track: BackingTrackName;
+  name: string;
   voiceProfileId: string;
   hasAudio: boolean;
   audioDurationSeconds: number;
@@ -120,7 +118,7 @@ export type BackingTrackContent = {
 export type VoiceProfileOption = {
   id: string;
   name: string;
-  quality: "balanced" | "high";
+  quality: "low" | "balanced" | "high";
   active: boolean;
 };
 
@@ -143,11 +141,12 @@ export type StudioProject = {
   timelineDurationSeconds: number;
   initialPlayhead: number;
   initialVolume: number;
+  initialInstrumentalVolume: number;
   initialLoopActive: boolean;
   initialCycleRange: CycleRange;
   backingTrackOptions: readonly BackingTrackName[];
   voiceProfiles: VoiceProfileOption[];
-  initialBackingTracks: BackingTrackName[];
+  initialBackingTracks: BackingTrackInstance[];
   initialTrackState: Array<{ track: string; state: TrackChannelState }>;
   initialTrackLayerState: Array<{ track: string; state: TrackLayerState }>;
   clips: VocalClip[];

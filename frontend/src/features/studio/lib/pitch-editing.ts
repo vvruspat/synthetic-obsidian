@@ -2,13 +2,24 @@ import type { VocalClip } from "@/domain/studio";
 import { PITCH_ROWS, PITCH_TOP } from "@/features/studio/lib/pitch";
 
 export const PITCH_BOTTOM = PITCH_TOP - PITCH_ROWS + 1;
-export const MIN_CLIP_WIDTH_PERCENT = 0.25;
+export const MIN_CLIP_WIDTH_PERCENT = 0.01;
+export const MIN_NOTE_LENGTH_SECONDS = 0.04;
 export const MIN_GAIN_DB = -24;
 export const MAX_GAIN_DB = 12;
 export const MAX_VIBRATO_SCALE = 4;
 
 const clamp = (value: number, minimum: number, maximum: number) =>
   Math.max(minimum, Math.min(maximum, value));
+
+export function getMinimumClipWidthPercent(timelineDurationSeconds: number) {
+  if (!Number.isFinite(timelineDurationSeconds) || timelineDurationSeconds <= 0) {
+    return MIN_CLIP_WIDTH_PERCENT;
+  }
+  return Math.max(
+    MIN_CLIP_WIDTH_PERCENT,
+    Math.min(100, (MIN_NOTE_LENGTH_SECONDS / timelineDurationSeconds) * 100),
+  );
+}
 
 function selectedClipSet(clipIds: readonly string[]) {
   return new Set(clipIds);
@@ -73,15 +84,20 @@ export function moveSelectedClips(
   );
 }
 
-export function stretchClipTo(clips: VocalClip[], clipId: string, requestedEndX: number) {
+export function stretchClipTo(
+  clips: VocalClip[],
+  clipId: string,
+  requestedEndX: number,
+  minimumWidth = MIN_CLIP_WIDTH_PERCENT,
+) {
   return clips.map((clip) => {
     if (clip.id !== clipId) return clip;
     const nextWidth = clamp(
       requestedEndX - clip.x,
-      MIN_CLIP_WIDTH_PERCENT,
-      Math.max(MIN_CLIP_WIDTH_PERCENT, 100 - clip.x),
+      minimumWidth,
+      Math.max(minimumWidth, 100 - clip.x),
     );
-    const scale = nextWidth / Math.max(MIN_CLIP_WIDTH_PERCENT, clip.width);
+    const scale = nextWidth / Math.max(minimumWidth, clip.width);
 
     return {
       ...clip,
@@ -94,13 +110,18 @@ export function stretchClipTo(clips: VocalClip[], clipId: string, requestedEndX:
   });
 }
 
-export function stretchClipStartTo(clips: VocalClip[], clipId: string, requestedStartX: number) {
+export function stretchClipStartTo(
+  clips: VocalClip[],
+  clipId: string,
+  requestedStartX: number,
+  minimumWidth = MIN_CLIP_WIDTH_PERCENT,
+) {
   return clips.map((clip) => {
     if (clip.id !== clipId) return clip;
     const endX = clip.x + clip.width;
-    const nextStartX = clamp(requestedStartX, 0, endX - MIN_CLIP_WIDTH_PERCENT);
+    const nextStartX = clamp(requestedStartX, 0, endX - minimumWidth);
     const nextWidth = endX - nextStartX;
-    const scale = nextWidth / Math.max(MIN_CLIP_WIDTH_PERCENT, clip.width);
+    const scale = nextWidth / Math.max(minimumWidth, clip.width);
 
     return {
       ...clip,
@@ -140,9 +161,10 @@ export function createManualClip(
   pitch: number,
   width: number,
   color: VocalClip["color"],
+  minimumWidth = MIN_CLIP_WIDTH_PERCENT,
 ): VocalClip {
-  const safeX = clamp(x, 0, 100 - MIN_CLIP_WIDTH_PERCENT);
-  const safeWidth = clamp(width, MIN_CLIP_WIDTH_PERCENT, 100 - safeX);
+  const safeX = clamp(x, 0, 100 - minimumWidth);
+  const safeWidth = clamp(width, minimumWidth, 100 - safeX);
   const safePitch = clamp(pitch, PITCH_BOTTOM, PITCH_TOP);
   return {
     id,
@@ -159,12 +181,18 @@ export function createManualClip(
   };
 }
 
-export function splitClipAt(clips: VocalClip[], clipId: string, splitX: number, rightId: string) {
+export function splitClipAt(
+  clips: VocalClip[],
+  clipId: string,
+  splitX: number,
+  rightId: string,
+  minimumWidth = MIN_CLIP_WIDTH_PERCENT,
+) {
   const source = clips.find((clip) => clip.id === clipId);
   if (
     !source ||
-    splitX <= source.x + MIN_CLIP_WIDTH_PERCENT ||
-    splitX >= source.x + source.width - MIN_CLIP_WIDTH_PERCENT
+    splitX <= source.x + minimumWidth ||
+    splitX >= source.x + source.width - minimumWidth
   ) {
     return clips;
   }

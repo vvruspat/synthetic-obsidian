@@ -10,6 +10,7 @@ import {
   SignalIcon,
 } from "@heroicons/react/24/outline";
 import type { CorrectionToolId } from "@/domain/studio";
+import { formatShortcut, type ShortcutBindings } from "@/features/studio/lib/hotkeys";
 import { SelectMenu, type SelectMenuOption } from "@/ui";
 
 const correctionTools: SelectMenuOption<CorrectionToolId>[] = [
@@ -27,9 +28,19 @@ const correctionTools: SelectMenuOption<CorrectionToolId>[] = [
 type CorrectionToolSelectProps = {
   label: string;
   value: CorrectionToolId;
+  mouseButton: "left" | "right";
+  shortcuts: ShortcutBindings;
   onChange(value: CorrectionToolId): void;
 };
 
-export function CorrectionToolSelect(props: CorrectionToolSelectProps) {
-  return <SelectMenu {...props} options={correctionTools} className="tool-selector" />;
+export function CorrectionToolSelect({
+  mouseButton,
+  shortcuts,
+  ...props
+}: CorrectionToolSelectProps) {
+  const options = correctionTools.map((option) => ({
+    ...option,
+    shortcut: formatShortcut(shortcuts[`tool.${mouseButton}.${option.value}`]),
+  }));
+  return <SelectMenu {...props} options={options} className="tool-selector" />;
 }

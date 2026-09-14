@@ -1,4 +1,6 @@
 import type {
+  BackingGenerator,
+  BackingTrackInstance,
   BackingTrackName,
   CycleRange,
   StudioProject,
@@ -8,6 +10,7 @@ import type {
 } from "@/domain/studio";
 
 export type ProjectAction =
+  | "new-project"
   | "open-audio"
   | "open-instrumental"
   | "open-project"
@@ -24,6 +27,17 @@ export type ProjectAction =
   | "export-all-tracks"
   | "export-midi"
   | "validate";
+
+export type AudioSettingsState = {
+  deviceType: string;
+  inputDevices: string[];
+  outputDevices: string[];
+  inputDevice: string;
+  outputDevice: string;
+  sampleRate: number;
+  bufferSize: number;
+  error: string;
+};
 
 export type VoiceTrainingSource = {
   id: string;
@@ -77,6 +91,9 @@ export type VoiceTrainingState = {
   activeProfileName: string;
   outputDirectory: string;
   fineTuningAvailable: boolean;
+  runtimeStatus: "ready" | "missing" | "unsupported";
+  runtimeMessage: string;
+  runtimeInstallDirectory: string;
   canStartTraining: boolean;
   jobs: VoiceTrainingJob[];
 };
@@ -84,6 +101,12 @@ export type VoiceTrainingState = {
 export type PluginCommand =
   | { type: "frontend-ready" }
   | { type: "project-action"; action: ProjectAction }
+  | {
+      type: "audio-settings";
+      action: "request" | "set-devices" | "test-output";
+      inputDevice?: string;
+      outputDevice?: string;
+    }
   | {
       type: "voice-training";
       action:
@@ -107,6 +130,7 @@ export type PluginCommand =
   | { type: "set-loop"; active: boolean; range: CycleRange }
   | { type: "set-playhead"; position: number }
   | { type: "set-volume"; value: number }
+  | { type: "set-instrumental-volume"; value: number }
   | {
       type: "set-track-state";
       track: string;
@@ -118,12 +142,14 @@ export type PluginCommand =
       state: TrackLayerState;
     }
   | { type: "select-tracks"; tracks: TrackName[] }
-  | { type: "add-backing-track"; track: BackingTrackName }
-  | { type: "regenerate-backing-track"; track: BackingTrackName }
-  | { type: "render-backing-track"; track: BackingTrackName }
+  | { type: "add-backing-track"; track: BackingTrackName; generator?: BackingGenerator }
+  | { type: "regenerate-backing-track"; track: string; generator?: BackingGenerator }
+  | { type: "render-backing-track"; track: string }
+  | { type: "remove-backing-track"; track: string }
+  | { type: "delete-voice-profile"; profileId: string }
   | {
       type: "set-backing-voice-profile";
-      track: BackingTrackName;
+      track: string;
       profileId: string;
     }
   | {
@@ -200,6 +226,7 @@ export type PluginCommand =
 
 export type PluginEvent =
   | { type: "project-state"; project: StudioProject }
+  | { type: "audio-settings-state"; state: AudioSettingsState }
   | { type: "voice-training-state"; state: VoiceTrainingState }
   | {
       type: "status-state";
@@ -219,6 +246,7 @@ export type PluginEvent =
   | { type: "transport-state"; playing: boolean; playhead: number }
   | { type: "loop-state"; active: boolean; range: CycleRange }
   | { type: "volume-state"; value: number }
+  | { type: "instrumental-volume-state"; value: number }
   | { type: "output-meter-state"; left: number; right: number }
   | {
       type: "track-state";
@@ -230,7 +258,7 @@ export type PluginEvent =
       track: string;
       state: TrackLayerState;
     }
-  | { type: "backing-track-added"; track: BackingTrackName }
+  | { type: "backing-track-created"; track: BackingTrackInstance }
   | {
       type: "clip-pitch-state";
       track: Exclude<TrackName, "Instrumental">;

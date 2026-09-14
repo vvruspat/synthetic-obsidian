@@ -21,6 +21,14 @@ from detected beat accents and falls back to low-confidence 4/4 when evidence is
 weak. Imported annotation JSON may contain arbitrary signature changes and
 denominators; those are preserved and rendered without flattening.
 
+Instrumental harmony analysis retains the detected beat phase, evaluates chord
+states on half-beat cells, smooths them as a sequence, and then refines each
+state change against frame-level harmonic novelty. CQT/CENS chroma, low-register
+chroma, tuning compensation, and a weak detected-key prior are combined so mix
+residue is less likely to be mistaken for a seventh or suspension. Every chord
+segment includes confidence and alternative labels; low-confidence context is
+not treated as an absolute pitch-correction constraint.
+
 ## Build
 
 ```bash
@@ -37,10 +45,12 @@ python3 /Users/aleksandrkolesov/synthetic-obsidian/tools/vocal_annotation_tool/v
   /path/to/sample.annotation.json
 ```
 
-## SoulX-Singer-SVC runtime
+## SoulX-Singer runtime
 
 `Render BV` expects an isolated Python 3.10 runtime and the official SVC
-checkpoint outside the repository:
+checkpoint outside the repository. SVC mode preserves the source vocal's words,
+timing, consonants, breath, and timbre while replacing its F0 with the generated
+backing-vocal melody.
 
 ```bash
 runtime="$HOME/.synthetic_obsidian/runtime/soulx-singer"
@@ -100,11 +110,16 @@ mel/audio at each offline render segment.
 - MIDI export writes pitch-bend range setup and pitch-wheel events from note
   curves. This represents vocal slides in standard monophonic MIDI playback.
 - `Render BV` uses SoulX-Singer-SVC in a persistent offline worker. The main
-  vocal supplies phonetic timing and a short same-singer timbre prompt, while
-  generated backing notes supply a replacement 50 Hz F0 contour. The worker is
-  loaded lazily on the first render and reused for later renders; no model code
-  runs on the audio thread. Runtime files and the 2.8 GB checkpoint live outside
-  the repository under `~/.synthetic_obsidian/`.
+  vocal supplies words, consonants, breaths, timing, and timbre; generated
+  backing notes supply the replacement F0 contour. The worker is started with
+  the application and reused for later renders; no model code runs on the audio
+  thread. Runtime files and the checkpoint live outside the repository under
+  `~/.synthetic_obsidian/`.
+- Completed SoulX LoRA profiles include a small singer-expression profile next
+  to the adapter. It captures robust vibrato and pitch-transition statistics
+  from the training vocals. These profiles remain available to the legacy SVC
+  renderer. The SVC F0 builder uses those statistics for vibrato and legato
+  while ignoring tiny resampling jitter that is not real expression.
 - `Lyrics` imports a text file and runs an offline torchaudio wav2vec2 forced
   alignment subprocess against the currently loaded audio. The aligned word
   timings are split into rough syllables, placed back onto the waveform, and used

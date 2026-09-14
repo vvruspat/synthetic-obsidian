@@ -22,6 +22,7 @@ import {
 import {
   createManualClip,
   getJoinCandidateIds,
+  getMinimumClipWidthPercent,
   joinClips,
   moveSelectedClips,
   nextManualClipId,
@@ -32,7 +33,12 @@ import {
   stretchClipTo,
 } from "@/features/studio/lib/pitch-editing";
 import { getNextTrackSelection } from "@/features/studio/lib/track-selection";
-import { formatTime, getCenteredTimelineScrollLeft } from "@/features/studio/lib/transport";
+import {
+  formatTime,
+  getCenteredTimelineScrollLeft,
+  getGestureZoom,
+  getMinimumCycleWidthPercent,
+} from "@/features/studio/lib/transport";
 import {
   decodeWaveform,
   getDecodedWaveformPeak,
@@ -58,6 +64,19 @@ describe("studio value helpers", () => {
     expect(getCenteredTimelineScrollLeft(0.25, 3200, 1000)).toBe(300);
     expect(getCenteredTimelineScrollLeft(0, 3200, 1000)).toBe(0);
     expect(getCenteredTimelineScrollLeft(1, 3200, 1000)).toBe(2200);
+  });
+
+  it("scales gesture zoom continuously and clamps extreme deltas", () => {
+    expect(getGestureZoom(2, -20, 1, 32)).toBeCloseTo(2.255, 3);
+    expect(getGestureZoom(2, 20, 1, 32)).toBeCloseTo(1.774, 3);
+    expect(getGestureZoom(31, -500, 1, 32)).toBe(32);
+    expect(getGestureZoom(1, 500, 1, 32)).toBe(1);
+  });
+
+  it("keeps the minimum cycle length at one second", () => {
+    expect(getMinimumCycleWidthPercent(8)).toBe(12.5);
+    expect(getMinimumCycleWidthPercent(300)).toBeCloseTo(1 / 3);
+    expect(getMinimumCycleWidthPercent(0.5)).toBe(100);
   });
 
   it("adapts timeline bar labels to horizontal zoom", () => {
@@ -206,6 +225,15 @@ describe("studio value helpers", () => {
     expect(joined).toHaveLength(1);
     expect(joined[0].width).toBe(30);
     expect(getJoinCandidateIds(split, [], "n001")).toEqual(["n001", "n002"]);
+  });
+
+  it("keeps the Flex minimum tied to 40 ms instead of project length", () => {
+    const minimumWidth = getMinimumClipWidthPercent(300);
+    const clip = createManualClip("n-short", 10, 64, 0.2, "cyan", minimumWidth);
+    const stretched = stretchClipTo([clip], clip.id, 10.02, minimumWidth);
+
+    expect(minimumWidth).toBeCloseTo(0.013333, 5);
+    expect(stretched[0].width).toBeCloseTo(0.02, 5);
   });
 
   it("edits vibrato and gain without changing the note anchor", () => {

@@ -1,6 +1,6 @@
 import { ArrowPathIcon, SpeakerWaveIcon } from "@heroicons/react/24/outline";
 import type { ProjectAction } from "@/bridge/plugin-bridge";
-import type { BackingTrackName, StudioProject, VoiceProfileOption } from "@/domain/studio";
+import type { StudioProject, VoiceProfileOption } from "@/domain/studio";
 import { BackingTrackSelect } from "@/features/studio/components/BackingTrackSelect";
 import { PianoRoll } from "@/features/studio/components/PianoRoll";
 import { TimelineRuler } from "@/features/studio/components/TimelineRuler";
@@ -22,6 +22,7 @@ type ArrangementProps = {
   backingGenerationTrack: string;
   backingAudioRenderTrack: string;
   onProjectAction(action: ProjectAction): void;
+  onOpenVoiceTraining(): void;
 };
 
 function TrackLaneOverlay({
@@ -82,8 +83,10 @@ function BackingTrackActionOverlay({
   onRender,
   onRegenerate,
   onVoiceProfileChange,
+  onDeleteVoiceProfile,
+  onOpenVoiceTraining,
 }: {
-  track: BackingTrackName;
+  track: string;
   generating: boolean;
   rendering: boolean;
   disabled: boolean;
@@ -93,6 +96,8 @@ function BackingTrackActionOverlay({
   onRender(): void;
   onRegenerate(): void;
   onVoiceProfileChange(profileId: string): void;
+  onDeleteVoiceProfile(profileId: string): void;
+  onOpenVoiceTraining(): void;
 }) {
   const busy = generating || rendering;
 
@@ -105,6 +110,8 @@ function BackingTrackActionOverlay({
         value={voiceProfileId}
         disabled={busy || disabled}
         onChange={onVoiceProfileChange}
+        onDelete={onDeleteVoiceProfile}
+        onCreateVoice={onOpenVoiceTraining}
       />
       <button type="button" disabled={busy || disabled} onClick={onRender}>
         <SpeakerWaveIcon aria-hidden="true" />
@@ -134,20 +141,27 @@ export function Arrangement({
   backingGenerationTrack,
   backingAudioRenderTrack,
   onProjectAction,
+  onOpenVoiceTraining,
 }: ArrangementProps) {
   const {
     backingTracks,
+    backingGenerator,
     cycleRange,
     horizontalZoom,
     looping,
     musicalTimeline,
     playhead,
     selectedTracks,
+    trackLayerState,
     timeLabel,
     refs,
     actions,
   } = controller;
   const tempoPath = createTempoPath(musicalTimeline);
+  const voiceLayerState = trackLayerState["Voice Main"] ?? {
+    audioMuted: false,
+    notesMuted: false,
+  };
 
   return (
     <section
@@ -174,8 +188,11 @@ export function Arrangement({
         />
         <div className="backing-track-toolbar">
           <BackingTrackSelect
-            options={project.backingTrackOptions.filter((name) => !backingTracks.includes(name))}
-            disabled={backingTracks.length === project.backingTrackOptions.length}
+            options={project.backingTrackOptions}
+            generator={backingGenerator}
+            disabled={!project.hasVocal}
+            disabledReason="Load the main vocal before adding a backing track"
+            onGeneratorChange={actions.setBackingGenerator}
             onSelect={actions.addBackingTrack}
           />
         </div>
@@ -195,6 +212,7 @@ export function Arrangement({
           horizontalZoom={horizontalZoom}
           grid={musicalTimeline.grid}
           onCycleRangeChange={actions.setCycleRange}
+          onCycleRangeCommit={actions.commitCycleRange}
           onLoopingChange={actions.setLooping}
           onPlayheadChange={actions.setPlayheadPosition}
           onPlayheadPointerDown={actions.startPlayheadDrag}
@@ -286,7 +304,7 @@ export function Arrangement({
                 aria-pressed={selectedTracks.includes("Voice Main")}
                 onClick={(event) => actions.selectTrack("Voice Main", event.shiftKey)}
               />
-              {project.hasVocal ? (
+              {project.hasVocal && !voiceLayerState.audioMuted ? (
                 <TrackWaveform
                   variant="voice"
                   waveform={project.vocalWaveform}
@@ -302,10 +320,14 @@ export function Arrangement({
               ref={refs.arrangementTrackScrollRef}
               onScroll={() => actions.syncTrackScroll("arrangement")}
             >
-              {backingTracks.map((name) => {
-                const content = project.backingTrackContents.find((item) => item.track === name);
-                const generating = backingGenerationRunning && backingGenerationTrack === name;
-                const rendering = backingAudioRenderRunning && backingAudioRenderTrack === name;
+              {backingTracks.map((track) => {
+                const content = project.backingTrackContents.find((item) => item.id === track.id);
+                const layerState = trackLayerState[track.id] ?? {
+                  audioMuted: false,
+                  notesMuted: false,
+                };
+                const generating = backingGenerationRunning && backingGenerationTrack === track.id;
+                const rendering = backingAudioRenderRunning && backingAudioRenderTrack === track.id;
                 const anotherTrackBusy =
                   (backingGenerationRunning || backingAudioRenderRunning) &&
                   !generating &&
@@ -313,18 +335,18 @@ export function Arrangement({
                 return (
                   <div
                     className={`audio-lane harmony-lane ${
-                      selectedTracks.includes(name) ? "is-selected" : ""
+                      selectedTracks.includes(track.id) ? "is-selected" : ""
                     }`}
-                    key={name}
+                    key={track.id}
                   >
                     <button
                       type="button"
                       className="track-lane-selection-target"
-                      aria-label={`Select ${name}`}
-                      aria-pressed={selectedTracks.includes(name)}
-                      onClick={(event) => actions.selectTrack(name, event.shiftKey)}
+                      aria-label={`Select ${track.name}`}
+                      aria-pressed={selectedTracks.includes(track.id)}
+                      onClick={(event) => actions.selectTrack(track.id, event.shiftKey)}
                     />
-                    {content?.hasAudio ? (
+                    {content?.hasAudio && !layerState.audioMuted ? (
                       <TrackWaveform
                         variant="backing"
                         waveform={content.waveform}
@@ -334,35 +356,39 @@ export function Arrangement({
                         }
                       />
                     ) : null}
-                    <div className="harmony-notes">
-                      {(content?.clips ?? []).map((clip) => (
-                        <i
-                          key={clip.id}
-                          style={{
-                            left: `${clip.x}%`,
-                            top: `${Math.max(6, Math.min(76, pitchToTop(clip.pitch)))}%`,
-                            width: `${getClipVisualWidthPercent(clip.width)}%`,
-                          }}
-                        />
-                      ))}
-                    </div>
+                    {!layerState.notesMuted ? (
+                      <div className="harmony-notes">
+                        {(content?.clips ?? []).map((clip) => (
+                          <i
+                            key={clip.id}
+                            style={{
+                              left: `${clip.x}%`,
+                              top: `${Math.max(6, Math.min(76, pitchToTop(clip.pitch)))}%`,
+                              width: `${getClipVisualWidthPercent(clip.width)}%`,
+                            }}
+                          />
+                        ))}
+                      </div>
+                    ) : null}
                     {!content?.hasAudio ? (
                       <BackingTrackActionOverlay
-                        track={name}
+                        track={track.name}
                         generating={generating}
                         rendering={rendering}
                         disabled={anotherTrackBusy}
                         status={status}
                         voiceProfiles={project.voiceProfiles}
                         voiceProfileId={content?.voiceProfileId ?? ""}
-                        onRender={() => actions.renderBackingTrack(name)}
-                        onRegenerate={() => actions.regenerateBackingTrack(name)}
+                        onRender={() => actions.renderBackingTrack(track.id)}
+                        onRegenerate={() => actions.regenerateBackingTrack(track.id)}
                         onVoiceProfileChange={(profileId) =>
-                          actions.setBackingVoiceProfile(name, profileId)
+                          actions.setBackingVoiceProfile(track.id, profileId)
                         }
+                        onDeleteVoiceProfile={actions.deleteVoiceProfile}
+                        onOpenVoiceTraining={onOpenVoiceTraining}
                       />
                     ) : null}
-                    <span>{name}</span>
+                    <span>{track.name}</span>
                   </div>
                 );
               })}
@@ -376,6 +402,7 @@ export function Arrangement({
             backingRenderTrack={
               backingAudioRenderRunning ? backingAudioRenderTrack : backingGenerationTrack
             }
+            onOpenVoiceTraining={onOpenVoiceTraining}
           />
         </div>
       </div>

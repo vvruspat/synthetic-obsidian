@@ -94,10 +94,17 @@ export const mockStudioProject: StudioProject = {
   timelineDurationSeconds: 8,
   initialPlayhead: 12,
   initialVolume: 76,
+  initialInstrumentalVolume: 70,
   initialLoopActive: true,
   initialCycleRange: { start: 25, end: 50 },
   backingTrackOptions: BACKING_TRACK_OPTIONS,
   voiceProfiles: [
+    {
+      id: "source-timbre",
+      name: "Source timbre",
+      quality: "low",
+      active: false,
+    },
     {
       id: "lena-lora-demo",
       name: "Lena",
@@ -105,15 +112,15 @@ export const mockStudioProject: StudioProject = {
       active: true,
     },
   ],
-  initialBackingTracks: ["Third Above"],
+  initialBackingTracks: [{ id: "backing-third-up-1", name: "Third Above", style: "Third Above" }],
   initialTrackState: [
     { track: "Instrumental", state: { mute: false, solo: false } },
     { track: "Voice Main", state: { mute: false, solo: false } },
-    { track: "Third Above", state: { mute: false, solo: false } },
+    { track: "backing-third-up-1", state: { mute: false, solo: false } },
   ],
   initialTrackLayerState: [
     { track: "Voice Main", state: { audioMuted: false, notesMuted: false } },
-    { track: "Third Above", state: { audioMuted: false, notesMuted: false } },
+    { track: "backing-third-up-1", state: { audioMuted: false, notesMuted: false } },
   ],
   clips: mockClips,
   backingClips: mockClips
@@ -121,7 +128,9 @@ export const mockStudioProject: StudioProject = {
     .map((clip) => ({ ...clip, id: `backing-${clip.id}`, pitch: clip.pitch + 4 })),
   backingTrackContents: [
     {
+      id: "backing-third-up-1",
       track: "Third Above",
+      name: "Third Above",
       voiceProfileId: "lena-lora-demo",
       hasAudio: false,
       audioDurationSeconds: 0,
@@ -133,7 +142,7 @@ export const mockStudioProject: StudioProject = {
   ],
   pitchEditorHistory: [
     { track: "Voice Main", canUndo: false, canRedo: false },
-    { track: "Third Above", canUndo: false, canRedo: false },
+    { track: "backing-third-up-1", canUndo: false, canRedo: false },
   ],
   vocalWaveform: createWaveform(37),
   instrumentalWaveform: createWaveform(23),

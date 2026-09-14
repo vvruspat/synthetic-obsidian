@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "platform": "macos-arm64",
+  "packs": {
+    "core": {
+      "version": "0.1.0",
+      "relativePath": "Packs/core/0.1.0"
+    },
+    "backing-notes": {
+      "version": "0.1.0",
+      "relativePath": "Packs/backing-notes/0.1.0"
+    },
+    "voice-engine": {
+      "version": "0.1.0",
+      "relativePath": "Packs/voice-engine/0.1.0"
+    }
+  }
+}

@@ -32,6 +32,10 @@ from soulx_lora import (
     save_adapter,
     trainable_lora_parameters,
 )
+from vocal_expression import (
+    analyze_expression_profile,
+    expression_profile_path_for_adapter,
+)
 
 SAMPLE_RATE = 24_000
 HOP_SIZE = 480
@@ -293,17 +297,15 @@ def flow_matching_loss(decoder, prompt: dict[str, Any], target: dict[str, Any], 
     prompt_condition = prompt["condition"].float().to(device)
     target_condition = target["condition"].float().to(device)
 
-    mel = torch.cat([prompt_mel, target_mel, prompt_mel], dim=1)
-    condition = torch.cat(
-        [prompt_condition, target_condition, prompt_condition],
-        dim=1,
-    )
+    # SoulX inference conditions the target on one prefix prompt. Matching that
+    # layout here avoids teaching the adapter to rely on unavailable future audio.
+    mel = torch.cat([prompt_mel, target_mel], dim=1)
+    condition = torch.cat([prompt_condition, target_condition], dim=1)
     frame_mask = torch.ones(mel.shape[:2], device=device)
     prompt_mask = torch.cat(
         [
             torch.ones(prompt_mel.shape[:2], device=device),
             torch.zeros(target_mel.shape[:2], device=device),
-            torch.ones(prompt_mel.shape[:2], device=device),
         ],
         dim=1,
     )
@@ -321,6 +323,105 @@ def flow_matching_loss(decoder, prompt: dict[str, Any], target: dict[str, Any], 
     return weighted.sum() / denominator
 
 
+def split_feature_cache(
+    features: list[dict[str, Any]],
+    *,
+    validation_fraction: float,
+    seed: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Create a deterministic holdout while keeping two training examples."""
+    if len(features) < 4 or validation_fraction <= 0.0:
+        return list(features), []
+    validation_count = max(2, int(round(len(features) * validation_fraction)))
+    validation_count = min(validation_count, len(features) - 2)
+    indices = np.random.default_rng(seed).permutation(len(features))
+    validation_indices = set(int(index) for index in indices[:validation_count])
+    training = [
+        feature for index, feature in enumerate(features)
+        if index not in validation_indices
+    ]
+    validation = [
+        feature for index, feature in enumerate(features)
+        if index in validation_indices
+    ]
+    return training, validation
+
+
+def learning_rate_scale(
+    step: int,
+    total_steps: int,
+    *,
+    warmup_fraction: float = 0.05,
+    minimum_scale: float = 0.10,
+) -> float:
+    warmup_steps = max(1, int(round(total_steps * warmup_fraction)))
+    if step <= warmup_steps:
+        return step / warmup_steps
+    decay_steps = max(1, total_steps - warmup_steps)
+    progress = min(1.0, (step - warmup_steps) / decay_steps)
+    cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
+    return minimum_scale + (1.0 - minimum_scale) * cosine
+
+
+def snapshot_parameters(parameters: list[torch.nn.Parameter]) -> list[torch.Tensor]:
+    return [parameter.detach().float().cpu().clone() for parameter in parameters]
+
+
+def restore_parameters(
+    parameters: list[torch.nn.Parameter],
+    snapshot: list[torch.Tensor],
+) -> None:
+    if len(parameters) != len(snapshot):
+        raise RuntimeError("LoRA parameter snapshot does not match the adapter")
+    with torch.no_grad():
+        for parameter, saved in zip(parameters, snapshot, strict=True):
+            parameter.copy_(saved.to(device=parameter.device, dtype=parameter.dtype))
+
+
+def evaluate_adapter(
+    decoder,
+    features: list[dict[str, Any]],
+    *,
+    device: torch.device,
+    maximum_pairs: int = 4,
+    seed: int = 2027,
+) -> float | None:
+    if len(features) < 2:
+        return None
+    was_training = decoder.training
+    previous_cfg_drop = float(decoder.cfg_drop_prob)
+    cpu_rng_state = torch.random.get_rng_state()
+    mps_rng_state = (
+        torch.mps.get_rng_state()
+        if device.type == "mps" and hasattr(torch.mps, "get_rng_state")
+        else None
+    )
+    torch.manual_seed(seed)
+    if device.type == "mps" and hasattr(torch.mps, "manual_seed"):
+        torch.mps.manual_seed(seed)
+    decoder.eval()
+    decoder.cfg_drop_prob = 0.0
+    losses: list[float] = []
+    try:
+        with torch.no_grad():
+            for target_index in range(min(maximum_pairs, len(features))):
+                prompt_index = (target_index + 1) % len(features)
+                loss = flow_matching_loss(
+                    decoder,
+                    features[prompt_index],
+                    features[target_index],
+                    device,
+                )
+                losses.append(float(loss.detach().cpu()))
+    finally:
+        torch.random.set_rng_state(cpu_rng_state)
+        if mps_rng_state is not None and hasattr(torch.mps, "set_rng_state"):
+            torch.mps.set_rng_state(mps_rng_state)
+        decoder.cfg_drop_prob = previous_cfg_drop
+        decoder.train(was_training)
+    return float(np.mean(losses))
+
+
 def train_adapter(
     model,
     feature_cache: list[dict[str, Any]],
@@ -328,40 +429,75 @@ def train_adapter(
     *,
     device: torch.device,
     reporter: JobReporter,
-) -> tuple[LoRAConfig, float]:
+) -> tuple[LoRAConfig, float, float | None]:
     training = request["training"]
     lora_config = LoRAConfig.from_dict(training["lora"])
     model.cfm_decoder.to(device)
     modules = inject_lora(model, lora_config)
     parameters = list(trainable_lora_parameters(model))
+    base_learning_rate = float(training["learningRate"])
     optimizer = torch.optim.AdamW(
         parameters,
-        lr=float(training["learningRate"]),
+        lr=base_learning_rate,
         weight_decay=0.01,
     )
     decoder = model.cfm_decoder.model
     decoder.train()
-    decoder.cfg_drop_prob = 0.0
+    decoder.cfg_drop_prob = float(training.get("cfgDropProbability", 0.15))
     steps = int(training["steps"])
     accumulation = max(1, int(training.get("gradientAccumulation", 1)))
-    random = np.random.default_rng(int(training.get("seed", 1337)))
+    seed = int(training.get("seed", 1337))
+    training_features, validation_features = split_feature_cache(
+        feature_cache,
+        validation_fraction=float(training.get("validationFraction", 0.15)),
+        seed=seed,
+    )
+    random = np.random.default_rng(seed + 1)
+    validation_interval = max(10, int(training.get("validationInterval", 40)))
     running_loss = 0.0
     optimizer.zero_grad(set_to_none=True)
     reporter.log(
         f"Injected {len(modules)} LoRA modules with "
         f"{sum(parameter.numel() for parameter in parameters):,} trainable parameters."
     )
+    reporter.log(
+        f"Using {len(training_features)} training and "
+        f"{len(validation_features)} validation segments."
+    )
+    best_validation_loss = evaluate_adapter(
+        decoder,
+        validation_features,
+        device=device,
+    )
+    best_parameters = (
+        snapshot_parameters(parameters)
+        if best_validation_loss is not None
+        else None
+    )
 
     for step in range(1, steps + 1):
         reporter.check_cancelled()
-        target_index = int(random.integers(0, len(feature_cache)))
-        prompt_index = int(random.integers(0, len(feature_cache) - 1))
+        current_learning_rate = (
+            base_learning_rate
+            * learning_rate_scale(
+                step,
+                steps,
+                warmup_fraction=float(training.get("warmupFraction", 0.05)),
+                minimum_scale=float(
+                    training.get("minimumLearningRateScale", 0.10)
+                ),
+            )
+        )
+        for parameter_group in optimizer.param_groups:
+            parameter_group["lr"] = current_learning_rate
+        target_index = int(random.integers(0, len(training_features)))
+        prompt_index = int(random.integers(0, len(training_features) - 1))
         if prompt_index >= target_index:
             prompt_index += 1
         loss = flow_matching_loss(
             decoder,
-            feature_cache[prompt_index],
-            feature_cache[target_index],
+            training_features[prompt_index],
+            training_features[target_index],
             device,
         )
         if not torch.isfinite(loss):
@@ -375,19 +511,53 @@ def train_adapter(
 
         loss_value = float(loss.detach().cpu())
         running_loss = loss_value if step == 1 else running_loss * 0.96 + loss_value * 0.04
+        should_validate = (
+            validation_features
+            and (step % validation_interval == 0 or step == steps)
+        )
+        if should_validate:
+            validation_loss = evaluate_adapter(
+                decoder,
+                validation_features,
+                device=device,
+            )
+            if (
+                validation_loss is not None
+                and (
+                    best_validation_loss is None
+                    or validation_loss < best_validation_loss
+                )
+            ):
+                best_validation_loss = validation_loss
+                best_parameters = snapshot_parameters(parameters)
         if step == 1 or step % 5 == 0 or step == steps:
             reporter.update(
                 status="training",
                 stage="Training LoRA",
-                message=f"Optimising singer adapter · loss {running_loss:.4f}",
+                message=(
+                    f"Optimising singer adapter · train {running_loss:.4f}"
+                    + (
+                        f" · validation {best_validation_loss:.4f}"
+                        if best_validation_loss is not None
+                        else ""
+                    )
+                ),
                 progress=0.52 + 0.43 * step / max(1, steps),
                 current_step=step,
                 loss=running_loss,
+                validationLoss=best_validation_loss,
+                learningRate=current_learning_rate,
             )
         del loss
 
+    if best_parameters is not None:
+        restore_parameters(parameters, best_parameters)
+        reporter.log(
+            "Restored the LoRA checkpoint with validation loss "
+            f"{best_validation_loss:.4f}."
+        )
     decoder.eval()
-    return lora_config, running_loss
+    return lora_config, running_loss, best_validation_loss
 
 
 def copy_sources(
@@ -418,7 +588,9 @@ def write_profile_manifest(
     profile_dir: Path,
     copied_sources: list[Path],
     adapter_path: Path,
+    expression_profile_path: Path,
     final_loss: float,
+    validation_loss: float | None,
 ) -> None:
     source_entries = []
     request_sources = request["sources"]
@@ -446,7 +618,11 @@ def write_profile_manifest(
         "sources": source_entries,
         "primaryReference": source_entries[0]["file"],
         "adapterFile": str(adapter_path.relative_to(profile_dir)),
+        "expressionProfileFile": str(
+            expression_profile_path.relative_to(profile_dir)
+        ),
         "finalLoss": final_loss,
+        "bestValidationLoss": validation_loss,
         "baseModel": request["modelPath"],
     }
     atomic_json_write(profile_dir / "manifest.json", manifest)
@@ -466,6 +642,7 @@ def run(job_dir: Path) -> None:
     reporter = JobReporter(job_dir, request)
     profile_dir = Path(request["profileDirectory"]).expanduser().resolve()
     adapter_path = profile_dir / "adapter" / "soulx-lora.safetensors"
+    expression_profile_path = expression_profile_path_for_adapter(adapter_path)
 
     try:
         reporter.log(f"Starting detached training process {os.getpid()}.")
@@ -479,6 +656,15 @@ def run(job_dir: Path) -> None:
             reporter=reporter,
         )
         reporter.log(f"Selected {len(segments)} voiced training segments.")
+        expression_profile = analyze_expression_profile(
+            (f0 for _, f0, _ in segments),
+            f0_rate=F0_RATE,
+        )
+        reporter.log(
+            "Singer expression analysis complete: "
+            f"{expression_profile['vibrato']['sample_count']} vibrato windows, "
+            f"{expression_profile['legato']['sample_count']} pitch transitions."
+        )
 
         device = torch.device(
             "mps" if torch.backends.mps.is_available() else "cpu"
@@ -491,7 +677,7 @@ def run(job_dir: Path) -> None:
             reporter=reporter,
         )
         reporter.check_cancelled()
-        lora_config, final_loss = train_adapter(
+        lora_config, final_loss, validation_loss = train_adapter(
             model,
             feature_cache,
             request,
@@ -520,16 +706,20 @@ def run(job_dir: Path) -> None:
                 "quality": request["quality"],
                 "steps": request["training"]["steps"],
                 "finalLoss": final_loss,
+                "bestValidationLoss": validation_loss,
                 "createdAt": request.get("createdAt", utc_now()),
                 "completedAt": utc_now(),
             },
         )
+        atomic_json_write(expression_profile_path, expression_profile)
         write_profile_manifest(
             request,
             profile_dir,
             copied_sources,
             adapter_path,
+            expression_profile_path,
             final_loss,
+            validation_loss,
         )
         reporter.update(
             status="complete",
@@ -538,9 +728,11 @@ def run(job_dir: Path) -> None:
             progress=1.0,
             current_step=int(request["training"]["steps"]),
             adapterFile=str(adapter_path),
+            expressionProfileFile=str(expression_profile_path),
             canCancel=False,
             completedAt=utc_now(),
             loss=final_loss,
+            validationLoss=validation_loss,
         )
         reporter.log(f"Training complete: {adapter_path}")
     except TrainingCancelled:

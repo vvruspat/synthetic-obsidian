@@ -93,6 +93,7 @@ struct BackingVocalTrack
     std::vector<NoteBlock> renderedNotes;
     juce::File audioFile;
     juce::String voiceProfileId;
+    juce::String id;
 };
 
 struct AnnotationDocument
@@ -104,6 +105,7 @@ struct AnnotationDocument
     int sampleRate = 0;
     double duration = 0.0;
     double bpm = 120.0;
+    double instrumentalGain = 0.7;
     juce::String key = "C major";
     std::vector<NoteBlock> notes;
     std::vector<NoteBlock> backingNotes;

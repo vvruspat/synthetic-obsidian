@@ -25,6 +25,9 @@ export const EMPTY_VOICE_TRAINING_STATE: VoiceTrainingState = {
   activeProfileName: "",
   outputDirectory: "",
   fineTuningAvailable: true,
+  runtimeStatus: "ready",
+  runtimeMessage: "Voice Engine is installed and ready.",
+  runtimeInstallDirectory: "",
   canStartTraining: false,
   jobs: [],
 };
@@ -126,6 +129,20 @@ export function VoiceTrainingDialog({
           </aside>
 
           <div className="voice-training-content">
+            {state.runtimeStatus !== "ready" ? (
+              <div className={`voice-training-runtime is-${state.runtimeStatus}`} role="status">
+                <CpuChipIcon aria-hidden="true" />
+                <span>
+                  <strong>
+                    {state.runtimeStatus === "unsupported"
+                      ? "Apple Silicon is required"
+                      : "Voice Engine is not installed"}
+                  </strong>
+                  <small>{state.runtimeMessage}</small>
+                </span>
+              </div>
+            ) : null}
+
             <div className="voice-training-mode-grid">
               <button
                 className={`voice-training-mode ${mode === "reference" ? "is-selected" : ""}`}

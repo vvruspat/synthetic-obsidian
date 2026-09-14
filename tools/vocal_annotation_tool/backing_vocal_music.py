@@ -1,44 +1,17 @@
 #!/usr/bin/env python3
-"""Generate backing-vocal MIDI notes for the Vocal Annotation Tool.
-
-This helper is intentionally offline-only. The JUCE app invokes it from a
-background thread and passes a JSON snapshot containing musical context and
-lead-vocal notes in seconds. The script converts that context to the YAML DSL
-contract expected by the local Qwen/MLX LoRA model, validates the model output,
-then returns backing notes in seconds for display/export.
-"""
+"""Shared musical normalization and post-processing for backing-vocal models."""
 
 from __future__ import annotations
 
-import argparse
-import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import yaml
-from mlx_lm import generate as mlx_generate
-from mlx_lm import load as mlx_load
-from mlx_lm.sample_utils import make_sampler
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_MODEL = "Qwen/Qwen3-0.6B"
-DEFAULT_ADAPTER = (
-    Path.home()
-    / ".synthetic_obsidian"
-    / "models"
-    / "backing_vocals"
-    / "qwen3_0_6b_stage2_yaml_windows_full_lora"
-)
-DEFAULT_PYTHON = REPO_ROOT / ".venv-llm" / "bin" / "python"
-SYSTEM_PROMPT = (
-    "You generate Synthetic Obsidian backing-vocal YAML DSL. "
-    "Return only valid YAML containing tracks.backing_vocals. "
-    "Do not include markdown, analysis, chords, lead_vocal, or explanations."
-)
-
 STYLE_DEFS: tuple[dict[str, str], ...] = (
     {"id": "UNISON", "name": "Unison Double", "description": "Unison double following the lead melody."},
     {"id": "OCT_UP", "name": "Octave Above", "description": "Octave doubling above the lead."},
@@ -54,8 +27,6 @@ STYLE_DEFS: tuple[dict[str, str], ...] = (
     {"id": "DRONE_ROOT", "name": "Drone Root", "description": "Phrase-level sustained chord root."},
     {"id": "DRONE_FIFTH", "name": "Drone Fifth", "description": "Phrase-level sustained chord fifth."},
     {"id": "DRONE_THIRD", "name": "Drone Third", "description": "Phrase-level sustained chord third."},
-    {"id": "PEDAL_ROOT", "name": "Pedal Tone Root", "description": "Long pedal on the global tonic or chord root."},
-    {"id": "PEDAL_FIFTH", "name": "Pedal Tone Fifth", "description": "Long pedal on the global fifth."},
     {"id": "CONTRARY", "name": "Contrary Motion Harmony", "description": "Harmony shaped to move against the lead contour."},
     {"id": "OBLIQUE", "name": "Oblique Motion Harmony", "description": "Harmony that sustains common tones while lead moves."},
     {"id": "PAR3", "name": "Parallel Thirds", "description": "Mostly parallel thirds with chord-tone correction."},
@@ -64,14 +35,6 @@ STYLE_DEFS: tuple[dict[str, str], ...] = (
     {"id": "CHOIR_ALT", "name": "Choir Alto", "description": "SATB alto line."},
     {"id": "CHOIR_TEN", "name": "Choir Tenor", "description": "SATB tenor line."},
     {"id": "CHOIR_BASS", "name": "Choir Bass", "description": "SATB bass line."},
-    {"id": "HARMONY_2P", "name": "Two-Part Harmony", "description": "Natural two-part backing around the lead."},
-    {"id": "HARMONY_3P", "name": "Three-Part Harmony", "description": "Three-part chord-aware backing."},
-    {"id": "HARMONY_4P", "name": "Four-Part Harmony", "description": "SATB-style four-part backing."},
-    {"id": "STYLE_POP", "name": "Pop Harmony", "description": "Modern pop thirds/sixths with restrained tension."},
-    {"id": "STYLE_FOLK", "name": "Folk Harmony", "description": "Open folk voicing with fifths and drones."},
-    {"id": "STYLE_GOSPEL", "name": "Gospel Harmony", "description": "Dense gospel-inspired chord tones and color tones."},
-    {"id": "STYLE_CLASSICAL", "name": "Classical Choral Harmony", "description": "Conservative classical SATB voice leading."},
-    {"id": "STYLE_BSHOP", "name": "Barbershop Harmony", "description": "Close-position barbershop-inspired harmony."},
     {"id": "SUSP", "name": "Suspension Harmony", "description": "Prepared suspensions resolving into chord tones."},
     {"id": "PASSING", "name": "Passing Tone Harmony", "description": "Chord-tone harmony with passing motion between anchors."},
     {"id": "TENSION_RES", "name": "Tension-Resolution Harmony", "description": "Intentional tension resolving to stable chord tones."},
@@ -92,133 +55,6 @@ class BeatPoint:
     time: float
     beat: float
     bpm: float
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("input_json", type=Path)
-    parser.add_argument("--model", default=DEFAULT_MODEL)
-    parser.add_argument("--adapter-path", type=Path, default=DEFAULT_ADAPTER)
-    parser.add_argument("--python", type=Path, default=DEFAULT_PYTHON)
-    parser.add_argument("--max-lead-notes", type=int, default=48)
-    parser.add_argument("--max-gap-beats", type=float, default=2.0)
-    parser.add_argument("--chord-padding-beats", type=float, default=2.0)
-    parser.add_argument("--max-tokens", type=int, default=1536)
-    parser.add_argument("--temperature", type=float, default=0.0)
-    parser.add_argument("--top-p", type=float, default=1.0)
-    parser.add_argument("--debug-dir", type=Path)
-    parser.add_argument(
-        "--single-window",
-        action="store_true",
-        help="Send the whole melody in one prompt. By default Add BV uses vocal windows.",
-    )
-    return parser.parse_args()
-
-
-def main() -> None:
-    args = parse_args()
-    request = json.loads(args.input_json.expanduser().read_text(encoding="utf-8"))
-    result = generate(request, args)
-    print(json.dumps(result, ensure_ascii=False))
-
-
-def generate(request: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
-    adapter_path = args.adapter_path.expanduser()
-    if adapter_path.is_file():
-        adapter_path = adapter_path.parent
-    if not adapter_path.exists():
-        raise SystemExit(f"LoRA adapter not found: {args.adapter_path.expanduser()}")
-    args.adapter_path = adapter_path
-
-    model, tokenizer = mlx_load(args.model, adapter_path=str(args.adapter_path.expanduser()))
-    return generate_with_model(request, args, model, tokenizer)
-
-
-def generate_with_model(
-    request: dict[str, Any],
-    args: argparse.Namespace,
-    model: Any,
-    tokenizer: Any,
-    stream_callback: Callable[[dict[str, Any]], None] | None = None,
-) -> dict[str, Any]:
-    style = style_by_id(str(request.get("style_id", "")))
-    if style is None:
-        raise SystemExit(f"Unknown style_id: {request.get('style_id')}")
-
-    tempo_segments = normalize_tempos(request.get("tempo_segments"), float(request.get("bpm") or 120.0), float(request.get("duration") or 0.0))
-    beat_map = build_beat_map(tempo_segments)
-    lead = normalize_lead(request.get("lead_notes"), beat_map)
-    chords = normalize_chords(request.get("chords"), beat_map)
-    if not lead:
-        raise SystemExit("No lead notes were provided")
-    if not chords:
-        raise SystemExit("No chords were provided")
-
-    windows = [lead] if args.single_window else build_windows(lead, max(1, args.max_lead_notes), args.max_gap_beats)
-    generated_sets = []
-    warnings = []
-    for index, window in enumerate(windows, start=1):
-        prompt = render_prompt(request, style, chords, window, index, args.chord_padding_beats)
-        raw = run_model(prompt, args, model, tokenizer)
-        dump_debug(args, index, "prompt", prompt)
-        dump_debug(args, index, "raw", raw)
-        try:
-            notes = validate_output(raw, style, window)
-        except (Exception, SystemExit) as exc:
-            warnings.append(f"window {index}: model YAML was not usable ({exc}); requesting repair")
-            repair_prompt = render_repair_prompt(request, style, chords, window, [], index, args.chord_padding_beats, str(exc))
-            repair_raw = run_model(repair_prompt, args, model, tokenizer)
-            dump_debug(args, index, "repair_prompt", repair_prompt)
-            dump_debug(args, index, "repair_raw", repair_raw)
-            try:
-                notes = validate_output(repair_raw, style, window)
-            except (Exception, SystemExit) as repair_exc:
-                warnings.append(f"window {index}: repair failed ({repair_exc}); used deterministic missing-note fallback")
-                notes = []
-
-        missing = missing_lead_refs(notes, window) if requires_one_to_one(style["id"]) else []
-        if missing:
-            repair_prompt = render_repair_prompt(request, style, chords, window, missing, index, args.chord_padding_beats, "missing source_lead_ref entries")
-            repair_raw = run_model(repair_prompt, args, model, tokenizer)
-            dump_debug(args, index, "missing_repair_prompt", repair_prompt)
-            dump_debug(args, index, "missing_repair_raw", repair_raw)
-            try:
-                notes = merge_notes_by_source_ref(notes, validate_output(repair_raw, style, window))
-            except (Exception, SystemExit) as repair_exc:
-                warnings.append(f"window {index}: missing-note repair failed ({repair_exc}); filled missing notes deterministically")
-
-        missing = missing_lead_refs(notes, window) if requires_one_to_one(style["id"]) else []
-        if missing:
-            notes = merge_notes_by_source_ref(notes, fallback_notes(style, missing))
-            warnings.append(f"window {index}: filled {len(missing)} missing backing notes deterministically")
-
-        generated_sets.append(notes)
-        if stream_callback is not None:
-            stream_callback(
-                {
-                    "type": "window",
-                    "style_id": style["id"],
-                    "style_name": style["name"],
-                    "window_index": index,
-                    "window_count": len(windows),
-                    "note_count": sum(len(window_notes) for window_notes in generated_sets),
-                    "warnings": warnings,
-                    "notes": finalize_generated_notes(generated_sets, style, chords, str(request.get("key") or "C major"), beat_map),
-                }
-            )
-
-    corrected = harmonic_postprocess(flatten_note_windows(generated_sets), chords, str(request.get("key") or "C major"), style["id"])
-    debug_dsl_path = write_debug_dsl(request, style, chords, lead, [corrected], warnings)
-    notes = stitch_notes([corrected], style, beat_map)
-    return {
-        "style_id": style["id"],
-        "style_name": style["name"],
-        "window_count": len(windows),
-        "note_count": len(notes),
-        "warnings": warnings,
-        "debug_dsl_path": str(debug_dsl_path) if debug_dsl_path is not None else "",
-        "notes": notes,
-    }
 
 
 def normalize_tempos(items: Any, fallback_bpm: float, duration: float) -> list[dict[str, float]]:
@@ -341,7 +177,7 @@ def chord_id(index: int) -> str:
 
 
 def chord_ref_at_beat(beat: float) -> str:
-    # Repaired later by render_prompt once selected chords are known.
+    # Requests without explicit references use the first normalized chord.
     return "chord_0001"
 
 
@@ -361,112 +197,6 @@ def build_windows(lead: list[dict[str, Any]], max_lead_notes: int, max_gap: floa
     return windows
 
 
-def render_prompt(request: dict[str, Any], style: dict[str, str], chords: list[dict[str, Any]], window: list[dict[str, Any]], index: int, padding: float) -> str:
-    start = window[0]["start"]
-    end = max(note["start"] + note["duration"] for note in window)
-    selected_chords = [chord for chord in chords if chord["start"] + chord["duration"] >= start - padding and chord["start"] <= end + padding]
-    if not selected_chords:
-        selected_chords = chords
-    for note in window:
-        note["chord_ref"] = chord_at(selected_chords, float(note["start"]))["id"]
-    source = {
-        "meta": {
-            "title": request.get("title") or "Vocal Annotation Tool",
-            "tempo": round(float(request.get("bpm") or 120.0)),
-            "meter": request.get("meter") or "4/4",
-            "key": request.get("key") or "C major",
-            "ticks_per_beat": 480,
-            "source_resolution": "seconds_converted_to_beats",
-        },
-        "tracks": {
-            "chords": selected_chords,
-            "lead_vocal": [{key: value for key, value in note.items() if key != "source_annotation_id"} for note in window],
-        },
-    }
-    return (
-        "TASK: GENERATE_BACKING_VOCAL\n"
-        f"REQUESTED_STYLE_ID: {style['id']}\n"
-        f"REQUESTED_STYLE_NAME: {style['name']}\n"
-        "SOURCE_FILE: vocal_annotation_tool\n"
-        f"WINDOW_INDEX: {index}\n"
-        f"WINDOW_START_BEAT: {start:g}\n"
-        f"WINDOW_END_BEAT: {end:g}\n\n"
-        + yaml.safe_dump(source, allow_unicode=True, sort_keys=False)
-    )
-
-
-def render_repair_prompt(
-    request: dict[str, Any],
-    style: dict[str, str],
-    chords: list[dict[str, Any]],
-    window: list[dict[str, Any]],
-    missing: list[dict[str, Any]],
-    index: int,
-    padding: float,
-    reason: str,
-) -> str:
-    selected = missing if missing else window
-    base = render_prompt(request, style, chords, selected, index, padding)
-    refs = ", ".join(note["id"] for note in selected)
-    return (
-        base
-        + "\nREPAIR_REQUEST:\n"
-        + f"  reason: {reason}\n"
-        + f"  Return notes only for these source_lead_ref values: [{refs}]\n"
-        + "  Do not omit any requested source_lead_ref.\n"
-    )
-
-
-def run_model(prompt: str, args: argparse.Namespace, model: Any, tokenizer: Any) -> str:
-    messages = [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": prompt},
-    ]
-    try:
-        formatted_prompt = tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True,
-            enable_thinking=False,
-        )
-    except TypeError:
-        formatted_prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-
-    sampler = make_sampler(temp=max(0.0, float(args.temperature)), top_p=max(0.0, float(args.top_p)))
-    return clean_generation(
-        mlx_generate(
-            model,
-            tokenizer,
-            formatted_prompt,
-            max_tokens=max(64, int(args.max_tokens)),
-            sampler=sampler,
-            verbose=False,
-        )
-    )
-
-
-def clean_generation(text: str) -> str:
-    lines = []
-    for line in text.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("Fetching ") or stripped in {"<think>", "</think>"} or stripped.startswith("```"):
-            continue
-        lines.append(line)
-    cleaned = "\n".join(lines).strip()
-    tracks_index = cleaned.find("tracks:")
-    if tracks_index > 0:
-        cleaned = cleaned[tracks_index:]
-    return cleaned
-
-
-def dump_debug(args: argparse.Namespace, window_index: int, name: str, text: str) -> None:
-    if args.debug_dir is None:
-        return
-    path = args.debug_dir.expanduser()
-    path.mkdir(parents=True, exist_ok=True)
-    (path / f"window_{window_index:03d}_{name}.txt").write_text(text, encoding="utf-8")
-
-
 def style_requirements(style_id: str) -> str:
     requirements = {
         "UNISON": "Double the lead melody at unison. Keep one note per lead note.",
@@ -483,8 +213,6 @@ def style_requirements(style_id: str) -> str:
         "DRONE_ROOT": "Use sustained phrase-level chord roots. It is allowed to use fewer/longer notes than lead.",
         "DRONE_FIFTH": "Use sustained phrase-level chord fifths. It is allowed to use fewer/longer notes than lead.",
         "DRONE_THIRD": "Use sustained phrase-level chord thirds. It is allowed to use fewer/longer notes than lead.",
-        "PEDAL_ROOT": "Use a long tonic/chord-root pedal. It is allowed to use fewer/longer notes than lead.",
-        "PEDAL_FIFTH": "Use a long fifth pedal. It is allowed to use fewer/longer notes than lead.",
         "CONTRARY": "Prefer contrary motion against the lead contour while staying chord-aware and singable.",
         "OBLIQUE": "Use oblique motion intentionally: hold common tones only when they create a real harmony, not as a lazy default.",
         "PAR3": "Use mostly parallel chord-aware thirds; avoid unison and avoid long static common tones.",
@@ -493,14 +221,6 @@ def style_requirements(style_id: str) -> str:
         "CHOIR_ALT": "Write a singable SATB alto inner line, favor chord tones and smooth voice leading.",
         "CHOIR_TEN": "Write a singable SATB tenor line below/around the lead, favor chord tones and smooth voice leading.",
         "CHOIR_BASS": "Write a bass-support line using roots/fifths and conservative voice leading.",
-        "HARMONY_2P": "Write natural two-part backing around the lead with chord-aware thirds/sixths and smooth contour.",
-        "HARMONY_3P": "Write one useful line for a three-part harmony texture, choosing chord tones with smooth voice leading.",
-        "HARMONY_4P": "Write one useful SATB-style line for four-part harmony, conservative and chord-aware.",
-        "STYLE_POP": "Modern pop backing: thirds/sixths, smooth motion, restrained tensions, no lazy unison unless intended.",
-        "STYLE_FOLK": "Folk harmony: open consonant intervals, fifths/thirds/drones where musically justified.",
-        "STYLE_GOSPEL": "Gospel harmony: strong chord tones, tasteful color tones, smooth resolution of tensions.",
-        "STYLE_CLASSICAL": "Classical choral counterpoint: avoid parallel exposed fifths/octaves, resolve tendency tones.",
-        "STYLE_BSHOP": "Barbershop-like close harmony: chord tones/sevenths with smooth contrary/oblique motion.",
         "SUSP": "Use prepared suspensions that resolve; do not leave dissonances hanging.",
         "PASSING": "Use passing tones between stable chord tones; long notes should be stable chord/scale tones.",
         "TENSION_RES": "Create intentional tension that resolves to stable chord tones within the phrase.",
@@ -581,7 +301,7 @@ def merge_notes_by_source_ref(existing: list[dict[str, Any]], additions: list[di
 
 
 def requires_one_to_one(style_id: str) -> bool:
-    return not (style_id.startswith("DRONE_") or style_id.startswith("PEDAL_"))
+    return not style_id.startswith("DRONE_")
 
 
 def fallback_notes(style: dict[str, str], source_lead: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -630,19 +350,11 @@ def fallback_interval(style_id: str) -> int:
         "CHOIR_ALT": 4,
         "CHOIR_TEN": -5,
         "CHOIR_BASS": -12,
-        "HARMONY_2P": 4,
-        "HARMONY_3P": 7,
-        "HARMONY_4P": -5,
-        "STYLE_POP": 4,
-        "STYLE_FOLK": 7,
-        "STYLE_GOSPEL": 4,
-        "STYLE_CLASSICAL": -3,
-        "STYLE_BSHOP": 4,
         "SUSP": 5,
         "PASSING": 2,
         "TENSION_RES": 4,
     }
-    if style_id.startswith("DRONE_") or style_id.startswith("PEDAL_"):
+    if style_id.startswith("DRONE_"):
         return -12
     return intervals.get(style_id, 4)
 
@@ -703,12 +415,21 @@ def harmonic_postprocess(
             if (parsed := pitch_to_midi(str(pitch))) is not None
         }
 
-        if allow_scale_tensions:
+        if allow_scale_tensions or float(chord.get("confidence") or 0.0) < 0.45:
             allowed = chord_pitch_classes | scale_pitch_classes
         else:
             # The current chord is authoritative, including borrowed chords that
             # intentionally contain tones outside the global key.
             allowed = chord_pitch_classes or scale_pitch_classes
+
+        if chords:
+            chord_index = chords.index(chord)
+            boundary_margin = 0.20
+            if chord_index > 0 and float(note["start"]) - float(chord["start"]) <= boundary_margin:
+                allowed |= chord_pitch_classes_for(chords[chord_index - 1])
+            chord_end = float(chord["start"]) + float(chord["duration"])
+            if chord_index + 1 < len(chords) and chord_end - float(note["start"]) <= boundary_margin:
+                allowed |= chord_pitch_classes_for(chords[chord_index + 1])
 
         corrected_midi = nearest_allowed_midi(midi, allowed, previous_pitch)
         if corrected_midi != midi:
@@ -720,6 +441,14 @@ def harmonic_postprocess(
         previous_pitch = corrected_midi
 
     return corrected
+
+
+def chord_pitch_classes_for(chord: dict[str, Any]) -> set[int]:
+    return {
+        parsed % 12
+        for pitch in chord.get("notes", []) or []
+        if (parsed := pitch_to_midi(str(pitch))) is not None
+    }
 
 
 def key_pitch_classes(key: str) -> set[int]:
@@ -908,7 +637,3 @@ def chord_notes(name: str) -> list[str]:
     quality = chord_quality(name)
     intervals = (0, 3, 7) if quality == "minor" else (0, 4, 7)
     return [midi_to_pitch(48 + ((root_pc + interval - 0) % 12)) for interval in intervals]
-
-
-if __name__ == "__main__":
-    main()

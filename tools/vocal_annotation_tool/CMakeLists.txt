@@ -4,9 +4,13 @@ juce_add_gui_app(VocalAnnotationTool
     COMPANY_EMAIL       ""
     BUNDLE_ID           "com.syntheticobsidian.vocalannotationtool"
     PRODUCT_NAME        "Synthetic Obsidian"
-    VERSION             "0.1.0"
+    VERSION             "1.0"
+    ICON_BIG            "${CMAKE_SOURCE_DIR}/distribution/macos-arm64/AppIcon.png"
+    ICON_SMALL          "${CMAKE_SOURCE_DIR}/distribution/macos-arm64/AppIcon.png"
     NEEDS_WEB_BROWSER   TRUE
     NEEDS_WEBVIEW2      TRUE
+    MICROPHONE_PERMISSION_ENABLED TRUE
+    MICROPHONE_PERMISSION_TEXT "Synthetic Obsidian uses the selected audio input for vocal recording and monitoring."
 )
 
 juce_generate_juce_header(VocalAnnotationTool)
@@ -19,6 +23,7 @@ target_sources(VocalAnnotationTool
         AnnotationValidator.cpp
         AnnotationEditorComponent.cpp
         AlgorithmicPitchPreview.cpp
+        RuntimeManager.cpp
         ${CMAKE_SOURCE_DIR}/Source/web/SyntheticObsidianWebView.cpp
 )
 
@@ -33,7 +38,7 @@ target_compile_definitions(VocalAnnotationTool
         JUCE_WEB_BROWSER=1
         JUCE_USE_CURL=0
         JUCE_USE_WIN_WEBVIEW2=1
-        SYNTHETIC_OBSIDIAN_ROOT="${CMAKE_SOURCE_DIR}"
+        $<$<NOT:$<CONFIG:Release>>:SYNTHETIC_OBSIDIAN_DEV_ROOT="${CMAKE_SOURCE_DIR}">
 )
 
 target_link_libraries(VocalAnnotationTool
@@ -57,6 +62,10 @@ target_link_libraries(VocalAnnotationTool
 )
 
 if(APPLE)
+    target_sources(VocalAnnotationTool PRIVATE
+        MacApplicationIcon.h
+        MacApplicationIcon.mm
+    )
     set(
         SYNTHETIC_OBSIDIAN_MACOS_CODESIGN_IDENTITY
         ""
@@ -64,7 +73,7 @@ if(APPLE)
         "Optional signing identity for stable macOS privacy permissions during local builds"
     )
     set_target_properties(VocalAnnotationTool PROPERTIES
-        OSX_ARCHITECTURES "arm64;x86_64"
+        OSX_ARCHITECTURES "arm64"
     )
     target_compile_options(VocalAnnotationTool PRIVATE
         -Wall -Wextra -Wpedantic

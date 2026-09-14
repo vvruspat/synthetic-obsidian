@@ -14,6 +14,7 @@ from typing import Any
 from render_backing_vocal_soulx import (
     DEFAULT_CONFIG_PATH,
     DEFAULT_MODEL_PATH,
+    DEFAULT_RMVPE_MODEL_PATH,
     DEFAULT_SOURCE_ROOT,
     SoulXRenderer,
 )
@@ -25,6 +26,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--source-root", type=Path, default=DEFAULT_SOURCE_ROOT)
     parser.add_argument("--model", type=Path, default=DEFAULT_MODEL_PATH)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
+    parser.add_argument("--rmvpe-model", type=Path, default=DEFAULT_RMVPE_MODEL_PATH)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--steps", type=int, default=16)
     parser.add_argument("--poll-ms", type=int, default=80)
@@ -50,6 +52,7 @@ def main() -> None:
             source_root=args.source_root,
             model_path=args.model,
             config_path=args.config,
+            rmvpe_model_path=args.rmvpe_model,
             device=args.device,
             steps=args.steps,
         )

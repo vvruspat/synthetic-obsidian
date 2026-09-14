@@ -14,6 +14,7 @@ export const PIANO_KEYS = Array.from({ length: PITCH_ROWS }, (_, index) => {
   const midi = PITCH_TOP - index;
   const note = ((midi % 12) + 12) % 12;
   return {
+    pitch: midi,
     label: `${NOTE_NAMES[note]}${Math.floor(midi / 12) - 1}`,
     black: BLACK_NOTES.has(note),
   };
@@ -51,8 +52,8 @@ export function getPitchFill(clip: VocalClip) {
   const cents = (clip.pitch - Math.round(clip.pitch)) * 100;
   const spill = Math.min(50, Math.abs(cents));
   const rgb = TONE_RGB[clip.color];
-  const pale = `rgba(${rgb}, .27)`;
-  const solid = `rgba(${rgb}, .88)`;
+  const pale = `rgba(${rgb}, .12)`;
+  const solid = `rgba(${rgb}, .48)`;
 
   return {
     cents,

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <set>
 
 namespace vocal_annotation
 {
@@ -220,6 +221,10 @@ juce::Result AnnotationJson::load(const juce::File& jsonFile, AnnotationDocument
     loaded.sampleRate = static_cast<int>(numberProperty(*root, "sample_rate", 0.0));
     loaded.duration = numberProperty(*root, "duration", 0.0);
     loaded.bpm = numberProperty(*root, "bpm", 120.0);
+    loaded.instrumentalGain = juce::jlimit(
+        0.0,
+        1.0,
+        numberProperty(*root, "instrumental_gain", 0.7));
     loaded.key = stringProperty(*root, "key", "C major");
     loaded.backingStyleId = stringProperty(*root, "backing_style_id");
     loaded.backingStyleName = stringProperty(*root, "backing_style_name");
@@ -240,6 +245,7 @@ juce::Result AnnotationJson::load(const juce::File& jsonFile, AnnotationDocument
 
     if (auto* backingTracks = root->getProperty("backing_tracks").getArray())
     {
+        std::set<juce::String> loadedTrackIds;
         for (const auto& value : *backingTracks)
         {
             auto* trackObject = value.getDynamicObject();
@@ -247,9 +253,24 @@ juce::Result AnnotationJson::load(const juce::File& jsonFile, AnnotationDocument
                 continue;
 
             BackingVocalTrack track;
+            track.id = stringProperty(*trackObject, "id");
             track.styleId = stringProperty(*trackObject, "style_id");
             track.styleName = stringProperty(*trackObject, "style_name");
             track.voiceProfileId = stringProperty(*trackObject, "voice_profile_id");
+            if (track.id.isEmpty() || loadedTrackIds.contains(track.id))
+            {
+                const auto baseId = (track.styleId.isNotEmpty()
+                    ? track.styleId.toLowerCase()
+                    : juce::File::createLegalFileName(track.styleName).toLowerCase())
+                    .replaceCharacter(' ', '-');
+                auto suffix = 1;
+                do
+                {
+                    track.id = "backing-" + baseId + "-" + juce::String(suffix++);
+                }
+                while (loadedTrackIds.contains(track.id));
+            }
+            loadedTrackIds.insert(track.id);
             const auto trackAudioPath = stringProperty(*trackObject, "audio");
             track.audioFile = trackAudioPath.isEmpty()
                 ? juce::File()
@@ -289,7 +310,10 @@ juce::Result AnnotationJson::load(const juce::File& jsonFile, AnnotationDocument
             loaded.backingNotes,
             loaded.backingNotes,
             loaded.backingAudioFile,
-            {}
+            {},
+            "backing-" + (loaded.backingStyleId.isNotEmpty()
+                ? loaded.backingStyleId.toLowerCase()
+                : juce::String("legacy")) + "-1"
         });
     }
     else if (! loaded.backingTracks.empty())
@@ -413,6 +437,7 @@ juce::Result AnnotationJson::save(const AnnotationDocument& document, const juce
     root->setProperty("sample_rate", document.sampleRate);
     root->setProperty("duration", document.duration);
     root->setProperty("bpm", document.bpm);
+    root->setProperty("instrumental_gain", document.instrumentalGain);
     root->setProperty("key", document.key);
     root->setProperty("backing_style_id", document.backingStyleId);
     root->setProperty("backing_style_name", document.backingStyleName);
@@ -431,6 +456,7 @@ juce::Result AnnotationJson::save(const AnnotationDocument& document, const juce
     for (const auto& track : document.backingTracks)
     {
         auto* object = new juce::DynamicObject();
+        object->setProperty("id", track.id);
         object->setProperty("style_id", track.styleId);
         object->setProperty("style_name", track.styleName);
         if (track.voiceProfileId.isNotEmpty())

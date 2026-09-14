@@ -2,6 +2,8 @@ import {
   ArrowPathIcon,
   ArrowUturnLeftIcon,
   ChevronDownIcon,
+  Cog6ToothIcon,
+  DocumentPlusIcon,
   FolderArrowDownIcon,
   FolderIcon,
   FolderOpenIcon,
@@ -15,6 +17,7 @@ import {
 import type { CSSProperties } from "react";
 import type { VoiceTrainingState } from "@/bridge/plugin-bridge";
 import type { StudioController } from "@/features/studio/hooks/useStudioController";
+import { formatShortcut } from "@/features/studio/lib/hotkeys";
 import { gainToDecibels, gainToMeterPercent } from "@/features/studio/lib/output-meter";
 import { IconButton, RangeInput } from "@/ui";
 
@@ -22,12 +25,14 @@ type StudioHeaderProps = {
   controller: StudioController;
   voiceTraining: VoiceTrainingState;
   onOpenVoiceTraining(): void;
+  onOpenSettings(): void;
 };
 
 export function StudioHeader({
   controller,
   voiceTraining,
   onOpenVoiceTraining,
+  onOpenSettings,
 }: StudioHeaderProps) {
   const {
     playing,
@@ -37,6 +42,7 @@ export function StudioHeader({
     volume,
     outputLevels,
     musicalContext,
+    shortcutBindings,
     actions,
   } = controller;
   const leftOutputDb = gainToDecibels(outputLevels.left);
@@ -66,12 +72,24 @@ export function StudioHeader({
             <button
               type="button"
               onClick={(event) => {
+                actions.newProject();
+                event.currentTarget.closest("details")?.removeAttribute("open");
+              }}
+            >
+              <DocumentPlusIcon className="header-project-option-icon" aria-hidden="true" />
+              <span>New project</span>
+              <kbd>{formatShortcut(shortcutBindings["project.new"])}</kbd>
+            </button>
+            <button
+              type="button"
+              onClick={(event) => {
                 actions.openProject();
                 event.currentTarget.closest("details")?.removeAttribute("open");
               }}
             >
               <FolderOpenIcon className="header-project-option-icon" aria-hidden="true" />
               <span>Open project</span>
+              <kbd>{formatShortcut(shortcutBindings["project.open"])}</kbd>
             </button>
             <button
               type="button"
@@ -82,6 +100,7 @@ export function StudioHeader({
             >
               <FolderArrowDownIcon className="header-project-option-icon" aria-hidden="true" />
               <span>Save project</span>
+              <kbd>{formatShortcut(shortcutBindings["project.save"])}</kbd>
             </button>
             <i className="header-project-separator" aria-hidden="true" />
             <button
@@ -93,6 +112,7 @@ export function StudioHeader({
             >
               <Squares2X2Icon className="header-project-option-icon" aria-hidden="true" />
               <span>Export all tracks</span>
+              <kbd>{formatShortcut(shortcutBindings["project.export"])}</kbd>
             </button>
             <button
               type="button"
@@ -103,6 +123,19 @@ export function StudioHeader({
             >
               <MusicalNoteIcon className="header-project-option-icon" aria-hidden="true" />
               <span>Export MIDI files</span>
+              <kbd />
+            </button>
+            <i className="header-project-separator" aria-hidden="true" />
+            <button
+              type="button"
+              onClick={(event) => {
+                onOpenSettings();
+                event.currentTarget.closest("details")?.removeAttribute("open");
+              }}
+            >
+              <Cog6ToothIcon className="header-project-option-icon" aria-hidden="true" />
+              <span>Settings</span>
+              <kbd>{formatShortcut(shortcutBindings["app.settings"])}</kbd>
             </button>
           </div>
         </details>
@@ -130,6 +163,9 @@ export function StudioHeader({
         <div className="transport-buttons">
           <IconButton
             label="Return to start"
+            title={`Return to start · ${formatShortcut(
+              shortcutBindings["transport.return-to-start"],
+            )}`}
             icon={ArrowUturnLeftIcon}
             className="transport-button"
             iconClassName="transport-icon"
@@ -137,6 +173,9 @@ export function StudioHeader({
           />
           <IconButton
             label={playing ? "Pause" : "Play"}
+            title={`${playing ? "Pause" : "Play"} · ${formatShortcut(
+              shortcutBindings["transport.play-pause"],
+            )}`}
             icon={playing ? PauseIcon : PlayIcon}
             className="transport-button"
             iconClassName="transport-icon"
@@ -152,6 +191,7 @@ export function StudioHeader({
           />
           <IconButton
             label="Loop"
+            title={`Loop · ${formatShortcut(shortcutBindings["transport.toggle-loop"])}`}
             icon={ArrowPathIcon}
             className="transport-button"
             iconClassName="transport-icon"

@@ -1,6 +1,12 @@
 cmake_minimum_required(VERSION 3.22)
 
-project(SyntheticObsidian VERSION 0.1.0)
+project(SyntheticObsidian VERSION 1.0.0)
+
+if(APPLE)
+    # MLX 0.29.x is the oldest runtime in the first-test distribution.
+    set(CMAKE_OSX_ARCHITECTURES "arm64" CACHE STRING "" FORCE)
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "15.0" CACHE STRING "" FORCE)
+endif()
 
 # ── C++ standard ─────────────────────────────────────────────────────────────
 set(CMAKE_CXX_STANDARD 20)
@@ -51,7 +57,7 @@ juce_add_binary_data(SyntheticObsidianFrontendData
 )
 if(APPLE)
     set_target_properties(SyntheticObsidianFrontendData PROPERTIES
-        OSX_ARCHITECTURES "arm64;x86_64"
+        OSX_ARCHITECTURES "arm64"
     )
 endif()
 
@@ -76,7 +82,7 @@ juce_add_plugin(SyntheticObsidian
     FORMATS                     VST3 Standalone
 
     PRODUCT_NAME                "Synthetic Obsidian"
-    VERSION                     "0.1.0"
+    VERSION                     "1.0.0"
 
     VST3_CATEGORIES             "Fx" "Analyzer"
 
@@ -159,9 +165,9 @@ target_link_libraries(SyntheticObsidian
 
 # ── Platform-specific settings ────────────────────────────────────────────────
 if(APPLE)
-    # Universal Binary (Apple Silicon + Intel)
+    # The product runtime uses MLX and is distributed for Apple Silicon only.
     set_target_properties(SyntheticObsidian PROPERTIES
-        OSX_ARCHITECTURES "arm64;x86_64"
+        OSX_ARCHITECTURES "arm64"
     )
     target_compile_options(SyntheticObsidian PRIVATE
         -Wall -Wextra -Wpedantic

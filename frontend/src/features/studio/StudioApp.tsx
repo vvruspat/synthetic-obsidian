@@ -1,8 +1,18 @@
 import { useEffect, useRef, useState } from "react";
-import type { PluginBridge, ProjectAction, VoiceTrainingState } from "@/bridge/plugin-bridge";
+import type {
+  AudioSettingsState,
+  PluginBridge,
+  ProjectAction,
+  VoiceTrainingState,
+} from "@/bridge/plugin-bridge";
+import type { CorrectionToolId } from "@/domain/studio";
 import { Arrangement } from "@/features/studio/components/Arrangement";
 import { ExportToast, type ExportToastState } from "@/features/studio/components/ExportToast";
 import { ProjectStatusBar } from "@/features/studio/components/ProjectStatusBar";
+import {
+  EMPTY_AUDIO_SETTINGS_STATE,
+  SettingsDialog,
+} from "@/features/studio/components/SettingsDialog";
 import { StudioHeader } from "@/features/studio/components/StudioHeader";
 import { TrackSidebar } from "@/features/studio/components/TrackSidebar";
 import {
@@ -10,6 +20,13 @@ import {
   VoiceTrainingDialog,
 } from "@/features/studio/components/VoiceTrainingDialog";
 import { useStudioController } from "@/features/studio/hooks/useStudioController";
+import {
+  CORRECTION_TOOL_ORDER,
+  loadShortcutBindings,
+  type ShortcutBindings,
+  saveShortcutBindings,
+  shortcutActionForEvent,
+} from "@/features/studio/lib/hotkeys";
 import { mockStudioProject } from "@/mocks/studio-project";
 
 export function StudioApp({ bridge }: { bridge: PluginBridge }) {
@@ -25,6 +42,7 @@ export function StudioApp({ bridge }: { bridge: PluginBridge }) {
     backingGenerationTrack: "",
     backingAudioRenderTrack: "",
     voiceTraining: EMPTY_VOICE_TRAINING_STATE,
+    audioSettings: EMPTY_AUDIO_SETTINGS_STATE,
   });
 
   useEffect(() => {
@@ -49,6 +67,11 @@ export function StudioApp({ bridge }: { bridge: PluginBridge }) {
         setNativeState((current) => ({
           ...current,
           voiceTraining: event.state,
+        }));
+      } else if (event.type === "audio-settings-state") {
+        setNativeState((current) => ({
+          ...current,
+          audioSettings: event.state,
         }));
       } else if (event.type === "export-complete") {
         window.clearTimeout(exportToastTimeoutRef.current);
@@ -81,6 +104,7 @@ export function StudioApp({ bridge }: { bridge: PluginBridge }) {
       backingGenerationTrack={nativeState.backingGenerationTrack}
       backingAudioRenderTrack={nativeState.backingAudioRenderTrack}
       voiceTraining={nativeState.voiceTraining}
+      audioSettings={nativeState.audioSettings}
       exportToast={exportToast}
       onDismissExportToast={() => {
         window.clearTimeout(exportToastTimeoutRef.current);
@@ -101,6 +125,7 @@ function StudioWorkspace({
   backingGenerationTrack,
   backingAudioRenderTrack,
   voiceTraining,
+  audioSettings,
   exportToast,
   onDismissExportToast,
 }: {
@@ -114,15 +139,92 @@ function StudioWorkspace({
   backingGenerationTrack: string;
   backingAudioRenderTrack: string;
   voiceTraining: VoiceTrainingState;
+  audioSettings: AudioSettingsState;
   exportToast: ExportToastState | null;
   onDismissExportToast(): void;
 }) {
-  const controller = useStudioController(bridge, project);
+  const [shortcuts, setShortcuts] = useState<ShortcutBindings>(loadShortcutBindings);
+  const controller = useStudioController(bridge, project, shortcuts);
   const [voiceTrainingOpen, setVoiceTrainingOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const { pianoCollapsed, serviceTracksCollapsed } = controller;
+  const pitchEditorAvailable = project.hasVocal || project.initialBackingTracks.length > 0;
   const sendProjectAction = (action: ProjectAction) => {
     bridge.send({ type: "project-action", action });
   };
+  const updateShortcuts = (next: ShortcutBindings) => {
+    setShortcuts(next);
+    saveShortcutBindings(next);
+  };
+
+  useEffect(() => {
+    const isEditableTarget = (target: EventTarget | null) => {
+      const element = target instanceof HTMLElement ? target : null;
+      return (
+        element?.isContentEditable ||
+        element?.tagName === "INPUT" ||
+        element?.tagName === "TEXTAREA" ||
+        element?.tagName === "SELECT"
+      );
+    };
+
+    const handleShortcut = (event: KeyboardEvent) => {
+      if (settingsOpen || voiceTrainingOpen || event.repeat || isEditableTarget(event.target)) {
+        return;
+      }
+      const action = shortcutActionForEvent(event, shortcuts);
+      if (!action) return;
+
+      event.preventDefault();
+      event.stopPropagation();
+
+      if (action === "app.settings") {
+        setSettingsOpen(true);
+      } else if (action === "project.new") {
+        controller.actions.newProject();
+      } else if (action === "project.open") {
+        controller.actions.openProject();
+      } else if (action === "project.save") {
+        controller.actions.saveProject();
+      } else if (action === "project.undo") {
+        controller.actions.undo();
+      } else if (action === "project.redo") {
+        controller.actions.redo();
+      } else if (action === "project.export") {
+        controller.actions.exportAllTracks();
+      } else if (action === "transport.play-pause") {
+        controller.actions.togglePlayback();
+      } else if (action === "transport.return-to-start") {
+        controller.actions.returnToStart();
+      } else if (action === "transport.toggle-loop") {
+        controller.actions.setLooping(!controller.looping);
+      } else if (action === "editor.toggle-chord-snap") {
+        controller.actions.setChordSnapEnabled((current) => !current);
+      } else if (action === "editor.toggle-piano") {
+        controller.actions.setPianoCollapsed((current) => !current);
+      } else if (action === "view.horizontal-zoom-out") {
+        controller.actions.setHorizontalZoomFromInput(controller.horizontalZoom / 1.25);
+      } else if (action === "view.horizontal-zoom-in") {
+        controller.actions.setHorizontalZoomFromInput(controller.horizontalZoom * 1.25);
+      } else if (action === "view.vertical-zoom-out") {
+        controller.actions.setVerticalZoomFromInput(controller.verticalZoom / 1.25);
+      } else if (action === "view.vertical-zoom-in") {
+        controller.actions.setVerticalZoomFromInput(controller.verticalZoom * 1.25);
+      } else {
+        const [, button, toolValue] = action.split(".");
+        const tool = toolValue as CorrectionToolId;
+        if (!CORRECTION_TOOL_ORDER.includes(tool)) return;
+        if (button === "left") {
+          controller.actions.setLeftCorrectionTool(tool);
+        } else {
+          controller.actions.setRightCorrectionTool(tool);
+        }
+      }
+    };
+
+    window.addEventListener("keydown", handleShortcut, true);
+    return () => window.removeEventListener("keydown", handleShortcut, true);
+  }, [controller, settingsOpen, shortcuts, voiceTrainingOpen]);
 
   return (
     <main className="studio-shell">
@@ -130,11 +232,13 @@ function StudioWorkspace({
         controller={controller}
         voiceTraining={voiceTraining}
         onOpenVoiceTraining={() => setVoiceTrainingOpen(true)}
+        onOpenSettings={() => setSettingsOpen(true)}
       />
       <section
         className={[
           "workspace",
           pianoCollapsed ? "is-piano-collapsed" : "",
+          pitchEditorAvailable ? "" : "is-piano-unavailable",
           serviceTracksCollapsed ? "is-service-tracks-collapsed" : "",
         ]
           .filter(Boolean)
@@ -152,6 +256,7 @@ function StudioWorkspace({
           backingGenerationTrack={backingGenerationTrack}
           backingAudioRenderTrack={backingAudioRenderTrack}
           onProjectAction={sendProjectAction}
+          onOpenVoiceTraining={() => setVoiceTrainingOpen(true)}
         />
       </section>
       <ProjectStatusBar status={status} />
@@ -161,6 +266,14 @@ function StudioWorkspace({
         state={voiceTraining}
         open={voiceTrainingOpen}
         onClose={() => setVoiceTrainingOpen(false)}
+      />
+      <SettingsDialog
+        bridge={bridge}
+        audio={audioSettings}
+        shortcuts={shortcuts}
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        onShortcutsChange={updateShortcuts}
       />
     </main>
   );

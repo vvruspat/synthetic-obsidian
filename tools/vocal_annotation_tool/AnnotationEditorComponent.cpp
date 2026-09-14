@@ -259,7 +259,7 @@ void AnnotationEditorComponent::setListener(Listener* newListener)
 
 void AnnotationEditorComponent::setAudioFile(const juce::File& file)
 {
-    thumbnail_.setSource(new juce::FileInputSource(file));
+    thumbnail_.setSource(file.existsAsFile() ? new juce::FileInputSource(file) : nullptr);
     if (file.existsAsFile())
         selectedTrack_ = SelectedTrack::lead;
     fitToClip();

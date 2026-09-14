@@ -15,7 +15,7 @@ import math
 import os
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
@@ -24,19 +24,29 @@ import pyworld as pw
 import soundfile as sf
 import torch
 from torch import nn
-from scipy.ndimage import gaussian_filter1d, median_filter
+from scipy.ndimage import gaussian_filter1d
 from scipy.signal import resample_poly
 
 from soulx_lora import load_adapter, remove_lora
+from vocal_expression import (
+    analyze_expression_profile,
+    build_target_f0,
+    default_expression_profile,
+    load_expression_profile_for_adapter,
+)
 
 
 SOULX_SAMPLE_RATE = 24_000
 SOULX_HOP_SIZE = 480
 SOULX_F0_RATE = SOULX_SAMPLE_RATE // SOULX_HOP_SIZE
+DEFAULT_INFERENCE_STEPS = 32
+DEFAULT_INFERENCE_CFG = 3.0
+DEFAULT_LORA_CFG = 2.0
 DEFAULT_RUNTIME_ROOT = Path.home() / ".synthetic_obsidian" / "runtime" / "soulx-singer"
 DEFAULT_SOURCE_ROOT = DEFAULT_RUNTIME_ROOT / "source"
 DEFAULT_MODEL_PATH = Path.home() / ".synthetic_obsidian" / "models" / "SoulX-Singer" / "model-svc.pt"
 DEFAULT_CONFIG_PATH = DEFAULT_SOURCE_ROOT / "soulxsinger" / "config" / "soulxsinger.yaml"
+DEFAULT_RMVPE_MODEL_PATH = Path.home() / ".synthetic_obsidian" / "models" / "rmvpe" / "rmvpe.pt"
 
 
 class CpuVocoderBridge(nn.Module):
@@ -60,14 +70,6 @@ def choose_device(requested: str = "auto") -> str:
     if torch.cuda.is_available():
         return "cuda"
     return "cpu"
-
-
-def midi_to_hz(midi: np.ndarray | float) -> np.ndarray | float:
-    return 440.0 * np.power(2.0, (np.asarray(midi) - 69.0) / 12.0)
-
-
-def hz_to_midi(hz: np.ndarray) -> np.ndarray:
-    return 69.0 + 12.0 * np.log2(np.maximum(hz, 1e-8) / 440.0)
 
 
 def load_mono_24k(path: Path) -> np.ndarray:
@@ -109,105 +111,11 @@ def extract_f0(audio: np.ndarray) -> np.ndarray:
     return f0.astype(np.float32)
 
 
-def note_pitch_at(note: dict[str, Any], time_sec: float) -> float:
-    curve = note.get("curve")
-    if not isinstance(curve, list) or not curve:
-        return float(note.get("pitch_exact", note.get("pitch", 60.0)))
-
-    points: list[tuple[float, float]] = []
-    for value in curve:
-        if not isinstance(value, dict):
-            continue
-        try:
-            points.append((float(value["time"]), float(value["midi"])))
-        except (KeyError, TypeError, ValueError):
-            continue
-    if not points:
-        return float(note.get("pitch_exact", note.get("pitch", 60.0)))
-
-    points.sort(key=lambda item: item[0])
-    if time_sec <= points[0][0]:
-        return points[0][1]
-    if time_sec >= points[-1][0]:
-        return points[-1][1]
-    for (left_time, left_midi), (right_time, right_midi) in zip(points, points[1:]):
-        if left_time <= time_sec <= right_time:
-            alpha = (time_sec - left_time) / max(1e-6, right_time - left_time)
-            return left_midi + (right_midi - left_midi) * alpha
-    return points[-1][1]
-
-
-def build_target_f0(
-    notes: list[dict[str, Any]],
-    source_f0: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Build a 50 Hz F0 contour while retaining only local vocal expression."""
-    target_f0 = np.zeros_like(source_f0, dtype=np.float32)
-    note_mask = np.zeros_like(source_f0, dtype=np.float32)
-    frame_times = np.arange(len(source_f0), dtype=np.float64) / SOULX_F0_RATE
-
-    previous_note: dict[str, Any] | None = None
-    for note in sorted(notes, key=lambda item: (float(item.get("start", 0.0)), float(item.get("end", 0.0)))):
-        start = float(note.get("voiced_start", note.get("start", 0.0)))
-        end = float(note.get("voiced_end", note.get("end", start)))
-        if end <= start:
-            continue
-
-        active = (frame_times >= start) & (frame_times < end)
-        voiced = active & (source_f0 > 32.0)
-        if not np.any(voiced):
-            continue
-
-        indices = np.flatnonzero(active)
-        base_midi = np.asarray(
-            [note_pitch_at(note, float(frame_times[index])) for index in indices],
-            dtype=np.float32,
-        )
-
-        if previous_note is not None:
-            previous_end = float(previous_note.get("voiced_end", previous_note.get("end", start)))
-            same_syllable = bool(note.get("syllable_id")) and (
-                str(note.get("syllable_id")) == str(previous_note.get("syllable_id"))
-            )
-            is_legato = bool(note.get("legato_from_previous")) or same_syllable
-            gap = start - previous_end
-            if is_legato and -0.02 <= gap <= 0.08:
-                transition_seconds = min(0.08, max(0.03, (end - start) * 0.25))
-                alpha = np.clip((frame_times[indices] - start) / transition_seconds, 0.0, 1.0).astype(np.float32)
-                alpha = alpha * alpha * (3.0 - 2.0 * alpha)
-                previous_midi = note_pitch_at(previous_note, min(start, previous_end))
-                base_midi = previous_midi + (base_midi - previous_midi) * alpha
-
-        source_region = source_f0[indices]
-        voiced_region = source_region > 32.0
-        source_midi = np.zeros_like(source_region, dtype=np.float32)
-        source_midi[voiced_region] = hz_to_midi(source_region[voiced_region])
-        if np.count_nonzero(voiced_region) >= 2:
-            positions = np.arange(len(indices), dtype=np.float32)
-            filled = np.interp(
-                positions,
-                positions[voiced_region],
-                source_midi[voiced_region],
-            ).astype(np.float32)
-            local_center = median_filter(filled, size=15, mode="nearest")
-            expression = np.clip(filled - local_center, -0.35, 0.35)
-        else:
-            expression = np.zeros_like(source_region, dtype=np.float32)
-
-        target_midi = base_midi + expression
-        target_region = np.asarray(midi_to_hz(target_midi), dtype=np.float32)
-        target_region[~voiced_region] = 0.0
-        target_f0[indices] = target_region
-        note_mask[indices] = 1.0
-        previous_note = note
-
-    return target_f0, note_mask
-
-
 def select_prompt_window(
     audio: np.ndarray,
     f0: np.ndarray,
     duration_sec: float = 8.0,
+    target_register_hz: float | None = None,
 ) -> tuple[np.ndarray, np.ndarray, float]:
     window_frames = min(len(f0), max(1, int(round(duration_sec * SOULX_F0_RATE))))
     if len(f0) <= window_frames:
@@ -215,12 +123,51 @@ def select_prompt_window(
 
     voiced = (f0 > 32.0).astype(np.float32)
     kernel = np.ones(window_frames, dtype=np.float32)
-    scores = np.convolve(voiced, kernel, mode="valid")
-    start_frame = int(np.argmax(scores))
+    voiced_counts = np.convolve(voiced, kernel, mode="valid")
+    candidate_stride = max(1, int(round(0.5 * SOULX_F0_RATE)))
+    candidate_starts = set(range(0, len(voiced_counts), candidate_stride))
+    candidate_starts.add(int(np.argmax(voiced_counts)))
+    candidate_starts.add(len(voiced_counts) - 1)
+
+    start_frame = 0
+    best_score = -1.0
+    for candidate_start in sorted(candidate_starts):
+        candidate_f0 = f0[candidate_start:candidate_start + window_frames]
+        candidate_voiced = candidate_f0[candidate_f0 > 32.0]
+        voiced_ratio = len(candidate_voiced) / max(1, len(candidate_f0))
+        score = voiced_ratio
+        if target_register_hz is not None and target_register_hz > 32.0 and len(candidate_voiced):
+            candidate_register_hz = float(np.median(candidate_voiced))
+            distance_cents = abs(
+                1_200.0 * math.log2(candidate_register_hz / target_register_hz)
+            )
+            register_score = math.exp(-0.5 * (distance_cents / 350.0) ** 2)
+            score = 0.70 * voiced_ratio + 0.30 * register_score
+        if score > best_score:
+            best_score = score
+            start_frame = candidate_start
+
     end_frame = start_frame + window_frames
     start_sample = start_frame * SOULX_HOP_SIZE
     end_sample = min(len(audio), end_frame * SOULX_HOP_SIZE)
     return audio[start_sample:end_sample], f0[start_frame:end_frame], start_frame / SOULX_F0_RATE
+
+
+def prompt_score(
+    prompt_f0: np.ndarray,
+    target_register_hz: float | None,
+) -> float:
+    voiced = prompt_f0[prompt_f0 > 32.0]
+    voiced_ratio = len(voiced) / max(1, len(prompt_f0))
+    if target_register_hz is None or target_register_hz <= 32.0 or not len(voiced):
+        return voiced_ratio
+
+    prompt_register_hz = float(np.median(voiced))
+    distance_cents = abs(
+        1_200.0 * math.log2(prompt_register_hz / target_register_hz)
+    )
+    register_score = math.exp(-0.5 * (distance_cents / 350.0) ** 2)
+    return 0.70 * voiced_ratio + 0.30 * register_score
 
 
 def select_best_prompt(
@@ -228,19 +175,28 @@ def select_best_prompt(
     target_audio_path: Path,
     target_audio: np.ndarray,
     target_f0: np.ndarray,
+    target_register_f0: np.ndarray | None = None,
+    f0_extractor: Callable[[Path, np.ndarray], np.ndarray] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, float, Path]:
-    """Pick the most consistently voiced prompt from the active local profile."""
+    """Pick a dense profile prompt in the register of the generated part."""
     candidates: list[Path] = []
     raw_candidates = request.get("prompt_audio_candidates", [])
     if isinstance(raw_candidates, list):
         for value in raw_candidates:
             if isinstance(value, str) and value:
                 candidates.append(Path(value).expanduser().resolve())
-    candidates.append(target_audio_path)
+
+    register_curve = target_register_f0 if target_register_f0 is not None else target_f0
+    register_voiced = register_curve[register_curve > 32.0]
+    target_register_hz = (
+        float(np.median(register_voiced))
+        if len(register_voiced)
+        else None
+    )
 
     best: tuple[np.ndarray, np.ndarray, float, Path] | None = None
     best_score = -1.0
-    for candidate_path in candidates:
+    for candidate_path in candidates or [target_audio_path]:
         try:
             if candidate_path == target_audio_path:
                 candidate_audio = target_audio
@@ -249,17 +205,21 @@ def select_best_prompt(
                 candidate_audio = load_mono_24k(candidate_path)
                 if not len(candidate_audio):
                     continue
-                candidate_f0 = extract_f0(candidate_audio)
+                candidate_f0 = (
+                    f0_extractor(candidate_path, candidate_audio)
+                    if f0_extractor is not None
+                    else extract_f0(candidate_audio)
+                )
             prompt_audio, prompt_f0, prompt_start = select_prompt_window(
                 candidate_audio,
                 candidate_f0,
+                target_register_hz=target_register_hz,
             )
         except (OSError, RuntimeError, ValueError):
             continue
 
-        voiced_ratio = float(np.mean(prompt_f0 > 32.0)) if len(prompt_f0) else 0.0
         duration_score = min(1.0, len(prompt_audio) / (8.0 * SOULX_SAMPLE_RATE))
-        score = voiced_ratio * 0.9 + duration_score * 0.1
+        score = prompt_score(prompt_f0, target_register_hz) * 0.95 + duration_score * 0.05
         if score > best_score:
             best_score = score
             best = prompt_audio, prompt_f0, prompt_start, candidate_path
@@ -293,13 +253,15 @@ class SoulXRenderer:
         source_root: Path = DEFAULT_SOURCE_ROOT,
         model_path: Path = DEFAULT_MODEL_PATH,
         config_path: Path = DEFAULT_CONFIG_PATH,
+        rmvpe_model_path: Path = DEFAULT_RMVPE_MODEL_PATH,
         device: str = "auto",
-        steps: int = 16,
-        cfg: float = 3.0,
+        steps: int = DEFAULT_INFERENCE_STEPS,
+        cfg: float = DEFAULT_INFERENCE_CFG,
     ) -> None:
         self.source_root = source_root.expanduser().resolve()
         self.model_path = model_path.expanduser().resolve()
         self.config_path = config_path.expanduser().resolve()
+        self.rmvpe_model_path = rmvpe_model_path.expanduser().resolve()
         self.device = choose_device(device)
         self.steps = steps
         self.cfg = cfg
@@ -313,6 +275,7 @@ class SoulXRenderer:
 
         sys.path.insert(0, str(self.source_root))
         from cli.inference_svc import build_model  # pylint: disable=import-outside-toplevel
+        from preprocess.tools.f0_extraction import F0Extractor  # pylint: disable=import-outside-toplevel
         from soulxsinger.utils.file_utils import load_config  # pylint: disable=import-outside-toplevel
 
         self.config = load_config(str(self.config_path))
@@ -324,7 +287,35 @@ class SoulXRenderer:
         )
         if self.device == "mps":
             self.model.vocoder = CpuVocoderBridge(self.model.vocoder)
+        self.rmvpe = (
+            F0Extractor(
+                str(self.rmvpe_model_path),
+                device="cpu",
+                target_sr=SOULX_SAMPLE_RATE,
+                hop_size=SOULX_HOP_SIZE,
+                max_duration=3_600.0,
+                verbose=False,
+            )
+            if self.rmvpe_model_path.is_file()
+            else None
+        )
         self.active_adapter_path: Path | None = None
+
+    def extract_source_f0(
+        self,
+        audio_path: Path,
+        audio: np.ndarray,
+    ) -> np.ndarray:
+        if self.rmvpe is None:
+            return extract_f0(audio)
+        f0 = np.asarray(
+            self.rmvpe.process(str(audio_path), verbose=False),
+            dtype=np.float32,
+        )
+        expected_frames = max(1, int(math.ceil(len(audio) / SOULX_HOP_SIZE)))
+        if len(f0) < expected_frames:
+            f0 = np.pad(f0, (0, expected_frames - len(f0)))
+        return np.ascontiguousarray(f0[:expected_frames])
 
     def activate_adapter(self, requested_path: str | None) -> None:
         adapter_path = (
@@ -355,8 +346,17 @@ class SoulXRenderer:
         if not len(audio):
             raise ValueError(f"empty audio file: {audio_path}")
 
-        source_f0 = extract_f0(audio)
-        target_f0, note_mask = build_target_f0(notes, source_f0)
+        source_f0 = self.extract_source_f0(audio_path, audio)
+        expression_profile, expression_profile_path = (
+            load_expression_profile_for_adapter(self.active_adapter_path)
+        )
+        selection_profile = expression_profile or default_expression_profile()
+        target_f0, note_mask = build_target_f0(
+            notes,
+            source_f0,
+            selection_profile,
+            f0_rate=SOULX_F0_RATE,
+        )
         if np.count_nonzero(target_f0) < 5:
             raise ValueError("backing notes do not overlap voiced source audio")
 
@@ -365,11 +365,34 @@ class SoulXRenderer:
             audio_path,
             audio,
             source_f0,
+            target_register_f0=target_f0,
+            f0_extractor=self.extract_source_f0,
         )
+        if expression_profile is None:
+            expression_profile = analyze_expression_profile(
+                [prompt_f0],
+                f0_rate=SOULX_F0_RATE,
+            )
+            target_f0, note_mask = build_target_f0(
+                notes,
+                source_f0,
+                expression_profile,
+                f0_rate=SOULX_F0_RATE,
+            )
+
         prompt_wav = torch.from_numpy(prompt_audio).unsqueeze(0).to(self.device)
         target_wav = torch.from_numpy(audio).unsqueeze(0).to(self.device)
         prompt_f0_tensor = torch.from_numpy(prompt_f0).unsqueeze(0).to(self.device)
         target_f0_tensor = torch.from_numpy(target_f0).unsqueeze(0).to(self.device)
+        inference_steps = int(request.get("steps", self.steps))
+        inference_cfg = float(
+            request.get(
+                "cfg",
+                DEFAULT_LORA_CFG
+                if self.active_adapter_path is not None
+                else self.cfg,
+            )
+        )
 
         with torch.inference_mode():
             generated, _ = self.model.infer(
@@ -379,8 +402,8 @@ class SoulXRenderer:
                 gt_f0=target_f0_tensor,
                 auto_shift=False,
                 pitch_shift=0,
-                n_steps=int(request.get("steps", self.steps)),
-                cfg=float(request.get("cfg", self.cfg)),
+                n_steps=inference_steps,
+                cfg=inference_cfg,
                 use_fp16=False,
             )
 
@@ -394,6 +417,24 @@ class SoulXRenderer:
         if peak > 0.98:
             rendered *= 0.98 / peak
 
+        prompt_voiced = prompt_f0[prompt_f0 > 32.0]
+        target_voiced = target_f0[target_f0 > 32.0]
+        prompt_register_hz = (
+            float(np.median(prompt_voiced))
+            if len(prompt_voiced)
+            else 0.0
+        )
+        target_register_hz = (
+            float(np.median(target_voiced))
+            if len(target_voiced)
+            else 0.0
+        )
+        register_distance_cents = (
+            abs(1_200.0 * math.log2(prompt_register_hz / target_register_hz))
+            if prompt_register_hz > 0.0 and target_register_hz > 0.0
+            else 0.0
+        )
+
         output_path.parent.mkdir(parents=True, exist_ok=True)
         sf.write(str(output_path), rendered.astype(np.float32), SOULX_SAMPLE_RATE)
         return {
@@ -403,10 +444,20 @@ class SoulXRenderer:
             "notes": len(notes),
             "engine": "SoulX-Singer-SVC",
             "device": self.device,
-            "steps": int(request.get("steps", self.steps)),
+            "steps": inference_steps,
+            "cfg": inference_cfg,
             "prompt_start": prompt_start,
             "prompt_duration": len(prompt_audio) / SOULX_SAMPLE_RATE,
             "prompt_source": str(prompt_source),
+            "prompt_register_hz": prompt_register_hz,
+            "target_register_hz": target_register_hz,
+            "register_distance_cents": register_distance_cents,
+            "expression_profile": (
+                str(expression_profile_path)
+                if expression_profile_path is not None
+                else "prompt-analysis"
+            ),
+            "f0_extractor": "rmvpe" if self.rmvpe is not None else "world-dio",
             "voice_adapter": (
                 str(self.active_adapter_path)
                 if self.active_adapter_path is not None
@@ -421,14 +472,16 @@ def main() -> None:
     parser.add_argument("--source-root", type=Path, default=DEFAULT_SOURCE_ROOT)
     parser.add_argument("--model", type=Path, default=DEFAULT_MODEL_PATH)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
+    parser.add_argument("--rmvpe-model", type=Path, default=DEFAULT_RMVPE_MODEL_PATH)
     parser.add_argument("--device", default="auto")
-    parser.add_argument("--steps", type=int, default=16)
+    parser.add_argument("--steps", type=int, default=DEFAULT_INFERENCE_STEPS)
     args = parser.parse_args()
 
     renderer = SoulXRenderer(
         source_root=args.source_root,
         model_path=args.model,
         config_path=args.config,
+        rmvpe_model_path=args.rmvpe_model,
         device=args.device,
         steps=args.steps,
     )

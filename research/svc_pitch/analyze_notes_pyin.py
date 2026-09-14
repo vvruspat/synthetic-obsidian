@@ -9,6 +9,7 @@ uses librosa.pyin and returns compact note events as JSON on stdout.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -17,6 +18,68 @@ import librosa
 import numpy as np
 
 _ASR_PIPELINE = None
+_RMVPE_MODEL = None
+_RMVPE_TORCH = None
+
+
+def _first_existing_path(candidates: list[Path]) -> Path | None:
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _load_rmvpe_model():
+    global _RMVPE_MODEL, _RMVPE_TORCH
+    if _RMVPE_MODEL is not None:
+        return _RMVPE_MODEL, _RMVPE_TORCH
+
+    model_override = os.environ.get("SO_RMVPE_MODEL", "").strip()
+    model_path = _first_existing_path(
+        [
+            Path(model_override) if model_override else Path(),
+            Path.home() / ".synthetic_obsidian" / "models" / "rmvpe" / "rmvpe.pt",
+            Path.home()
+            / "Library"
+            / "Application Support"
+            / "Synthetic Obsidian"
+            / "Models"
+            / "rmvpe"
+            / "rmvpe.pt",
+        ]
+    )
+    if model_path is None:
+        raise RuntimeError("RMVPE model not found; expected ~/.synthetic_obsidian/models/rmvpe/rmvpe.pt")
+
+    implementation_override = os.environ.get("SO_RMVPE_IMPLEMENTATION", "").strip()
+    implementation_path = _first_existing_path(
+        [
+            Path(implementation_override) if implementation_override else Path(),
+            Path.home()
+            / ".synthetic_obsidian"
+            / "runtime"
+            / "soulx-singer"
+            / "source"
+            / "preprocess"
+            / "tools"
+            / "f0_extraction.py",
+        ]
+    )
+    if implementation_path is None:
+        raise RuntimeError("RMVPE implementation not found in the installed voice runtime")
+
+    spec = importlib.util.spec_from_file_location("_synthetic_obsidian_rmvpe", implementation_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"could not load RMVPE implementation: {implementation_path}")
+
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    import torch
+
+    device = os.environ.get("SO_RMVPE_DEVICE", "cpu").strip() or "cpu"
+    _RMVPE_MODEL = module.RMVPE(str(model_path), is_half=False, device=device)
+    _RMVPE_TORCH = torch
+    return _RMVPE_MODEL, _RMVPE_TORCH
 
 
 def _fill_short_gaps(midi: np.ndarray, conf: np.ndarray, max_gap_frames: int) -> np.ndarray:
@@ -63,6 +126,171 @@ def _median_smooth(midi: np.ndarray, radius: int = 4) -> np.ndarray:
         if len(voiced) >= 3:
             result[idx] = int(np.median(voiced))
     return result
+
+
+def _build_pitch_runs(midi_float: np.ndarray, hop_sec: float) -> list[dict]:
+    valid_indices = np.flatnonzero(np.isfinite(midi_float))
+    if valid_indices.size == 0 or hop_sec <= 0.0:
+        return []
+
+    max_connected_gap_frames = max(1, int(round(0.10 / hop_sec)))
+    runs: list[dict] = []
+    current_indices = [int(valid_indices[0])]
+    for raw_index in valid_indices[1:]:
+        index = int(raw_index)
+        previous = current_indices[-1]
+        connected_in_time = index - previous <= max_connected_gap_frames
+        connected_in_pitch = abs(float(midi_float[index] - midi_float[previous])) <= 3.5
+        if connected_in_time and connected_in_pitch:
+            current_indices.append(index)
+            continue
+
+        run_indices = np.asarray(current_indices, dtype=np.int32)
+        runs.append(
+            {
+                "indices": run_indices,
+                "pitch": float(np.median(midi_float[run_indices])),
+                "duration": float((run_indices[-1] - run_indices[0] + 1) * hop_sec),
+            }
+        )
+        current_indices = [index]
+
+    run_indices = np.asarray(current_indices, dtype=np.int32)
+    runs.append(
+        {
+            "indices": run_indices,
+            "pitch": float(np.median(midi_float[run_indices])),
+            "duration": float((run_indices[-1] - run_indices[0] + 1) * hop_sec),
+        }
+    )
+    return runs
+
+
+def _find_suspicious_pitch_regions(
+    midi_float: np.ndarray,
+    hop_sec: float,
+) -> list[tuple[float, float]]:
+    runs = _build_pitch_runs(midi_float, hop_sec)
+    if len(runs) < 2:
+        return []
+
+    max_transition_gap_frames = max(1, int(round(0.38 / hop_sec)))
+    padding_frames = max(1, int(round(0.45 / hop_sec)))
+    regions: list[tuple[int, int]] = []
+    for previous, current in zip(runs, runs[1:]):
+        previous_indices = previous["indices"]
+        current_indices = current["indices"]
+        gap_frames = int(current_indices[0] - previous_indices[-1] - 1)
+        pitch_delta = abs(float(current["pitch"]) - float(previous["pitch"]))
+        if gap_frames > max_transition_gap_frames or pitch_delta < 7.5:
+            continue
+
+        first = max(0, int(previous_indices[-1]) - padding_frames)
+        last = min(len(midi_float) - 1, int(current_indices[0]) + padding_frames)
+        regions.append((first, last))
+
+    if not regions:
+        return []
+
+    merged: list[tuple[int, int]] = []
+    merge_gap_frames = max(1, int(round(0.12 / hop_sec)))
+    for first, last in regions:
+        if merged and first <= merged[-1][1] + merge_gap_frames:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], last))
+        else:
+            merged.append((first, last))
+
+    return [
+        (float(first * hop_sec), float((last + 1) * hop_sec))
+        for first, last in merged
+    ]
+
+
+def _repair_isolated_pitch_outliers(
+    midi_float: np.ndarray,
+    confidence: np.ndarray,
+    hop_sec: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Repair short subharmonic islands without flattening sustained note changes."""
+    repaired = midi_float.copy()
+    repaired_confidence = confidence.copy()
+    if len(repaired) == 0 or hop_sec <= 0.0:
+        return repaired, repaired_confidence
+
+    runs = _build_pitch_runs(repaired, hop_sec)
+    if len(runs) < 3:
+        return repaired, repaired_confidence
+
+    max_neighbour_gap_frames = max(1, int(round(0.38 / hop_sec)))
+
+    def stable_neighbour(run_index: int, direction: int) -> dict | None:
+        current = runs[run_index]
+        current_indices = current["indices"]
+        candidate_index = run_index + direction
+        while 0 <= candidate_index < len(runs):
+            candidate = runs[candidate_index]
+            candidate_indices = candidate["indices"]
+            if direction < 0:
+                gap_frames = int(current_indices[0] - candidate_indices[-1] - 1)
+            else:
+                gap_frames = int(candidate_indices[0] - current_indices[-1] - 1)
+            if gap_frames > max_neighbour_gap_frames:
+                return None
+            if float(candidate["duration"]) >= 0.08:
+                return candidate
+            candidate_index += direction
+        return None
+
+    for run_index, run in enumerate(runs):
+        if float(run["duration"]) > 0.24:
+            continue
+
+        previous = stable_neighbour(run_index, -1)
+        following = stable_neighbour(run_index, 1)
+        if previous is None or following is None:
+            continue
+
+        references = [float(previous["pitch"]), float(following["pitch"])]
+        run_pitch = float(run["pitch"])
+        raw_cost = sum(abs(run_pitch - reference) for reference in references)
+        if raw_cost < 12.0:
+            continue
+
+        octave_candidates = [
+            (
+                sum(abs(run_pitch + shift - reference) for reference in references),
+                shift,
+            )
+            for shift in (-24.0, -12.0, 12.0, 24.0)
+        ]
+        corrected_cost, best_shift = min(octave_candidates, key=lambda item: item[0])
+        corrected_pitch = run_pitch + best_shift
+        corrected_neighbour_distances = [
+            abs(corrected_pitch - reference)
+            for reference in references
+        ]
+        indices = run["indices"]
+        if (
+            raw_cost - corrected_cost >= 7.0
+            and min(corrected_neighbour_distances) <= 2.5
+            and max(corrected_neighbour_distances) <= 7.0
+        ):
+            repaired[indices] += best_shift
+            repaired_confidence[indices] *= 0.85
+            continue
+
+        neighbours_agree = (
+            abs(float(previous["pitch"]) - float(following["pitch"])) <= 4.0
+        )
+        if (
+            neighbours_agree
+            and float(run["duration"]) <= 0.13
+            and min(abs(run_pitch - reference) for reference in references) >= 8.0
+        ):
+            repaired[indices] = np.nan
+            repaired_confidence[indices] = 0.0
+
+    return repaired.astype(np.float32), np.clip(repaired_confidence, 0.0, 1.0).astype(np.float32)
 
 
 def _nearest_resample_track(
@@ -159,6 +387,85 @@ def _compute_crepe_track(
             np.full(len(target_times), np.nan, dtype=np.float32),
             np.zeros(len(target_times), dtype=np.float32),
         )
+
+
+def _compute_crepe_track_for_regions(
+    y: np.ndarray,
+    sr: int,
+    target_times: np.ndarray,
+    hop_sec: float,
+    sensitivity: float,
+    regions: list[tuple[float, float]],
+) -> tuple[np.ndarray, np.ndarray]:
+    midi = np.full(len(target_times), np.nan, dtype=np.float32)
+    confidence = np.zeros(len(target_times), dtype=np.float32)
+    for region_start, region_end in regions:
+        sample_start = max(0, int(np.floor(region_start * sr)))
+        sample_end = min(len(y), int(np.ceil(region_end * sr)))
+        if sample_end - sample_start < max(256, int(round(0.08 * sr))):
+            continue
+
+        actual_start = sample_start / float(sr)
+        actual_end = sample_end / float(sr)
+        target_mask = (target_times >= actual_start) & (target_times <= actual_end)
+        if not np.any(target_mask):
+            continue
+
+        local_times = target_times[target_mask] - actual_start
+        local_midi, local_confidence = _compute_crepe_track(
+            y[sample_start:sample_end],
+            sr,
+            local_times,
+            hop_sec,
+            sensitivity,
+        )
+        target_indices = np.flatnonzero(target_mask)
+        replace = local_confidence > confidence[target_indices]
+        if not np.any(replace):
+            continue
+
+        selected_indices = target_indices[replace]
+        midi[selected_indices] = local_midi[replace]
+        confidence[selected_indices] = local_confidence[replace]
+
+    return midi, confidence
+
+
+def _compute_rmvpe_track(
+    y: np.ndarray,
+    sr: int,
+    target_times: np.ndarray,
+    hop_sec: float,
+    sensitivity: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    model, torch = _load_rmvpe_model()
+    y_16k = librosa.resample(y, orig_sr=sr, target_sr=16000).astype(np.float32, copy=False)
+    if y_16k.size == 0:
+        return (
+            np.full(len(target_times), np.nan, dtype=np.float32),
+            np.zeros(len(target_times), dtype=np.float32),
+        )
+
+    threshold = 0.06 - 0.04 * float(np.clip(sensitivity, 0.0, 1.0))
+    audio = torch.from_numpy(y_16k).float().unsqueeze(0).to(model.device)
+    with torch.no_grad():
+        mel = model.mel_extractor(audio, center=True)
+        hidden = model.mel2hidden(mel).squeeze(0).float().cpu().numpy()
+
+    f0 = model.decode(hidden, thred=threshold).astype(np.float32)
+    confidence = np.max(hidden, axis=1).astype(np.float32)
+    source_times = np.arange(len(f0), dtype=np.float32) * 0.01
+    midi = np.full(len(f0), np.nan, dtype=np.float32)
+    valid = np.isfinite(f0) & (f0 > 0.0)
+    midi[valid] = librosa.hz_to_midi(f0[valid]).astype(np.float32)
+    confidence[~valid] = 0.0
+    return _nearest_resample_track(
+        midi,
+        np.clip(confidence, 0.0, 1.0),
+        source_times,
+        target_times,
+        max(0.018, hop_sec * 1.75),
+    )
 
 
 def _combine_pitch_tracks(
@@ -890,6 +1197,7 @@ def _compute_pitch_tracks(
     offset: float = 0.0,
     duration: float | None = None,
     pitch_backend: str = "hybrid",
+    allow_unvoiced: bool = False,
 ) -> dict:
     sample_rate = 22050
     hop_length = 256
@@ -902,32 +1210,60 @@ def _compute_pitch_tracks(
     if y.size == 0:
         return {"empty": True}
 
-    f0, voiced_flag, voiced_prob = librosa.pyin(
-        y,
-        fmin=librosa.note_to_hz("C2"),
-        fmax=librosa.note_to_hz("C6"),
-        sr=sr,
-        frame_length=2048,
-        hop_length=hop_length,
-        fill_na=np.nan,
-    )
-
-    local_times = librosa.frames_to_time(np.arange(len(f0)), sr=sr, hop_length=hop_length)
-    conf = np.nan_to_num(voiced_prob, nan=0.0).astype(np.float32)
-    midi = np.full(len(f0), -1, dtype=np.int32)
-    valid = np.isfinite(f0) & voiced_flag & (conf >= confidence_threshold)
-    midi[valid] = np.rint(librosa.hz_to_midi(f0[valid])).astype(np.int32)
-    midi_float = np.full(len(f0), np.nan, dtype=np.float32)
-    midi_float[valid] = librosa.hz_to_midi(f0[valid]).astype(np.float32)
-
     hop_sec = hop_length / sr
-    use_crepe = pitch_backend == "hybrid" and os.environ.get("SO_DISABLE_CREPE", "0") != "1"
+    if pitch_backend == "rmvpe":
+        frame_count = 1 + len(y) // hop_length
+        local_times = librosa.frames_to_time(np.arange(frame_count), sr=sr, hop_length=hop_length)
+        midi_float, conf = _compute_rmvpe_track(y, sr, local_times, hop_sec, sensitivity)
+        if not np.any(np.isfinite(midi_float)):
+            if allow_unvoiced:
+                return {"empty": True}
+            raise RuntimeError("RMVPE pitch analysis did not produce a voiced contour")
+    else:
+        f0, voiced_flag, voiced_prob = librosa.pyin(
+            y,
+            fmin=librosa.note_to_hz("C2"),
+            fmax=librosa.note_to_hz("C6"),
+            sr=sr,
+            frame_length=2048,
+            hop_length=hop_length,
+            fill_na=np.nan,
+        )
+
+        local_times = librosa.frames_to_time(np.arange(len(f0)), sr=sr, hop_length=hop_length)
+        conf = np.nan_to_num(voiced_prob, nan=0.0).astype(np.float32)
+        valid = np.isfinite(f0) & voiced_flag & (conf >= confidence_threshold)
+        midi_float = np.full(len(f0), np.nan, dtype=np.float32)
+        midi_float[valid] = librosa.hz_to_midi(f0[valid]).astype(np.float32)
+
+    use_crepe = pitch_backend in ("hybrid", "contextual") and os.environ.get("SO_DISABLE_CREPE", "0") != "1"
     if use_crepe:
-        crepe_midi, crepe_conf = _compute_crepe_track(y, sr, local_times, hop_sec, sensitivity)
-        midi_float, conf = _combine_pitch_tracks(midi_float, conf, crepe_midi, crepe_conf)
-        midi = np.full(len(f0), -1, dtype=np.int32)
-        valid = np.isfinite(midi_float) & (conf >= confidence_threshold)
-        midi[valid] = np.rint(midi_float[valid]).astype(np.int32)
+        if pitch_backend == "contextual":
+            suspicious_regions = _find_suspicious_pitch_regions(midi_float, hop_sec)
+            crepe_midi, crepe_conf = _compute_crepe_track_for_regions(
+                y,
+                sr,
+                local_times,
+                hop_sec,
+                sensitivity,
+                suspicious_regions,
+            )
+        else:
+            crepe_midi, crepe_conf = _compute_crepe_track(y, sr, local_times, hop_sec, sensitivity)
+
+        if np.any(np.isfinite(crepe_midi)):
+            midi_float, conf = _combine_pitch_tracks(midi_float, conf, crepe_midi, crepe_conf)
+
+    midi_float, conf = _repair_isolated_pitch_outliers(midi_float, conf, hop_sec)
+    corrected_f0 = np.zeros(len(midi_float), dtype=np.float32)
+    corrected_f0_mask = np.isfinite(midi_float)
+    corrected_f0[corrected_f0_mask] = (
+        440.0 * np.power(2.0, (midi_float[corrected_f0_mask] - 69.0) / 12.0)
+    ).astype(np.float32)
+
+    midi = np.full(len(midi_float), -1, dtype=np.int32)
+    valid = np.isfinite(midi_float) & (conf >= confidence_threshold)
+    midi[valid] = np.rint(midi_float[valid]).astype(np.int32)
 
     midi = _fill_short_gaps(midi, conf, max_gap_frames=int(round(fill_gap_sec / hop_sec)))
     midi = _median_smooth(midi, radius=4)
@@ -940,7 +1276,7 @@ def _compute_pitch_tracks(
         "sensitivity": sensitivity,
         "midi": midi,
         "midi_float": midi_float,
-        "f0": np.nan_to_num(f0, nan=0.0),
+        "f0": corrected_f0,
         "conf": conf,
         "times": times,
         "hop_sec": hop_sec,
@@ -1026,6 +1362,7 @@ def analyze_windows(
             offset=start_time,
             duration=duration,
             pitch_backend=pitch_backend,
+            allow_unvoiced=True,
         )
         if tracks["empty"]:
             continue
@@ -1093,7 +1430,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("audio_file", type=Path)
     parser.add_argument("--sensitivity", type=float, default=0.72)
-    parser.add_argument("--pitch-backend", choices=("pyin", "hybrid"), default="hybrid")
+    parser.add_argument("--pitch-backend", choices=("pyin", "rmvpe", "hybrid", "contextual"), default="contextual")
     parser.add_argument("--analysis-window", action="append", type=_parse_analysis_window, default=[])
     parser.add_argument("--region", action="append", type=_parse_region, default=[])
     args = parser.parse_args()

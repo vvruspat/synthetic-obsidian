@@ -31,6 +31,7 @@ if TORCH_STACK_AVAILABLE:
             event_metrics,
             extract_event_frames,
             extract_rising_edges,
+            apply_supervision_intervals,
             make_targets,
             match_events,
             positive_weights,
@@ -50,6 +51,7 @@ if TORCH_STACK_AVAILABLE:
             event_metrics,
             extract_event_frames,
             extract_rising_edges,
+            apply_supervision_intervals,
             make_targets,
             match_events,
             positive_weights,
@@ -194,7 +196,55 @@ class BaselineTest(unittest.TestCase):
         features, padded_targets = dataset[0]
         self.assertEqual(tuple(features.shape), (64, 80))
         self.assertEqual(tuple(padded_targets.shape), (4, 80))
-        self.assertEqual(float(padded_targets.sum()), 13.0)
+        self.assertEqual(float(torch.nansum(padded_targets)), 13.0)
+        self.assertTrue(torch.isnan(padded_targets[:, 50:]).all())
+
+    def test_supervision_intervals_nan_mask_untrusted_frames(self) -> None:
+        targets = np.zeros((4, 20), dtype=np.float32)
+        targets[1, 12] = 1.0
+
+        masked = apply_supervision_intervals(targets, [[0.1, 0.15]])
+
+        self.assertTrue(np.isnan(masked[:, :10]).all())
+        self.assertTrue(np.isfinite(masked[:, 10:15]).all())
+        self.assertTrue(np.isnan(masked[:, 15:]).all())
+        self.assertEqual(float(masked[1, 12]), 1.0)
+
+    def test_chunk_dataset_skips_fully_unsupervised_windows(self) -> None:
+        targets = np.full((4, 12), np.nan, dtype=np.float32)
+        targets[1, 8:10] = 0.0
+        dataset = ChunkDataset([self.make_example(targets)], chunk_frames=4)
+
+        self.assertEqual(dataset.index, [(0, 6), (0, 8)])
+
+    def test_event_metrics_ignore_predictions_outside_supervision(self) -> None:
+        targets = np.full((4, 10), np.nan, dtype=np.float32)
+        targets[1, 4:8] = 0.0
+        targets[1, 5] = 1.0
+        example = Example(
+            features=np.zeros((64, 10), dtype=np.float32),
+            targets=targets,
+            event_frames=(
+                np.asarray([], dtype=np.int64),
+                np.asarray([5], dtype=np.int64),
+                np.asarray([], dtype=np.int64),
+                np.asarray([], dtype=np.int64),
+            ),
+            record_id="test",
+        )
+        probabilities = np.zeros((4, 10), dtype=np.float32)
+        probabilities[1, [1, 5]] = 0.9
+
+        metrics = event_metrics(
+            [probabilities],
+            [example],
+            thresholds=(0.5, 0.5, 0.5, 0.5),
+            tolerance_frames=0,
+            min_distance_frames=1,
+        )
+
+        self.assertEqual(metrics["syllable"]["true_positive"], 1)
+        self.assertEqual(metrics["syllable"]["false_positive"], 0)
 
     def test_interval_targets_fill_half_open_frame_ranges(self) -> None:
         targets = make_targets(

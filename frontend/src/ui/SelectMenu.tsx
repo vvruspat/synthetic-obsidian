@@ -6,6 +6,7 @@ export type SelectMenuOption<TValue extends string> = {
   value: TValue;
   label: string;
   icon: IconComponent;
+  shortcut?: string;
 };
 
 type SelectMenuProps<TValue extends string> = {
@@ -76,6 +77,7 @@ export function SelectMenu<TValue extends string>({
                 <OptionIcon strokeWidth={1.8} />
               </span>
               <strong>{option.label}</strong>
+              {option.shortcut ? <kbd>{option.shortcut}</kbd> : null}
             </button>
           );
         })}

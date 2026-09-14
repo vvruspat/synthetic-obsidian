@@ -19,7 +19,7 @@ if str(TRANSFORMER_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(TRANSFORMER_SCRIPTS))
 
 from model import BackingTransformer, ModelConfig, OFFSET_MIN, continuous_features  # noqa: E402
-from generate_backing_vocals import (  # noqa: E402
+from backing_vocal_music import (  # noqa: E402
     build_beat_map,
     build_windows,
     chord_at,

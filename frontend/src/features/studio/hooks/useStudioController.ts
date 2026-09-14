@@ -2,6 +2,7 @@ import {
   type DragEvent,
   type PointerEvent as ReactPointerEvent,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -9,6 +10,8 @@ import {
 } from "react";
 import type { PluginBridge } from "@/bridge/plugin-bridge";
 import type {
+  BackingGenerator,
+  BackingTrackInstance,
   BackingTrackName,
   CorrectionToolId,
   CycleRange,
@@ -21,9 +24,11 @@ import type {
 } from "@/domain/studio";
 import {
   chordLabelAtPosition,
+  chordPitchClasses,
   snapClipsToChords,
   snapPitchToChord,
 } from "@/features/studio/lib/chord-snap";
+import type { ShortcutBindings } from "@/features/studio/lib/hotkeys";
 import {
   createMusicalTimeline,
   formatMusicalPosition,
@@ -33,10 +38,10 @@ import { createPitchPath, PITCH_ROW_HEIGHT, PITCH_TOP } from "@/features/studio/
 import {
   createManualClip,
   getJoinCandidateIds,
+  getMinimumClipWidthPercent,
   joinClips,
   MAX_GAIN_DB,
   MAX_VIBRATO_SCALE,
-  MIN_CLIP_WIDTH_PERCENT,
   MIN_GAIN_DB,
   moveSelectedClips,
   nextManualClipId,
@@ -48,12 +53,23 @@ import {
   stretchClipTo,
 } from "@/features/studio/lib/pitch-editing";
 import { getNextTrackSelection } from "@/features/studio/lib/track-selection";
-import { formatTime, getCenteredTimelineScrollLeft } from "@/features/studio/lib/transport";
+import {
+  formatTime,
+  getCenteredTimelineScrollLeft,
+  getGestureZoom,
+} from "@/features/studio/lib/transport";
 
 const HORIZONTAL_ZOOM_MIN = 1;
 const HORIZONTAL_ZOOM_MAX = 32;
 const VERTICAL_ZOOM_MIN = 1;
 const VERTICAL_ZOOM_MAX = 4;
+const BACKING_GENERATOR_STORAGE_KEY = "synthetic-obsidian.backing-generator";
+const initialBackingGenerator = (): BackingGenerator => {
+  const stored = window.localStorage.getItem(BACKING_GENERATOR_STORAGE_KEY);
+  return stored === "local" || stored === "terra" || stored === "luna" ? stored : "luna";
+};
+const normaliseWheelDelta = (deltaY: number, deltaMode: number) =>
+  deltaY * (deltaMode === 1 ? 16 : deltaMode === 2 ? window.innerHeight : 1);
 
 type PitchEditorGesture =
   | {
@@ -100,19 +116,31 @@ type PitchEditorGesture =
       gainDb: number;
     };
 
-export function useStudioController(bridge: PluginBridge, project: StudioProject) {
+export function useStudioController(
+  bridge: PluginBridge,
+  project: StudioProject,
+  shortcutBindings: ShortcutBindings,
+) {
+  const minimumClipWidth = getMinimumClipWidthPercent(project.timelineDurationSeconds);
   const [playing, setPlaying] = useState(false);
   const [playhead, setPlayhead] = useState(project.initialPlayhead);
   const [looping, setLoopingState] = useState(project.initialLoopActive);
   const [cycleRange, setCycleRangeState] = useState(project.initialCycleRange);
+  const loopingRef = useRef(project.initialLoopActive);
+  const cycleRangeRef = useRef(project.initialCycleRange);
   const [volume, setVolume] = useState(project.initialVolume);
+  const [instrumentalVolume, setInstrumentalVolume] = useState(
+    project.initialInstrumentalVolume ?? 70,
+  );
+  const [backingGenerator, setBackingGeneratorState] =
+    useState<BackingGenerator>(initialBackingGenerator);
   const [outputLevels, setOutputLevels] = useState({ left: 0, right: 0 });
   const [clips, setClips] = useState(project.clips);
   const [backingClipsByTrack, setBackingClipsByTrack] = useState<
-    Partial<Record<BackingTrackName, VocalClip[]>>
+    Partial<Record<string, VocalClip[]>>
   >(
     Object.fromEntries(
-      project.backingTrackContents.map(({ track, clips: trackClips }) => [track, trackClips]),
+      project.backingTrackContents.map(({ id, clips: trackClips }) => [id, trackClips]),
     ),
   );
   const [horizontalZoom, setHorizontalZoom] = useState(1);
@@ -120,11 +148,12 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
   const [leftCorrectionTool, setLeftCorrectionTool] = useState<CorrectionToolId>("pointer");
   const [rightCorrectionTool, setRightCorrectionTool] = useState<CorrectionToolId>("scissors");
   const [chordSnapEnabled, setChordSnapEnabled] = useState(false);
+  const [dragChordPitchClasses, setDragChordPitchClasses] = useState<number[]>([]);
   const [secondaryToolModifierActive, setSecondaryToolModifierActive] = useState(false);
   const [selectedClipIds, setSelectedClipIds] = useState<string[]>([]);
   const [pianoCollapsed, setPianoCollapsed] = useState(false);
   const [serviceTracksCollapsed, setServiceTracksCollapsed] = useState(false);
-  const [backingTracks, setBackingTracks] = useState<BackingTrackName[]>(
+  const [backingTracks, setBackingTracks] = useState<BackingTrackInstance[]>(
     project.initialBackingTracks,
   );
   const [selectedTracks, setSelectedTracks] = useState<TrackName[]>([
@@ -132,7 +161,7 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
       ? "Voice Main"
       : project.hasInstrumental
         ? "Instrumental"
-        : (project.initialBackingTracks[0] ?? "Voice Main"),
+        : (project.initialBackingTracks[0]?.id ?? "Voice Main"),
   ]);
   const [trackState, setTrackState] = useState<Record<string, TrackChannelState>>(
     Object.fromEntries(project.initialTrackState.map(({ track, state }) => [track, state])),
@@ -164,7 +193,7 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
   useEffect(() => {
     setBackingClipsByTrack(
       Object.fromEntries(
-        project.backingTrackContents.map(({ track, clips: trackClips }) => [track, trackClips]),
+        project.backingTrackContents.map(({ id, clips: trackClips }) => [id, trackClips]),
       ),
     );
   }, [project.backingTrackContents]);
@@ -177,14 +206,14 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
     const availableTracks = new Set<TrackName>([
       ...(project.hasInstrumental ? (["Instrumental"] as const) : []),
       ...(project.hasVocal ? (["Voice Main"] as const) : []),
-      ...backingTracks,
+      ...backingTracks.map((track) => track.id),
     ]);
     setSelectedTracks((current) => {
       const availableSelection = current.filter((track) => availableTracks.has(track));
       if (availableSelection.length > 0) return availableSelection;
       if (project.hasVocal) return ["Voice Main"];
       if (project.hasInstrumental) return ["Instrumental"];
-      return backingTracks.length > 0 ? [backingTracks[0]] : ["Voice Main"];
+      return backingTracks.length > 0 ? [backingTracks[0].id] : ["Voice Main"];
     });
   }, [backingTracks, project.hasInstrumental, project.hasVocal]);
 
@@ -200,6 +229,10 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
     );
   }, [project.initialTrackLayerState]);
 
+  useEffect(() => {
+    setInstrumentalVolume(project.initialInstrumentalVolume ?? 70);
+  }, [project.initialInstrumentalVolume]);
+
   const editorRef = useRef<HTMLFieldSetElement>(null);
   const arrangementScrollRef = useRef<HTMLElement>(null);
   const timelineContentRef = useRef<HTMLDivElement>(null);
@@ -207,7 +240,7 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
   const arrangementTrackScrollRef = useRef<HTMLDivElement>(null);
   const pianoRollScrollRef = useRef<HTMLDivElement>(null);
   const pianoKeysScrollRef = useRef<HTMLDivElement>(null);
-  const horizontalZoomFrameRef = useRef(0);
+  const horizontalZoomAnchorRef = useRef<number | null>(null);
   const verticalZoomAnchorRef = useRef<number | null>(null);
   const zoomWheelRef = useRef({ frame: 0, horizontal: 0, vertical: 0 });
   const editorGestureRef = useRef<PitchEditorGesture | null>(null);
@@ -219,17 +252,23 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
         switch (event.type) {
           case "project-state":
           case "status-state":
+          case "audio-settings-state":
             break;
           case "transport-state":
             setPlaying(event.playing);
             setPlayhead(event.playhead);
             break;
           case "loop-state":
+            loopingRef.current = event.active;
+            cycleRangeRef.current = event.range;
             setLoopingState(event.active);
             setCycleRangeState(event.range);
             break;
           case "volume-state":
             setVolume(event.value);
+            break;
+          case "instrumental-volume-state":
+            setInstrumentalVolume(event.value);
             break;
           case "output-meter-state":
             setOutputLevels({ left: event.left, right: event.right });
@@ -248,10 +287,15 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
               [event.track]: event.state,
             }));
             break;
-          case "backing-track-added":
+          case "backing-track-created":
             setBackingTracks((current) =>
-              current.includes(event.track) ? current : [...current, event.track],
+              current.some((track) => track.id === event.track.id)
+                ? current
+                : [...current, event.track],
             );
+            setSelectedTracks([event.track.id]);
+            setSelectedClipIds([]);
+            bridge.send({ type: "select-tracks", tracks: [event.track.id] });
             break;
           case "clip-pitch-state":
             if (event.track === "Voice Main") {
@@ -261,7 +305,7 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
                 ),
               );
             } else {
-              const backingTrack = event.track as BackingTrackName;
+              const backingTrack = event.track;
               setBackingClipsByTrack((current) => ({
                 ...current,
                 [backingTrack]: (current[backingTrack] ?? []).map((clip) =>
@@ -345,10 +389,10 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
       },
     };
     for (const track of backingTracks) {
-      const content = project.backingTrackContents.find((item) => item.track === track);
-      availability[track] = {
+      const content = project.backingTrackContents.find((item) => item.id === track.id);
+      availability[track.id] = {
         audioAvailable: content?.hasAudio ?? false,
-        notesAvailable: (backingClipsByTrack[track]?.length ?? 0) > 0,
+        notesAvailable: (backingClipsByTrack[track.id]?.length ?? 0) > 0,
       };
     }
     return availability;
@@ -361,8 +405,7 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
   ]);
   const activePitchTrack: Exclude<TrackName, "Instrumental"> | null =
     selectedTracks.length === 1 && selectedTracks[0] !== "Instrumental" ? selectedTracks[0] : null;
-  const chordSnapAvailable =
-    activePitchTrack !== null && activePitchTrack !== "Voice Main" && project.chords.length > 0;
+  const chordSnapAvailable = activePitchTrack !== null && project.chords.length > 0;
   const chordSnapActive = chordSnapEnabled && chordSnapAvailable;
   const activeEditorClips =
     activePitchTrack === null
@@ -385,7 +428,7 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
   }, [editorClips]);
   const selectedTrackContent =
     selectedTracks.length === 1 && selectedTracks[0] !== "Instrumental"
-      ? project.backingTrackContents.find((item) => item.track === selectedTracks[0])
+      ? project.backingTrackContents.find((item) => item.id === selectedTracks[0])
       : undefined;
   const editorWaveform =
     selectedTracks.length !== 1
@@ -446,13 +489,21 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
   };
 
   const setLooping = (active: boolean) => {
+    loopingRef.current = active;
     setLoopingState(active);
-    bridge.send({ type: "set-loop", active, range: cycleRange });
+    bridge.send({ type: "set-loop", active, range: cycleRangeRef.current });
   };
 
-  const setCycleRange = (range: CycleRange) => {
+  const setCycleRange = (range: CycleRange, active: boolean) => {
+    cycleRangeRef.current = range;
+    loopingRef.current = active;
     setCycleRangeState(range);
-    bridge.send({ type: "set-loop", active: looping, range });
+    setLoopingState(active);
+  };
+
+  const commitCycleRange = (range: CycleRange, active: boolean) => {
+    setCycleRange(range, active);
+    bridge.send({ type: "set-loop", active, range });
   };
 
   const setPlayheadPosition = (position: number) => {
@@ -465,6 +516,11 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
   const setVolumeValue = (value: number) => {
     setVolume(value);
     bridge.send({ type: "set-volume", value });
+  };
+
+  const setInstrumentalVolumeValue = (value: number) => {
+    setInstrumentalVolume(value);
+    bridge.send({ type: "set-instrumental-volume", value });
   };
 
   const toggleTrack = (name: TrackName, mode: keyof TrackChannelState) => {
@@ -493,29 +549,36 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
   };
 
   const addBackingTrack = (name: BackingTrackName) => {
-    if (backingTracks.includes(name)) return;
-    setBackingTracks((current) => [...current, name]);
-    setTrackState((current) => ({
-      ...current,
-      [name]: { mute: false, solo: false },
-    }));
-    bridge.send({ type: "add-backing-track", track: name });
+    bridge.send({ type: "add-backing-track", track: name, generator: backingGenerator });
   };
 
-  const regenerateBackingTrack = (name: BackingTrackName) => {
-    bridge.send({ type: "regenerate-backing-track", track: name });
+  const regenerateBackingTrack = (trackId: string) => {
+    bridge.send({ type: "regenerate-backing-track", track: trackId, generator: backingGenerator });
   };
 
-  const renderBackingTrack = (name: BackingTrackName) => {
-    bridge.send({ type: "render-backing-track", track: name });
+  const setBackingGenerator = (generator: BackingGenerator) => {
+    setBackingGeneratorState(generator);
+    window.localStorage.setItem(BACKING_GENERATOR_STORAGE_KEY, generator);
   };
 
-  const setBackingVoiceProfile = (name: BackingTrackName, profileId: string) => {
+  const renderBackingTrack = (trackId: string) => {
+    bridge.send({ type: "render-backing-track", track: trackId });
+  };
+
+  const removeBackingTrack = (trackId: string) => {
+    bridge.send({ type: "remove-backing-track", track: trackId });
+  };
+
+  const setBackingVoiceProfile = (trackId: string, profileId: string) => {
     bridge.send({
       type: "set-backing-voice-profile",
-      track: name,
+      track: trackId,
       profileId,
     });
+  };
+
+  const deleteVoiceProfile = (profileId: string) => {
+    bridge.send({ type: "delete-voice-profile", profileId });
   };
 
   const undoPitchEdit = () => {
@@ -534,8 +597,20 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
     bridge.send({ type: "project-action", action: "open-project" });
   };
 
+  const newProject = () => {
+    bridge.send({ type: "project-action", action: "new-project" });
+  };
+
   const saveProject = () => {
     bridge.send({ type: "project-action", action: "save-project" });
+  };
+
+  const undo = () => {
+    bridge.send({ type: "project-action", action: "undo" });
+  };
+
+  const redo = () => {
+    bridge.send({ type: "project-action", action: "redo" });
   };
 
   const exportAllTracks = () => {
@@ -575,48 +650,26 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
     }
   };
 
-  const centerHorizontalZoomOnPlayhead = () => {
-    const anchor = playhead / 100;
-    cancelAnimationFrame(horizontalZoomFrameRef.current);
-    horizontalZoomFrameRef.current = requestAnimationFrame(() => {
-      horizontalZoomFrameRef.current = requestAnimationFrame(() => {
-        const scroller = arrangementScrollRef.current;
-        if (!scroller) return;
-        scroller.scrollLeft = getCenteredTimelineScrollLeft(
-          anchor,
-          scroller.scrollWidth,
-          scroller.clientWidth,
-        );
-      });
-    });
-  };
-
-  const changeHorizontalZoom = (delta: number) => {
-    centerHorizontalZoomOnPlayhead();
+  const changeHorizontalZoom = (wheelDelta: number) => {
+    horizontalZoomAnchorRef.current = playhead / 100;
     setHorizontalZoom((current) =>
-      Math.max(
-        HORIZONTAL_ZOOM_MIN,
-        Math.min(HORIZONTAL_ZOOM_MAX, Number((current + delta).toFixed(2))),
-      ),
+      getGestureZoom(current, wheelDelta, HORIZONTAL_ZOOM_MIN, HORIZONTAL_ZOOM_MAX),
     );
   };
 
-  const changeVerticalZoom = (delta: number) => {
+  const changeVerticalZoom = (wheelDelta: number) => {
     const scroller = pianoRollScrollRef.current;
     if (scroller) {
       verticalZoomAnchorRef.current =
         (scroller.scrollTop + scroller.clientHeight / 2) / Math.max(1, scroller.scrollHeight);
     }
     setVerticalZoom((current) =>
-      Math.max(
-        VERTICAL_ZOOM_MIN,
-        Math.min(VERTICAL_ZOOM_MAX, Number((current + delta).toFixed(2))),
-      ),
+      getGestureZoom(current, wheelDelta, VERTICAL_ZOOM_MIN, VERTICAL_ZOOM_MAX),
     );
   };
 
   const setHorizontalZoomFromInput = (value: number) => {
-    centerHorizontalZoomOnPlayhead();
+    horizontalZoomAnchorRef.current = playhead / 100;
     setHorizontalZoom(Math.max(HORIZONTAL_ZOOM_MIN, Math.min(HORIZONTAL_ZOOM_MAX, value)));
   };
 
@@ -626,35 +679,37 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
       verticalZoomAnchorRef.current =
         (scroller.scrollTop + scroller.clientHeight / 2) / Math.max(1, scroller.scrollHeight);
     }
-    setVerticalZoom(value);
+    setVerticalZoom(Math.max(VERTICAL_ZOOM_MIN, Math.min(VERTICAL_ZOOM_MAX, value)));
   };
 
   const queueWheelZoom = (axis: "horizontal" | "vertical", deltaY: number) => {
     const pending = zoomWheelRef.current;
     pending[axis] += deltaY;
-    window.clearTimeout(pending.frame);
-    pending.frame = window.setTimeout(() => {
+    if (pending.frame !== 0) return;
+    pending.frame = requestAnimationFrame(() => {
       const horizontalDelta = pending.horizontal;
       const verticalDelta = pending.vertical;
       pending.frame = 0;
       pending.horizontal = 0;
       pending.vertical = 0;
-      if (Math.abs(horizontalDelta) > 0.5) {
-        const amount = Math.min(
-          1.5,
-          Math.max(0.25, Math.round(Math.abs(horizontalDelta) / 120) * 0.25),
-        );
-        changeHorizontalZoom(horizontalDelta < 0 ? amount : -amount);
-      }
-      if (Math.abs(verticalDelta) > 0.5) {
-        const amount = Math.min(
-          1.5,
-          Math.max(0.25, Math.round(Math.abs(verticalDelta) / 120) * 0.25),
-        );
-        changeVerticalZoom(verticalDelta < 0 ? amount : -amount);
-      }
-    }, 70);
+      if (Math.abs(horizontalDelta) > 0.01) changeHorizontalZoom(horizontalDelta);
+      if (Math.abs(verticalDelta) > 0.01) changeVerticalZoom(verticalDelta);
+    });
   };
+
+  useLayoutEffect(() => {
+    void horizontalZoom;
+    const scroller = arrangementScrollRef.current;
+    const anchor = horizontalZoomAnchorRef.current;
+    if (scroller && anchor !== null) {
+      scroller.scrollLeft = getCenteredTimelineScrollLeft(
+        anchor,
+        scroller.scrollWidth,
+        scroller.clientWidth,
+      );
+    }
+    horizontalZoomAnchorRef.current = null;
+  }, [horizontalZoom]);
 
   useEffect(() => {
     void verticalZoom;
@@ -679,7 +734,7 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
   const handleTimelineWheel = (event: WheelEvent<HTMLElement>) => {
     if (event.ctrlKey || event.metaKey) {
       event.preventDefault();
-      queueWheelZoom("horizontal", event.deltaY);
+      queueWheelZoom("horizontal", normaliseWheelDelta(event.deltaY, event.deltaMode));
       return;
     }
     if (event.shiftKey || Math.abs(event.deltaX) > Math.abs(event.deltaY)) {
@@ -695,13 +750,13 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
     if (event.altKey) {
       event.preventDefault();
       event.stopPropagation();
-      queueWheelZoom("vertical", event.deltaY);
+      queueWheelZoom("vertical", normaliseWheelDelta(event.deltaY, event.deltaMode));
       return;
     }
     if (event.ctrlKey || event.metaKey) {
       event.preventDefault();
       event.stopPropagation();
-      queueWheelZoom("horizontal", event.deltaY);
+      queueWheelZoom("horizontal", normaliseWheelDelta(event.deltaY, event.deltaMode));
       return;
     }
     if (event.shiftKey || Math.abs(event.deltaX) > Math.abs(event.deltaY)) {
@@ -813,7 +868,7 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
     }
 
     if (gesture.kind === "pencil") {
-      if (Math.abs(point.x - gesture.anchorX) > MIN_CLIP_WIDTH_PERCENT) {
+      if (Math.abs(point.x - gesture.anchorX) > minimumClipWidth) {
         const x = Math.min(point.x, gesture.anchorX);
         const width = Math.abs(point.x - gesture.anchorX);
         const pitch = chordSnapActive
@@ -824,7 +879,14 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
               PITCH_TOP,
             )
           : gesture.requestedPitch;
-        gesture.clip = createManualClip(gesture.clip.id, x, pitch, width, gesture.clip.color);
+        gesture.clip = createManualClip(
+          gesture.clip.id,
+          x,
+          pitch,
+          width,
+          gesture.clip.color,
+          minimumClipWidth,
+        );
         setActiveEditorClips((current) =>
           current.map((clip) => (clip.id === gesture.clip.id ? gesture.clip : clip)),
         );
@@ -836,8 +898,18 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
       const deltaX = ((event.clientX - gesture.startClientX) / Math.max(1, point.rect.width)) * 100;
       gesture.result =
         gesture.edge === "start"
-          ? stretchClipStartTo(gesture.source, gesture.clipId, gesture.originalStartX + deltaX)
-          : stretchClipTo(gesture.source, gesture.clipId, gesture.originalEndX + deltaX);
+          ? stretchClipStartTo(
+              gesture.source,
+              gesture.clipId,
+              gesture.originalStartX + deltaX,
+              minimumClipWidth,
+            )
+          : stretchClipTo(
+              gesture.source,
+              gesture.clipId,
+              gesture.originalEndX + deltaX,
+              minimumClipWidth,
+            );
       if (chordSnapActive) {
         gesture.result = snapClipsToChords(
           gesture.result,
@@ -873,6 +945,7 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
   const endEditorGesture = () => {
     const gesture = editorGestureRef.current;
     editorGestureRef.current = null;
+    setDragChordPitchClasses([]);
     window.removeEventListener("pointermove", moveEditorGesture);
     window.removeEventListener("pointerup", endEditorGesture);
     window.removeEventListener("pointercancel", endEditorGesture);
@@ -968,19 +1041,8 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
       HORIZONTAL_ZOOM_MIN,
       Math.min(HORIZONTAL_ZOOM_MAX, horizontalZoom * (zoomOut ? 0.5 : 2)),
     );
-    cancelAnimationFrame(horizontalZoomFrameRef.current);
+    horizontalZoomAnchorRef.current = x / 100;
     setHorizontalZoom(nextZoom);
-    horizontalZoomFrameRef.current = requestAnimationFrame(() => {
-      horizontalZoomFrameRef.current = requestAnimationFrame(() => {
-        const scroller = arrangementScrollRef.current;
-        if (!scroller) return;
-        scroller.scrollLeft = getCenteredTimelineScrollLeft(
-          x / 100,
-          scroller.scrollWidth,
-          scroller.clientWidth,
-        );
-      });
-    });
   };
 
   const beginPencilGesture = (event: ReactPointerEvent<HTMLElement>) => {
@@ -988,7 +1050,7 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
     if (!point) return;
     const id = nextManualClipId(activeEditorClips);
     const defaultWidth = Math.max(
-      MIN_CLIP_WIDTH_PERCENT,
+      minimumClipWidth,
       Math.min(100 - point.x, (0.5 / Math.max(0.001, project.timelineDurationSeconds)) * 100),
     );
     const colours: VocalClip["color"][] = ["cyan", "violet", "pink", "amber", "lime", "silver"];
@@ -1006,6 +1068,7 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
       pitch,
       defaultWidth,
       colours[activeEditorClips.length % colours.length],
+      minimumClipWidth,
     );
     setActiveEditorClips((current) => [...current, clip]);
     setSelectedClipIds([id]);
@@ -1047,6 +1110,8 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
           auditionClipId: clip.id,
           lastAuditionPitch: clip.pitch,
         });
+        const chordLabel = chordLabelAtPosition(project.chords, clip.x);
+        setDragChordPitchClasses(chordLabel ? chordPitchClasses(chordLabel) : []);
         bridge.send({ type: "preview-pitch-tone", pitch: clip.pitch, restart: true });
       }
       return;
@@ -1068,7 +1133,13 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
 
     if (tool === "scissors") {
       const rightClipId = nextManualClipId(activeEditorClips);
-      const splitResult = splitClipAt(activeEditorClips, clip.id, point.x, rightClipId);
+      const splitResult = splitClipAt(
+        activeEditorClips,
+        clip.id,
+        point.x,
+        rightClipId,
+        minimumClipWidth,
+      );
       const result = chordSnapActive
         ? snapClipsToChords(
             splitResult,
@@ -1217,8 +1288,7 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
   // biome-ignore lint/correctness/useExhaustiveDependencies: unmount cleanup must remove the listener functions captured by the active drag.
   useEffect(
     () => () => {
-      window.clearTimeout(zoomWheelRef.current.frame);
-      cancelAnimationFrame(horizontalZoomFrameRef.current);
+      cancelAnimationFrame(zoomWheelRef.current.frame);
       endPlayheadDrag();
       endEditorGesture();
     },
@@ -1231,6 +1301,7 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
     looping,
     cycleRange,
     volume,
+    instrumentalVolume,
     outputLevels,
     clips: editorClips,
     sortedClips,
@@ -1245,13 +1316,16 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
     verticalZoom,
     leftCorrectionTool,
     rightCorrectionTool,
+    shortcutBindings,
     chordSnapEnabled,
     chordSnapAvailable,
+    dragChordPitchClasses,
     secondaryToolModifierActive,
     selectedClipIds,
     pianoCollapsed,
     serviceTracksCollapsed,
     backingTracks,
+    backingGenerator,
     voiceProfiles: project.voiceProfiles,
     selectedTracks,
     trackState,
@@ -1276,17 +1350,25 @@ export function useStudioController(bridge: PluginBridge, project: StudioProject
       stopPlayback,
       setLooping,
       setCycleRange,
+      commitCycleRange,
       setPlayheadPosition,
       setVolumeValue,
+      setInstrumentalVolumeValue,
       toggleTrack,
       toggleTrackLayer,
       selectTrack,
       addBackingTrack,
+      setBackingGenerator,
       regenerateBackingTrack,
       renderBackingTrack,
+      removeBackingTrack,
       setBackingVoiceProfile,
+      deleteVoiceProfile,
       undoPitchEdit,
       redoPitchEdit,
+      undo,
+      redo,
+      newProject,
       openProject,
       saveProject,
       exportAllTracks,

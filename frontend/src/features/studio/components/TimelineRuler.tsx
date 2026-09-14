@@ -1,12 +1,16 @@
 import { memo, type PointerEvent as ReactPointerEvent, useRef } from "react";
 import type { CycleRange } from "@/domain/studio";
 import { getTimelineBarLabelStep, type MetricGridLine } from "@/features/studio/lib/musical-time";
+import { getMinimumCycleWidthPercent } from "@/features/studio/lib/transport";
 
 type CycleDrag = {
   mode: "create" | "move" | "resize-start" | "resize-end";
   pointerId: number;
   anchor: number;
   initial: CycleRange;
+  current: CycleRange;
+  initialActive: boolean;
+  active: boolean;
   moved: boolean;
 };
 
@@ -19,13 +23,12 @@ type TimelineRulerProps = {
   timelineDurationSeconds: number;
   horizontalZoom: number;
   grid: MetricGridLine[];
-  onCycleRangeChange(range: CycleRange): void;
+  onCycleRangeChange(range: CycleRange, active: boolean): void;
+  onCycleRangeCommit(range: CycleRange, active: boolean): void;
   onLoopingChange(active: boolean): void;
   onPlayheadChange(position: number): void;
   onPlayheadPointerDown(event: ReactPointerEvent<HTMLButtonElement>): void;
 };
-
-const MIN_CYCLE_WIDTH = 6.25;
 
 export const TimelineRuler = memo(function TimelineRuler({
   cycleRange,
@@ -37,10 +40,12 @@ export const TimelineRuler = memo(function TimelineRuler({
   horizontalZoom,
   grid,
   onCycleRangeChange,
+  onCycleRangeCommit,
   onLoopingChange,
   onPlayheadChange,
   onPlayheadPointerDown,
 }: TimelineRulerProps) {
+  const minimumCycleWidth = getMinimumCycleWidthPercent(timelineDurationSeconds);
   const barLabelStep = getTimelineBarLabelStep(grid, horizontalZoom);
   const barMarks = grid.filter(
     (line) => line.kind === "bar" && (line.bar - 1) % barLabelStep === 0,
@@ -78,13 +83,17 @@ export const TimelineRuler = memo(function TimelineRuler({
       pointerId: event.pointerId,
       anchor,
       initial: cycleRange,
+      current: cycleRange,
+      initialActive: looping,
+      active: mode === "create" || mode.startsWith("resize") ? true : looping,
       moved: false,
     };
 
     if (mode === "create") {
-      const end = Math.min(100, anchor + MIN_CYCLE_WIDTH);
-      onCycleRangeChange({ start: end - MIN_CYCLE_WIDTH, end });
-      onLoopingChange(true);
+      const end = Math.min(100, anchor + minimumCycleWidth);
+      const range = { start: end - minimumCycleWidth, end };
+      dragRef.current.current = range;
+      onCycleRangeChange(range, true);
     }
 
     event.currentTarget.setPointerCapture(event.pointerId);
@@ -102,16 +111,17 @@ export const TimelineRuler = memo(function TimelineRuler({
     if (drag.mode === "create") {
       let start = Math.min(drag.anchor, pointer);
       let end = Math.max(drag.anchor, pointer);
-      if (end - start < MIN_CYCLE_WIDTH) {
+      if (end - start < minimumCycleWidth) {
         if (pointer < drag.anchor) {
-          start = Math.max(0, drag.anchor - MIN_CYCLE_WIDTH);
+          start = Math.max(0, drag.anchor - minimumCycleWidth);
           end = drag.anchor;
         } else {
           start = drag.anchor;
-          end = Math.min(100, drag.anchor + MIN_CYCLE_WIDTH);
+          end = Math.min(100, drag.anchor + minimumCycleWidth);
         }
       }
-      onCycleRangeChange({ start, end });
+      drag.current = { start, end };
+      onCycleRangeChange(drag.current, drag.active);
       return;
     }
 
@@ -119,24 +129,25 @@ export const TimelineRuler = memo(function TimelineRuler({
       const width = drag.initial.end - drag.initial.start;
       const delta = pointer - drag.anchor;
       const start = Math.max(0, Math.min(100 - width, snap(drag.initial.start + delta)));
-      onCycleRangeChange({ start, end: start + width });
+      drag.current = { start, end: start + width };
+      onCycleRangeChange(drag.current, drag.active);
       return;
     }
 
     if (drag.mode === "resize-start") {
-      onCycleRangeChange({
-        start: Math.min(pointer, drag.initial.end - MIN_CYCLE_WIDTH),
+      drag.current = {
+        start: Math.max(0, Math.min(pointer, drag.initial.end - minimumCycleWidth)),
         end: drag.initial.end,
-      });
-      onLoopingChange(true);
+      };
+      onCycleRangeChange(drag.current, drag.active);
       return;
     }
 
-    onCycleRangeChange({
+    drag.current = {
       start: drag.initial.start,
-      end: Math.max(pointer, drag.initial.start + MIN_CYCLE_WIDTH),
-    });
-    onLoopingChange(true);
+      end: Math.min(100, Math.max(pointer, drag.initial.start + minimumCycleWidth)),
+    };
+    onCycleRangeChange(drag.current, drag.active);
   };
 
   const handlePointerUp = (event: ReactPointerEvent<HTMLFieldSetElement>) => {
@@ -144,6 +155,8 @@ export const TimelineRuler = memo(function TimelineRuler({
     if (!drag || drag.pointerId !== event.pointerId) return;
     if (drag.mode === "move" && !drag.moved) {
       onLoopingChange(!looping);
+    } else {
+      onCycleRangeCommit(drag.current, drag.active);
     }
     dragRef.current = null;
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
@@ -152,7 +165,9 @@ export const TimelineRuler = memo(function TimelineRuler({
   };
 
   const handlePointerCancel = (event: ReactPointerEvent<HTMLFieldSetElement>) => {
-    if (dragRef.current?.pointerId === event.pointerId) {
+    const drag = dragRef.current;
+    if (drag?.pointerId === event.pointerId) {
+      onCycleRangeChange(drag.initial, drag.initialActive);
       dragRef.current = null;
     }
   };
@@ -174,6 +189,7 @@ export const TimelineRuler = memo(function TimelineRuler({
         className={`cycle-area ${looping ? "is-active" : ""}`}
         style={{
           left: `${cycleRange.start}%`,
+          minWidth: `${minimumCycleWidth}%`,
           width: `${cycleRange.end - cycleRange.start}%`,
         }}
         aria-label={`Cycle area from ${(

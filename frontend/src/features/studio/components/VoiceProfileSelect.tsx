@@ -1,5 +1,19 @@
-import { UserCircleIcon } from "@heroicons/react/24/outline";
-import type { BackingTrackName, VoiceProfileOption } from "@/domain/studio";
+import {
+  CheckIcon,
+  ChevronDownIcon,
+  PlusCircleIcon,
+  TrashIcon,
+  UserCircleIcon,
+} from "@heroicons/react/24/outline";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+import type { VoiceProfileOption } from "@/domain/studio";
+
+const qualityLabel = (profile: VoiceProfileOption) => {
+  if (profile.quality === "low") return "Low quality";
+  if (profile.quality === "high") return "High quality";
+  return "Balanced";
+};
 
 export function VoiceProfileSelect({
   track,
@@ -7,38 +21,172 @@ export function VoiceProfileSelect({
   value,
   disabled,
   onChange,
+  onDelete,
+  onCreateVoice,
 }: {
-  track: BackingTrackName;
+  track: string;
   profiles: VoiceProfileOption[];
   value: string;
   disabled: boolean;
   onChange(profileId: string): void;
+  onDelete(profileId: string): void;
+  onCreateVoice(): void;
 }) {
-  const selectedValue = profiles.some((profile) => profile.id === value)
-    ? value
-    : (profiles[0]?.id ?? "");
+  const detailsRef = useRef<HTMLDetailsElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const [open, setOpen] = useState(false);
+  const [menuPosition, setMenuPosition] = useState({ left: 8, top: 8 });
+  const selected =
+    profiles.find((profile) => profile.id === value) ?? profiles.find((profile) => profile.active);
+
+  const updateMenuPosition = useCallback(() => {
+    const anchor = detailsRef.current?.getBoundingClientRect();
+    if (!anchor) return;
+    const menuWidth = 260;
+    const menuHeight = menuRef.current?.offsetHeight ?? Math.min(360, profiles.length * 43 + 62);
+    const left = Math.max(
+      8,
+      Math.min(window.innerWidth - menuWidth - 8, anchor.left + anchor.width / 2 - menuWidth / 2),
+    );
+    const spaceAbove = anchor.top - 8;
+    const spaceBelow = window.innerHeight - anchor.bottom - 8;
+    const openAbove = spaceAbove > spaceBelow && spaceAbove >= Math.min(menuHeight, 240);
+    const top = openAbove
+      ? Math.max(8, anchor.top - menuHeight - 5)
+      : Math.min(window.innerHeight - menuHeight - 8, anchor.bottom + 5);
+    setMenuPosition({ left, top: Math.max(8, top) });
+  }, [profiles.length]);
+
+  useEffect(() => {
+    const closeOnOutsideClick = (event: PointerEvent) => {
+      const details = detailsRef.current;
+      const menu = menuRef.current;
+      if (
+        details &&
+        !details.contains(event.target as Node) &&
+        !menu?.contains(event.target as Node)
+      ) {
+        details.removeAttribute("open");
+        setOpen(false);
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        detailsRef.current?.removeAttribute("open");
+        setOpen(false);
+      }
+    };
+    const reposition = () => updateMenuPosition();
+
+    document.addEventListener("pointerdown", closeOnOutsideClick);
+    document.addEventListener("keydown", closeOnEscape);
+    window.addEventListener("resize", reposition);
+    window.addEventListener("scroll", reposition, true);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsideClick);
+      document.removeEventListener("keydown", closeOnEscape);
+      window.removeEventListener("resize", reposition);
+      window.removeEventListener("scroll", reposition, true);
+    };
+  }, [updateMenuPosition]);
+
+  useLayoutEffect(() => {
+    if (open) updateMenuPosition();
+  }, [open, updateMenuPosition]);
+
+  const closeMenu = () => {
+    detailsRef.current?.removeAttribute("open");
+    setOpen(false);
+  };
+
+  const menu = (
+    <div
+      className="voice-profile-menu is-portal"
+      role="menu"
+      aria-label={`Voice model for ${track}`}
+      ref={menuRef}
+      style={menuPosition}
+    >
+      {profiles.map((profile) => (
+        <div className="voice-profile-option-row" key={profile.id}>
+          <button
+            type="button"
+            role="menuitemradio"
+            aria-checked={profile.id === selected?.id}
+            className={profile.id === selected?.id ? "is-selected" : ""}
+            onClick={() => {
+              onChange(profile.id);
+              closeMenu();
+            }}
+          >
+            <UserCircleIcon className="voice-profile-option-icon" aria-hidden="true" />
+            <span>
+              <strong>{profile.name}</strong>
+              <small>
+                {qualityLabel(profile)}
+                {profile.active ? " · Active LoRA" : ""}
+              </small>
+            </span>
+            {profile.id === selected?.id ? <CheckIcon aria-hidden="true" /> : null}
+          </button>
+          {profile.id !== "source-timbre" ? (
+            <button
+              type="button"
+              className="voice-profile-delete-option"
+              aria-label={`Delete ${profile.name}`}
+              title={`Delete ${profile.name}`}
+              onClick={() => {
+                if (window.confirm(`Delete voice “${profile.name}”? It will be moved to Trash.`)) {
+                  onDelete(profile.id);
+                  closeMenu();
+                }
+              }}
+            >
+              <TrashIcon aria-hidden="true" />
+            </button>
+          ) : null}
+        </div>
+      ))}
+      <i className="voice-profile-menu-separator" aria-hidden="true" />
+      <button
+        type="button"
+        role="menuitem"
+        className="voice-profile-create-option"
+        onClick={() => {
+          onCreateVoice();
+          closeMenu();
+        }}
+      >
+        <PlusCircleIcon className="voice-profile-option-icon" aria-hidden="true" />
+        <span>
+          <strong>Create new voice</strong>
+          <small>Train a new LoRA profile</small>
+        </span>
+      </button>
+    </div>
+  );
 
   return (
-    <label
-      className="voice-profile-select"
-      title={profiles.length > 0 ? `Voice model for ${track}` : "Train a LoRA voice first"}
+    <details
+      className={`voice-profile-select ${disabled ? "is-disabled" : ""}`}
+      ref={detailsRef}
+      aria-disabled={disabled}
+      inert={disabled}
+      onToggle={(event) => {
+        const nextOpen = event.currentTarget.open;
+        setOpen(nextOpen);
+        if (nextOpen) updateMenuPosition();
+      }}
     >
-      <UserCircleIcon aria-hidden="true" />
-      <span className="sr-only">Voice model for {track}</span>
-      <select
-        aria-label={`Voice model for ${track}`}
-        value={selectedValue}
-        disabled={disabled || profiles.length === 0}
-        onChange={(event) => onChange(event.target.value)}
-      >
-        {profiles.length === 0 ? <option value="">No trained voices</option> : null}
-        {profiles.map((profile) => (
-          <option key={profile.id} value={profile.id}>
-            {profile.name} · {profile.quality === "high" ? "High" : "Balanced"}
-            {profile.active ? " · Active" : ""}
-          </option>
-        ))}
-      </select>
-    </label>
+      <summary aria-label={`Voice model for ${track}`} title={`Voice model for ${track}`}>
+        <UserCircleIcon className="voice-profile-summary-icon" aria-hidden="true" />
+        <span className="voice-profile-summary-copy">
+          <strong>{selected?.name ?? "Choose voice"}</strong>
+          <small>{selected ? qualityLabel(selected) : "No voice selected"}</small>
+        </span>
+        <ChevronDownIcon className="voice-profile-chevron" aria-hidden="true" />
+      </summary>
+      {open ? createPortal(menu, document.body) : null}
+    </details>
   );
 }

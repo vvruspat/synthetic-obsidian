@@ -1,0 +1,65 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <title>Synthetic Obsidian</title>
+  <defs>
+    <linearGradient id="gem-base" x1="154" y1="154" x2="820" y2="918" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#102B48"/>
+      <stop offset="0.34" stop-color="#081426"/>
+      <stop offset="0.72" stop-color="#030814"/>
+      <stop offset="1" stop-color="#01030A"/>
+    </linearGradient>
+    <linearGradient id="gem-left" x1="104" y1="254" x2="518" y2="470" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#00E5F7"/>
+      <stop offset="0.38" stop-color="#0C809E"/>
+      <stop offset="1" stop-color="#0A1930"/>
+    </linearGradient>
+    <linearGradient id="gem-right" x1="512" y1="78" x2="900" y2="590" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#6853FF"/>
+      <stop offset="0.4" stop-color="#391C91"/>
+      <stop offset="1" stop-color="#080D22"/>
+    </linearGradient>
+    <linearGradient id="cut" x1="678" y1="170" x2="328" y2="850" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#A9FFFF"/>
+      <stop offset="0.36" stop-color="#55A5FF"/>
+      <stop offset="0.72" stop-color="#7745FF"/>
+      <stop offset="1" stop-color="#EF4EFF"/>
+    </linearGradient>
+    <filter id="gem-glow" x="18" y="0" width="988" height="1024" filterUnits="userSpaceOnUse">
+      <feGaussianBlur stdDeviation="22" result="blur"/>
+      <feColorMatrix in="blur" type="matrix" values="0 0 0 0 0.05 0 0 0 0 0.72 0 0 0 0 1 0 0 0 0.55 0"/>
+      <feBlend in="SourceGraphic"/>
+    </filter>
+    <filter id="cut-glow" x="244" y="90" width="522" height="850" filterUnits="userSpaceOnUse">
+      <feGaussianBlur stdDeviation="18" result="blur"/>
+      <feColorMatrix in="blur" type="matrix" values="0 0 0 0 0.35 0 0 0 0 0.56 0 0 0 0 1 0 0 0 0.86 0"/>
+      <feBlend in="SourceGraphic"/>
+    </filter>
+    <clipPath id="gem-shape">
+      <path d="M512 54L925 267L811 842L512 998L213 842L99 267L512 54Z"/>
+    </clipPath>
+  </defs>
+
+  <g filter="url(#gem-glow)">
+    <path d="M512 54L925 267L811 842L512 998L213 842L99 267L512 54Z" fill="url(#gem-base)"/>
+    <g clip-path="url(#gem-shape)">
+      <path d="M512 54L99 267L512 449V54Z" fill="url(#gem-left)"/>
+      <path d="M512 54L925 267L512 449V54Z" fill="url(#gem-right)"/>
+      <path d="M99 267L512 449L352 779L213 842L99 267Z" fill="#061A2C"/>
+      <path d="M925 267L512 449L672 779L811 842L925 267Z" fill="#07091B"/>
+      <path d="M213 842L352 779L512 998L213 842Z" fill="#07111F"/>
+      <path d="M811 842L672 779L512 998L811 842Z" fill="#02050D"/>
+      <path d="M512 449L352 779L512 998L672 779L512 449Z" fill="#030713"/>
+      <path d="M99 267L512 449L352 779L99 267Z" fill="url(#gem-left)" opacity="0.34"/>
+      <path d="M925 267L512 449L672 779L925 267Z" fill="url(#gem-right)" opacity="0.42"/>
+      <path d="M512 54L512 449" stroke="#8CF5FF" stroke-opacity="0.22" stroke-width="3"/>
+      <path d="M99 267L512 449L925 267" stroke="#6FE9FF" stroke-opacity="0.22" stroke-width="3"/>
+      <path d="M213 842L352 779L512 998L672 779L811 842" stroke="#537FA8" stroke-opacity="0.2" stroke-width="3"/>
+    </g>
+    <path d="M512 54L925 267L811 842L512 998L213 842L99 267L512 54Z" stroke="#54DAFF" stroke-opacity="0.42" stroke-width="7"/>
+  </g>
+
+  <g filter="url(#cut-glow)">
+    <path d="M666 151L714 191L354 864L304 825L666 151Z" fill="url(#cut)"/>
+    <path d="M666 151L682 164L324 840L304 825L666 151Z" fill="#DFFFFF" fill-opacity="0.82"/>
+    <path d="M714 191L354 864" stroke="#C84EFF" stroke-opacity="0.72" stroke-width="8"/>
+  </g>
+</svg>

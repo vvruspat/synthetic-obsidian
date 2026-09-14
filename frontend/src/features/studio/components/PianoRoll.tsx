@@ -4,12 +4,13 @@ import {
   MusicalNoteIcon,
   SpeakerWaveIcon,
 } from "@heroicons/react/24/outline";
-import type { CSSProperties } from "react";
+import { type CSSProperties, useState } from "react";
 import type { WaveformData } from "@/domain/studio";
 import { CorrectionToolSelect } from "@/features/studio/components/CorrectionToolSelect";
 import { VoiceProfileSelect } from "@/features/studio/components/VoiceProfileSelect";
 import { PianoWaveform } from "@/features/studio/components/Waveforms";
 import type { StudioController } from "@/features/studio/hooks/useStudioController";
+import { formatShortcut } from "@/features/studio/lib/hotkeys";
 import {
   getClipVisualWidthPercent,
   getPitchFill,
@@ -23,15 +24,18 @@ export function PianoToolbar({
   controller,
   backingRenderBusy,
   backingRenderTrack,
+  onOpenVoiceTraining,
 }: {
   controller: StudioController;
   backingRenderBusy: boolean;
   backingRenderTrack: string;
+  onOpenVoiceTraining(): void;
 }) {
   const {
     pianoCollapsed,
     leftCorrectionTool,
     rightCorrectionTool,
+    shortcutBindings,
     chordSnapEnabled,
     chordSnapAvailable,
     pitchHistory,
@@ -48,28 +52,34 @@ export function PianoToolbar({
         <CorrectionToolSelect
           label="Left mouse button"
           value={leftCorrectionTool}
+          mouseButton="left"
+          shortcuts={shortcutBindings}
           onChange={actions.setLeftCorrectionTool}
         />
         <CorrectionToolSelect
           label="Right mouse button"
           value={rightCorrectionTool}
+          mouseButton="right"
+          shortcuts={shortcutBindings}
           onChange={actions.setRightCorrectionTool}
         />
         <button
           type="button"
           className={`chord-snap-toggle ${chordSnapEnabled ? "is-active" : ""}`}
-          aria-label="Snap backing notes to chord tones"
+          aria-label="Snap notes to chord tones"
           aria-pressed={chordSnapEnabled}
           title={
             chordSnapAvailable
-              ? "Snap backing notes to the current chord"
-              : "Select a backing track with analyzed chords"
+              ? `Snap notes to the current chord · ${formatShortcut(
+                  shortcutBindings["editor.toggle-chord-snap"],
+                )}`
+              : "Select a vocal track with analyzed chords"
           }
           disabled={!chordSnapAvailable}
           onClick={() => actions.setChordSnapEnabled((current) => !current)}
         >
           <MusicalNoteIcon aria-hidden="true" />
-          <span>Chord</span>
+          <span>Chord Snap</span>
         </button>
       </div>
       <div className="piano-history-actions">
@@ -78,7 +88,7 @@ export function PianoToolbar({
           className="piano-toolbar-action"
           disabled={!pitchHistory.canUndo}
           aria-label="Undo pitch edit"
-          title="Undo pitch edit"
+          title={`Undo pitch edit · ${formatShortcut(shortcutBindings["project.undo"])}`}
           onClick={actions.undoPitchEdit}
         >
           <ArrowUturnLeftIcon aria-hidden="true" />
@@ -88,7 +98,7 @@ export function PianoToolbar({
           className="piano-toolbar-action"
           disabled={!pitchHistory.canRedo}
           aria-label="Redo pitch edit"
-          title="Redo pitch edit"
+          title={`Redo pitch edit · ${formatShortcut(shortcutBindings["project.redo"])}`}
           onClick={actions.redoPitchEdit}
         >
           <ArrowUturnRightIcon aria-hidden="true" />
@@ -103,6 +113,8 @@ export function PianoToolbar({
               onChange={(profileId) =>
                 actions.setBackingVoiceProfile(backingRenderAction.track, profileId)
               }
+              onDelete={actions.deleteVoiceProfile}
+              onCreateVoice={onOpenVoiceTraining}
             />
             <button
               type="button"
@@ -127,7 +139,9 @@ export function PianoToolbar({
         className={`piano-collapse-button ${pianoCollapsed ? "is-expand" : ""}`}
         aria-label={pianoCollapsed ? "Expand Piano Roll" : "Collapse Piano Roll"}
         aria-expanded={!pianoCollapsed}
-        title={pianoCollapsed ? "Expand Piano Roll" : "Collapse Piano Roll"}
+        title={`${pianoCollapsed ? "Expand Piano Roll" : "Collapse Piano Roll"} · ${formatShortcut(
+          shortcutBindings["editor.toggle-piano"],
+        )}`}
         onClick={() => actions.setPianoCollapsed((current) => !current)}
       >
         <span aria-hidden="true" />
@@ -142,12 +156,14 @@ export function PianoRoll({
   waveformDurationRatio,
   backingRenderBusy,
   backingRenderTrack,
+  onOpenVoiceTraining,
 }: {
   controller: StudioController;
   waveform: WaveformData;
   waveformDurationRatio: number;
   backingRenderBusy: boolean;
   backingRenderTrack: string;
+  onOpenVoiceTraining(): void;
 }) {
   const {
     clips,
@@ -158,6 +174,7 @@ export function PianoRoll({
     leftCorrectionTool,
     rightCorrectionTool,
     secondaryToolModifierActive,
+    dragChordPitchClasses,
     selectedClipIds,
     canEditSelectedClips,
     refs,
@@ -166,6 +183,7 @@ export function PianoRoll({
   const visibleCorrectionTool = secondaryToolModifierActive
     ? rightCorrectionTool
     : leftCorrectionTool;
+  const [scissorsGuideX, setScissorsGuideX] = useState<number | null>(null);
 
   return (
     <>
@@ -174,6 +192,7 @@ export function PianoRoll({
           controller={controller}
           backingRenderBusy={backingRenderBusy}
           backingRenderTrack={backingRenderTrack}
+          onOpenVoiceTraining={onOpenVoiceTraining}
         />
       </div>
       <div className="piano-roll">
@@ -192,6 +211,17 @@ export function PianoRoll({
               onDragOver={(event) => event.preventDefault()}
               onDrop={actions.dropSyllable}
               onPointerDown={actions.startEditorTool}
+              onPointerMove={(event) => {
+                if (visibleCorrectionTool !== "scissors") {
+                  if (scissorsGuideX !== null) setScissorsGuideX(null);
+                  return;
+                }
+                const bounds = event.currentTarget.getBoundingClientRect();
+                setScissorsGuideX(
+                  Math.max(0, Math.min(100, ((event.clientX - bounds.left) / bounds.width) * 100)),
+                );
+              }}
+              onPointerLeave={() => setScissorsGuideX(null)}
               onContextMenu={(event) => event.preventDefault()}
             >
               <legend className="sr-only">Pitch correction clip editor</legend>
@@ -203,7 +233,12 @@ export function PianoRoll({
                 aria-hidden="true"
               >
                 {PIANO_KEYS.map((key) => (
-                  <i className={key.black ? "is-black" : ""} key={`row-${key.label}`} />
+                  <i
+                    className={`${key.black ? "is-black" : ""} ${
+                      dragChordPitchClasses.includes(key.pitch % 12) ? "is-chord-tone" : ""
+                    }`}
+                    key={`row-${key.label}`}
+                  />
                 ))}
               </div>
               <div className="piano-metric-grid" aria-hidden="true">
@@ -224,6 +259,13 @@ export function PianoRoll({
                 <path className="pitch-curve-glow" d={pitchPath} />
                 <path d={pitchPath} />
               </svg>
+              {visibleCorrectionTool === "scissors" && scissorsGuideX !== null ? (
+                <i
+                  className="scissors-cut-guide"
+                  style={{ left: `${scissorsGuideX}%` }}
+                  aria-hidden="true"
+                />
+              ) : null}
               {clips.map((clip) => {
                 const fill = getPitchFill(clip);
                 const gainDb = clip.gainDb ?? 0;
@@ -254,15 +296,7 @@ export function PianoRoll({
                     )}, ${fill.cents >= 0 ? "+" : ""}${fill.cents.toFixed(
                       0,
                     )} cents, ${gainDb >= 0 ? "+" : ""}${gainDb.toFixed(1)} decibels`}
-                  >
-                    <span>{clip.label}</span>
-                    <em>
-                      {Math.abs(gainDb) >= 0.05
-                        ? `${gainDb >= 0 ? "+" : ""}${gainDb.toFixed(1)}dB`
-                        : `${fill.cents >= 0 ? "+" : ""}${fill.cents.toFixed(0)}¢`}
-                    </em>
-                    <i />
-                  </button>
+                  />
                 );
               })}
             </fieldset>

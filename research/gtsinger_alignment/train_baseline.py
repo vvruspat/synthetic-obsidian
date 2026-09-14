@@ -57,13 +57,22 @@ class ChunkDataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
         for example_index, example in enumerate(examples):
             frame_count = example.features.shape[1]
             if frame_count <= chunk_frames:
-                self.index.append((example_index, 0))
+                if np.any(np.isfinite(example.targets)):
+                    self.index.append((example_index, 0))
                 continue
             starts = list(range(0, frame_count - chunk_frames + 1, stride))
             final_start = frame_count - chunk_frames
             if starts[-1] != final_start:
                 starts.append(final_start)
-            self.index.extend((example_index, start) for start in starts)
+            self.index.extend(
+                (example_index, start)
+                for start in starts
+                if np.any(
+                    np.isfinite(
+                        example.targets[:, start : start + chunk_frames]
+                    )
+                )
+            )
 
     def __len__(self) -> int:
         return len(self.index)
@@ -77,7 +86,11 @@ class ChunkDataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
         if features.shape[1] < self.chunk_frames:
             pad = self.chunk_frames - features.shape[1]
             features = np.pad(features, ((0, 0), (0, pad)))
-            targets = np.pad(targets, ((0, 0), (0, pad)))
+            targets = np.pad(
+                targets,
+                ((0, 0), (0, pad)),
+                constant_values=np.nan,
+            )
         return torch.from_numpy(features), torch.from_numpy(targets)
 
 
@@ -229,6 +242,37 @@ def make_targets(
     return targets
 
 
+def apply_supervision_intervals(
+    targets: np.ndarray,
+    supervision_intervals: list[list[float]] | None,
+) -> np.ndarray:
+    if supervision_intervals is None:
+        return targets
+
+    frame_count = targets.shape[1]
+    supervised = np.zeros(frame_count, dtype=bool)
+    for interval in supervision_intervals:
+        if len(interval) != 2:
+            raise ValueError("supervision intervals must contain start/end pairs")
+        start_seconds, end_seconds = map(float, interval)
+        if end_seconds <= start_seconds:
+            raise ValueError("supervision interval end must be after start")
+        start = max(
+            0,
+            int(np.floor(start_seconds * TARGET_SAMPLE_RATE / HOP_LENGTH)),
+        )
+        end = min(
+            frame_count,
+            int(np.ceil(end_seconds * TARGET_SAMPLE_RATE / HOP_LENGTH)),
+        )
+        if end > start:
+            supervised[start:end] = True
+
+    masked = targets.copy()
+    masked[:, ~supervised] = np.nan
+    return masked
+
+
 def events_to_frames(events: dict[str, list[float]]) -> tuple[np.ndarray, ...]:
     return tuple(
         np.asarray(
@@ -268,6 +312,10 @@ def load_examples(
             record["intervals"],
             features.shape[1],
             tolerance_ms,
+        )
+        targets = apply_supervision_intervals(
+            targets,
+            record.get("supervision_intervals"),
         )
         loss_heads = record.get("loss_heads")
         if loss_heads is not None:
@@ -509,15 +557,29 @@ def event_metrics(
         for example_probabilities, example in zip(
             probabilities, examples, strict=True
         ):
+            active = np.isfinite(example.targets[event_index])
+            if not np.any(active):
+                continue
             predicted = decode_event_frames(
                 example_probabilities[event_index],
                 event_name,
                 thresholds[event_index],
                 min_distance_frames,
             )
+            predicted = predicted[
+                (predicted >= 0)
+                & (predicted < len(active))
+                & active[np.clip(predicted, 0, len(active) - 1)]
+            ]
+            expected = example.event_frames[event_index]
+            expected = expected[
+                (expected >= 0)
+                & (expected < len(active))
+                & active[np.clip(expected, 0, len(active) - 1)]
+            ]
             counts += match_events(
                 predicted,
-                example.event_frames[event_index],
+                expected,
                 tolerance_frames,
             )
         metrics[event_name] = counts_to_metrics(*counts)
@@ -536,11 +598,14 @@ def segmentation_metrics(
         for example_probabilities, example in zip(
             probabilities, examples, strict=True
         ):
+            active = np.isfinite(example.targets[event_index])
+            if not np.any(active):
+                continue
             predicted = example_probabilities[event_index] >= thresholds[event_index]
             expected = example.targets[event_index] >= 0.5
-            counts[0] += np.count_nonzero(predicted & expected)
-            counts[1] += np.count_nonzero(predicted & ~expected)
-            counts[2] += np.count_nonzero(~predicted & expected)
+            counts[0] += np.count_nonzero(predicted & expected & active)
+            counts[1] += np.count_nonzero(predicted & ~expected & active)
+            counts[2] += np.count_nonzero(~predicted & expected & active)
         metrics[event_name] = counts_to_metrics(*counts)
     return metrics
 
@@ -557,12 +622,32 @@ def calibrate_thresholds(
         event_name = EVENT_NAMES[event_index]
         if event_name in INTERVAL_HEADS:
             expected_count = sum(
-                int(np.count_nonzero(example.targets[event_index]))
+                int(
+                    np.count_nonzero(
+                        np.nan_to_num(example.targets[event_index], nan=0.0)
+                    )
+                )
                 for example in examples
             )
         else:
             expected_count = sum(
-                len(example.event_frames[event_index]) for example in examples
+                int(
+                    np.count_nonzero(
+                        (example.event_frames[event_index] >= 0)
+                        & (
+                            example.event_frames[event_index]
+                            < example.targets.shape[1]
+                        )
+                        & np.isfinite(example.targets[event_index])[
+                            np.clip(
+                                example.event_frames[event_index],
+                                0,
+                                example.targets.shape[1] - 1,
+                            )
+                        ]
+                    )
+                )
+                for example in examples
             )
         if expected_count == 0:
             calibrated.append(0.5)
@@ -639,9 +724,10 @@ def onset_frame_diagnostic(
     for example_probabilities, example in zip(probabilities, examples, strict=True):
         predictions = example_probabilities[: len(ONSET_HEADS)] >= 0.5
         expected = example.targets[: len(ONSET_HEADS)] >= 0.5
-        true_positive += (predictions & expected).sum(axis=1)
-        false_positive += (predictions & ~expected).sum(axis=1)
-        false_negative += (~predictions & expected).sum(axis=1)
+        active = np.isfinite(example.targets[: len(ONSET_HEADS)])
+        true_positive += (predictions & expected & active).sum(axis=1)
+        false_positive += (predictions & ~expected & active).sum(axis=1)
+        false_negative += (~predictions & expected & active).sum(axis=1)
 
     metrics = {}
     for index, name in enumerate(ONSET_HEADS):
@@ -803,6 +889,7 @@ def main() -> int:
             else "annotation_sidecar_rederived"
         ),
         "interval_target_rasterization": "half-open [start, end)",
+        "supervision_masking": "manifest supervision_intervals; unsupervised frames are NaN-masked",
         "syllable_hard_negative_weight": args.syllable_hard_negative_weight,
         "init_checkpoint": (
             str(args.init_checkpoint.expanduser().resolve())

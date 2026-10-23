@@ -5607,7 +5607,9 @@ private:
         pitchTrackHistories_.clear();
         ++leadPitchPreviewRevision_;
         restoreOriginalLeadAudio();
-        backingPitchPreviewRevisions_.clear();
+        // A worker from the previous project must never match a reused revision.
+        for (auto& [trackId, revision] : backingPitchPreviewRevisions_)
+        { juce::ignoreUnused(trackId); ++revision; }
         for (const auto& [trackName, previewFile] : backingPitchPreviewFiles_)
         {
             juce::ignoreUnused(trackName);

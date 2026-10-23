@@ -30,8 +30,11 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - name: Install WebView2 SDK
+        if: runner.os == 'Windows'
+        run: nuget install Microsoft.Web.WebView2 -Version 1.0.1901.177 -OutputDirectory .webview2
       - name: Configure
-        run: cmake -S . -B build-arrangement -DCMAKE_BUILD_TYPE=Release -DSYNTHETIC_OBSIDIAN_BUILD_NATIVE_ANNOTATOR=OFF -DSYNTHETIC_OBSIDIAN_ARRANGEMENT_TESTS=ON
+        run: cmake -S . -B build-arrangement -DCMAKE_BUILD_TYPE=Release -DSYNTHETIC_OBSIDIAN_BUILD_NATIVE_ANNOTATOR=OFF -DSYNTHETIC_OBSIDIAN_ARRANGEMENT_TESTS=ON -DJUCE_WEBVIEW2_PACKAGE_LOCATION=${{ github.workspace }}/.webview2
       - name: Build
         run: cmake --build build-arrangement --config Release --target ArrangementTests VocalAnnotationTool --parallel 3
       - name: Verify playback and project round-trip

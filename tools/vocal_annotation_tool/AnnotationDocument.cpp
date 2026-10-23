@@ -31,6 +31,8 @@ void AnnotationDocument::clear()
     tempoSegments.clear();
     timeSignatures.clear();
     chords.clear();
+    hasArrangement = false;
+    tracks.clear();
 }
 
 juce::String AnnotationDocument::nextNoteId() const

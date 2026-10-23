@@ -34,6 +34,7 @@ set(annotation_sources
     DatasetExport.cpp
     ../vocal_annotation_tool/AnnotationDocument.cpp
     ../vocal_annotation_tool/AnnotationJson.cpp
+    ../vocal_annotation_tool/ArrangementModel.cpp
     ../vocal_annotation_tool/AnnotationValidator.cpp
 )
 target_sources(NativeNoteAnnotator PRIVATE Main.cpp WaveformEditor.cpp ${annotation_sources})

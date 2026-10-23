@@ -1,6 +1,9 @@
 import {
+  ChevronDownIcon,
+  ChevronRightIcon,
   MicrophoneIcon,
   MusicalNoteIcon,
+  PlusIcon,
   SignalIcon,
   SparklesIcon,
   SpeakerWaveIcon,
@@ -16,6 +19,11 @@ import type {
 import { RangeInput, ToggleButton } from "@/ui";
 
 type TrackHeaderProps = {
+  depth?: number;
+  childCount?: number;
+  collapsed?: boolean;
+  onToggleCollapsed?(): void;
+  onImport?(): void;
   id: TrackName;
   name: TrackName;
   state: TrackChannelState;
@@ -31,6 +39,11 @@ type TrackHeaderProps = {
 };
 
 export function TrackHeader({
+  depth = 0,
+  childCount = 0,
+  collapsed = false,
+  onToggleCollapsed,
+  onImport,
   id,
   name,
   state,
@@ -52,11 +65,13 @@ export function TrackHeader({
     <div
       className={[
         "track-header",
+        depth ? "is-child-track" : "",
         name === "Voice Main" ? "is-voice" : "",
         selected ? "is-selected" : "",
       ]
         .filter(Boolean)
         .join(" ")}
+      style={{ paddingLeft: `${28 + depth * 14}px` }}
     >
       <button
         type="button"
@@ -65,6 +80,36 @@ export function TrackHeader({
         aria-pressed={selected}
         onClick={(event) => onSelect(event.shiftKey)}
       />
+      {childCount > 0 ? (
+        <button
+          type="button"
+          className="track-disclosure"
+          aria-label={`${collapsed ? "Expand" : "Collapse"} ${name} backing tracks`}
+          aria-expanded={!collapsed}
+          title={`${childCount} backing tracks`}
+          onClick={onToggleCollapsed}
+        >
+          {collapsed ? (
+            <ChevronRightIcon aria-hidden="true" />
+          ) : (
+            <ChevronDownIcon aria-hidden="true" />
+          )}
+          <span>{childCount}</span>
+        </button>
+      ) : (
+        <span className="track-disclosure-placeholder" />
+      )}
+      {onImport ? (
+        <button
+          type="button"
+          className="track-import-button"
+          aria-label={`Add clips to ${name}`}
+          title="Add audio clips"
+          onClick={onImport}
+        >
+          <PlusIcon aria-hidden="true" />
+        </button>
+      ) : null}
       {onDelete ? (
         <button
           type="button"

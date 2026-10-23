@@ -1,10 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import type {
-  AudioSettingsState,
-  PluginBridge,
-  ProjectAction,
-  VoiceTrainingState,
-} from "@/bridge/plugin-bridge";
+import type { AudioSettingsState, PluginBridge, VoiceTrainingState } from "@/bridge/plugin-bridge";
 import type { CorrectionToolId } from "@/domain/studio";
 import { Arrangement } from "@/features/studio/components/Arrangement";
 import { ExportToast, type ExportToastState } from "@/features/studio/components/ExportToast";
@@ -149,9 +144,7 @@ function StudioWorkspace({
   const [settingsOpen, setSettingsOpen] = useState(false);
   const { pianoCollapsed, serviceTracksCollapsed } = controller;
   const pitchEditorAvailable = project.hasVocal || project.initialBackingTracks.length > 0;
-  const sendProjectAction = (action: ProjectAction) => {
-    bridge.send({ type: "project-action", action });
-  };
+
   const updateShortcuts = (next: ShortcutBindings) => {
     setShortcuts(next);
     saveShortcutBindings(next);
@@ -255,7 +248,6 @@ function StudioWorkspace({
           backingAudioRenderRunning={backingAudioRenderRunning}
           backingGenerationTrack={backingGenerationTrack}
           backingAudioRenderTrack={backingAudioRenderTrack}
-          onProjectAction={sendProjectAction}
           onOpenVoiceTraining={() => setVoiceTrainingOpen(true)}
         />
       </section>

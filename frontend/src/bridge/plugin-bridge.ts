@@ -100,6 +100,18 @@ export type VoiceTrainingState = {
 
 export type PluginCommand =
   | { type: "frontend-ready" }
+  | { type: "add-track" }
+  | { type: "remove-track"; track: string }
+  | { type: "import-track-audio"; track: string }
+  | { type: "set-track-collapsed"; track: string; collapsed: boolean }
+  | {
+      type: "move-arrangement-clip";
+      track: string;
+      clipId: string;
+      targetTrack: string;
+      start: number;
+    }
+  | { type: "remove-arrangement-clip"; track: string; clipId: string }
   | { type: "project-action"; action: ProjectAction }
   | {
       type: "audio-settings";
@@ -142,7 +154,12 @@ export type PluginCommand =
       state: TrackLayerState;
     }
   | { type: "select-tracks"; tracks: TrackName[] }
-  | { type: "add-backing-track"; track: BackingTrackName; generator?: BackingGenerator }
+  | {
+      type: "add-backing-track";
+      track: BackingTrackName;
+      generator?: BackingGenerator;
+      parentId?: string;
+    }
   | { type: "regenerate-backing-track"; track: string; generator?: BackingGenerator }
   | { type: "render-backing-track"; track: string }
   | { type: "remove-backing-track"; track: string }

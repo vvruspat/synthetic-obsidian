@@ -6,7 +6,6 @@ import {
   MusicalNoteIcon,
   Squares2X2Icon,
 } from "@heroicons/react/24/outline";
-import { Fragment } from "react";
 import { TrackHeader } from "@/features/studio/components/TrackHeader";
 import type { StudioController } from "@/features/studio/hooks/useStudioController";
 import {
@@ -20,7 +19,7 @@ import { RangeInput } from "@/ui";
 
 export function TrackSidebar({ controller }: { controller: StudioController }) {
   const {
-    backingTracks,
+    trackRows,
     selectedTracks,
     trackState,
     trackLayerState,
@@ -37,8 +36,16 @@ export function TrackSidebar({ controller }: { controller: StudioController }) {
     id: Parameters<typeof actions.toggleTrack>[0],
     name = id,
     onDelete?: () => void,
+    depth = 0,
+    childCount = 0,
+    collapsed = false,
   ) => (
     <TrackHeader
+      depth={depth}
+      childCount={childCount}
+      collapsed={collapsed}
+      onToggleCollapsed={() => actions.toggleTrackCollapsed(id, !collapsed)}
+      onImport={() => actions.importTrackAudio(id)}
       id={id}
       name={name}
       state={trackState[id] ?? { mute: false, solo: false }}
@@ -101,24 +108,34 @@ export function TrackSidebar({ controller }: { controller: StudioController }) {
         <span>Chord</span>
       </div>
       <div className="sidebar-track-section">
-        {renderTrackHeader("Instrumental")}
-        {renderTrackHeader("Voice Main")}
-        <div className="backing-track-toolbar-side">
-          <span>Backing Tracks</span>
+        <div className="arrangement-add-toolbar sidebar-add-toolbar">
+          <button type="button" onClick={actions.addTrack}>
+            + Add track
+          </button>
         </div>
         <div
           className="sidebar-track-stack"
           ref={refs.sidebarTrackScrollRef}
           onScroll={() => actions.syncTrackScroll("sidebar")}
         >
-          {backingTracks.map((track) => (
-            <Fragment key={track.id}>
-              {renderTrackHeader(track.id, track.name, () => {
-                if (window.confirm(`Delete backing track “${track.name}”?`)) {
-                  actions.removeBackingTrack(track.id);
-                }
-              })}
-            </Fragment>
+          {trackRows.map(({ track, depth, childCount }) => (
+            <div key={track.id}>
+              {renderTrackHeader(
+                track.id,
+                track.name,
+                () => {
+                  if (
+                    window.confirm(
+                      `Delete track “${track.name}”${childCount ? " and its backing tracks" : ""}?`,
+                    )
+                  )
+                    actions.removeTrack(track.id);
+                },
+                depth,
+                childCount,
+                track.collapsed,
+              )}
+            </div>
           ))}
         </div>
       </div>

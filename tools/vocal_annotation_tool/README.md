@@ -6,6 +6,41 @@ WebView), build `NativeNoteAnnotator`. See
 
 Standalone offline annotator for creating gold vocal note/syllable datasets.
 
+## Tracks and clips
+
+Use **Add track** for another audio track, then its import button to add one or
+more recordings as clips. Files selected together are appended in order. Drag
+a clip horizontally to change its time or vertically to another track; its notes
+and pitch curves move with it. A focused clip also supports Left/Right (0.1 s),
+Shift+Left/Right (1 s), and Delete. The clip's trash button removes just that clip.
+Project Undo/Redo restores arrangement edits.
+
+Select a source track before choosing **Add backing track**. Each generated
+backing is a separate child immediately below that source; repeated generation
+adds more children. The disclosure arrow hides or shows that track's children
+without changing playback. Removing a parent removes its descendants too, with
+confirmation and undo. There is no fixed track count limit.
+
+Projects store an additive `arrangement_tracks` field with clip source, start,
+offset and duration, track parent, mute/solo and collapsed state. Older projects
+are migrated to one clip per existing audio track. Consolidated saves copy all
+clip media, and stem export includes clip positions and silent gaps. Older app
+versions do not understand the new arrangement field; use this version to edit
+and save projects containing multiple clips.
+
+Playback plans and source buffers are prepared on a background worker. The audio
+callback only reads prepared buffers and returns retired plans for worker-side
+destruction. Unique source files are decoded into RAM, so practical project size
+depends on available memory and CPU. Python/RMVPE/SoulX processing stays offline;
+model schemas and worker APIs are unchanged. Analyze enriches the selected track's
+existing note boundaries; AI Parts rebuilds that track's parts per source clip.
+
+Configure `-DSYNTHETIC_OBSIDIAN_ARRANGEMENT_TESTS=ON`, build `ArrangementTests`,
+and run CTest in `vocal_annotation_tool_build` for placement, hierarchy, legacy
+migration, save/load, export, and playback checks at 44.1/48/96 kHz with 64–1024
+sample blocks. The arrangement CI workflow builds the app and runs these checks
+on macOS and Windows; frontend checks cover hierarchy, collapse and drag timing.
+
 The tool is intentionally isolated from the realtime plugin target. Audio loading,
 JSON import/export, pYIN subprocess analysis, and manual editing all live under
 `tools/vocal_annotation_tool`.

@@ -19,6 +19,9 @@ target_sources(VocalAnnotationTool
     PRIVATE
         Main.cpp
         AnnotationDocument.cpp
+        ArrangementModel.cpp
+        ArrangementPlayback.cpp
+        ClipPitchAnalysis.cpp
         AnnotationJson.cpp
         AnnotationValidator.cpp
         AnnotationEditorComponent.cpp
@@ -116,7 +119,7 @@ if(SYNTHETIC_OBSIDIAN_VOCAL_ANALYSIS_TESTS)
     juce_generate_juce_header(SashaNoteAnalysisTests)
     target_sources(SashaNoteAnalysisTests PRIVATE
         SashaNoteAnalysisTests.cpp SashaNoteAnalysis.cpp SibilantModel.cpp RuntimeManager.cpp
-        AnnotationDocument.cpp AnnotationJson.cpp
+        AnnotationDocument.cpp AnnotationJson.cpp ArrangementModel.cpp
         ../native_note_annotator/NoteAnalysis.cpp
         ../native_note_annotator/NoteBoundaryModel.cpp
         ../native_note_annotator/PitchStructureFeatures.cpp)
@@ -162,4 +165,17 @@ if(SYNTHETIC_OBSIDIAN_APP_NOTE_MODEL)
                 "$<TARGET_FILE_DIR:VocalAnnotationTool>/models/note-boundaries/sasha-v11-melismas/model.json"
             VERBATIM)
     endif()
+endif()
+
+option(SYNTHETIC_OBSIDIAN_ARRANGEMENT_TESTS "Build arrangement model and playback tests" OFF)
+if(SYNTHETIC_OBSIDIAN_ARRANGEMENT_TESTS)
+    enable_testing()
+    juce_add_console_app(ArrangementTests PRODUCT_NAME "Arrangement tests")
+    juce_generate_juce_header(ArrangementTests)
+    target_sources(ArrangementTests PRIVATE ArrangementTests.cpp ArrangementModel.cpp ArrangementPlayback.cpp
+        AnnotationDocument.cpp AnnotationJson.cpp)
+    target_compile_definitions(ArrangementTests PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
+    target_link_libraries(ArrangementTests PRIVATE juce::juce_audio_utils juce::juce_gui_extra
+        juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)
+    add_test(NAME ArrangementTests COMMAND ArrangementTests)
 endif()

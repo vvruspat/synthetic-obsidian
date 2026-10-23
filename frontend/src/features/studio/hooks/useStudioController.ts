@@ -23,6 +23,11 @@ import type {
   VocalClip,
 } from "@/domain/studio";
 import {
+  arrangementWaveform,
+  projectTracks,
+  visibleTrackRows,
+} from "@/features/studio/lib/arrangement";
+import {
   chordLabelAtPosition,
   chordPitchClasses,
   snapClipsToChords,
@@ -121,6 +126,8 @@ export function useStudioController(
   project: StudioProject,
   shortcutBindings: ShortcutBindings,
 ) {
+  const arrangementTracks = useMemo(() => projectTracks(project), [project]);
+  const trackRows = useMemo(() => visibleTrackRows(arrangementTracks), [arrangementTracks]);
   const minimumClipWidth = getMinimumClipWidthPercent(project.timelineDurationSeconds);
   const [playing, setPlaying] = useState(false);
   const [playhead, setPlayhead] = useState(project.initialPlayhead);
@@ -203,19 +210,15 @@ export function useStudioController(
   }, [project.initialBackingTracks]);
 
   useEffect(() => {
-    const availableTracks = new Set<TrackName>([
-      ...(project.hasInstrumental ? (["Instrumental"] as const) : []),
-      ...(project.hasVocal ? (["Voice Main"] as const) : []),
-      ...backingTracks.map((track) => track.id),
-    ]);
+    const availableTracks = new Set(trackRows.map(({ track }) => track.id));
     setSelectedTracks((current) => {
       const availableSelection = current.filter((track) => availableTracks.has(track));
       if (availableSelection.length > 0) return availableSelection;
-      if (project.hasVocal) return ["Voice Main"];
-      if (project.hasInstrumental) return ["Instrumental"];
-      return backingTracks.length > 0 ? [backingTracks[0].id] : ["Voice Main"];
+      const hidden = arrangementTracks.find((track) => current.includes(track.id));
+      if (hidden?.parentId && availableTracks.has(hidden.parentId)) return [hidden.parentId];
+      return trackRows[0] ? [trackRows[0].track.id] : [];
     });
-  }, [backingTracks, project.hasInstrumental, project.hasVocal]);
+  }, [arrangementTracks, trackRows]);
 
   useEffect(() => {
     setTrackState(
@@ -347,16 +350,26 @@ export function useStudioController(
     return () => cancelAnimationFrame(animation);
   }, [cycleRange.end, cycleRange.start, looping, playing, project.timelineDurationSeconds]);
 
-  useEffect(() => {
-    void backingTracks.length;
-    const frame = requestAnimationFrame(() => {
-      const sidebar = sidebarTrackScrollRef.current;
-      const arrangement = arrangementTrackScrollRef.current;
-      if (sidebar) sidebar.scrollTop = sidebar.scrollHeight;
-      if (arrangement) arrangement.scrollTop = arrangement.scrollHeight;
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [backingTracks.length]);
+  useLayoutEffect(() => {
+    const arrangement = arrangementTrackScrollRef.current;
+    const sidebar = sidebarTrackScrollRef.current;
+    const selected = selectedTracks[0];
+    if (
+      !arrangement ||
+      !sidebar ||
+      !selected ||
+      !trackRows.some(({ track }) => track.id === selected)
+    )
+      return;
+    const row = arrangement.querySelector<HTMLElement>(`[data-track-id="${CSS.escape(selected)}"]`);
+    if (!row) return;
+    const top = row.offsetTop;
+    const bottom = top + row.offsetHeight;
+    if (top < arrangement.scrollTop) arrangement.scrollTop = top;
+    else if (bottom > arrangement.scrollTop + arrangement.clientHeight)
+      arrangement.scrollTop = bottom - arrangement.clientHeight;
+    sidebar.scrollTop = arrangement.scrollTop;
+  }, [selectedTracks, trackRows]);
 
   const timeLabel = useMemo(
     () => formatTime(playhead, project.timelineStartSeconds, project.timelineDurationSeconds),
@@ -395,8 +408,20 @@ export function useStudioController(
         notesAvailable: (backingClipsByTrack[track.id]?.length ?? 0) > 0,
       };
     }
+    for (const track of arrangementTracks) {
+      availability[track.id] = {
+        audioAvailable: track.clips.some((clip) =>
+          Array.isArray(clip.waveform) ? clip.waveform.length > 0 : clip.waveform.pointCount > 0,
+        ),
+        notesAvailable:
+          track.id === "Voice Main"
+            ? clips.length > 0
+            : (backingClipsByTrack[track.id]?.length ?? 0) > 0,
+      };
+    }
     return availability;
   }, [
+    arrangementTracks,
     backingClipsByTrack,
     backingTracks,
     clips.length,
@@ -430,16 +455,23 @@ export function useStudioController(
     selectedTracks.length === 1 && selectedTracks[0] !== "Instrumental"
       ? project.backingTrackContents.find((item) => item.id === selectedTracks[0])
       : undefined;
+  const arrangedEditorWaveform = useMemo(() => {
+    if (!project.tracks || selectedTracks.length !== 1) return null;
+    const track = arrangementTracks.find((item) => item.id === selectedTracks[0]);
+    return track ? arrangementWaveform(track, project.timelineDurationSeconds) : null;
+  }, [project.tracks, selectedTracks, arrangementTracks, project.timelineDurationSeconds]);
   const editorWaveform =
-    selectedTracks.length !== 1
+    arrangedEditorWaveform ??
+    (selectedTracks.length !== 1
       ? []
       : selectedTracks[0] === "Instrumental"
         ? project.instrumentalWaveform
         : selectedTracks[0] === "Voice Main"
           ? project.vocalWaveform
-          : (selectedTrackContent?.waveform ?? []);
-  const editorWaveformDurationRatio =
-    selectedTracks.length !== 1
+          : (selectedTrackContent?.waveform ?? []));
+  const editorWaveformDurationRatio = arrangedEditorWaveform
+    ? 1
+    : selectedTracks.length !== 1
       ? 0
       : selectedTracks[0] === "Instrumental"
         ? project.instrumentalDurationSeconds / project.timelineDurationSeconds
@@ -451,7 +483,9 @@ export function useStudioController(
     ({ track }) => track === activePitchTrack,
   ) ?? { track: activePitchTrack ?? "Voice Main", canUndo: false, canRedo: false };
   const backingRenderAction =
-    activePitchTrack !== null && activePitchTrack !== "Voice Main" && selectedTrackContent
+    activePitchTrack !== null &&
+    arrangementTracks.find((track) => track.id === activePitchTrack)?.parentId &&
+    selectedTrackContent
       ? !selectedTrackContent.hasAudio
         ? {
             track: activePitchTrack,
@@ -549,7 +583,9 @@ export function useStudioController(
   };
 
   const addBackingTrack = (name: BackingTrackName) => {
-    bridge.send({ type: "add-backing-track", track: name, generator: backingGenerator });
+    const parentId = selectedTracks[0];
+    if (!parentId) return;
+    bridge.send({ type: "add-backing-track", track: name, generator: backingGenerator, parentId });
   };
 
   const regenerateBackingTrack = (trackId: string) => {
@@ -1325,6 +1361,8 @@ export function useStudioController(
     pianoCollapsed,
     serviceTracksCollapsed,
     backingTracks,
+    arrangementTracks,
+    trackRows,
     backingGenerator,
     voiceProfiles: project.voiceProfiles,
     selectedTracks,
@@ -1358,6 +1396,15 @@ export function useStudioController(
       toggleTrackLayer,
       selectTrack,
       addBackingTrack,
+      addTrack: () => bridge.send({ type: "add-track" }),
+      removeTrack: (track: string) => bridge.send({ type: "remove-track", track }),
+      importTrackAudio: (track: string) => bridge.send({ type: "import-track-audio", track }),
+      toggleTrackCollapsed: (track: string, collapsed: boolean) =>
+        bridge.send({ type: "set-track-collapsed", track, collapsed }),
+      moveArrangementClip: (track: string, clipId: string, targetTrack: string, start: number) =>
+        bridge.send({ type: "move-arrangement-clip", track, clipId, targetTrack, start }),
+      removeArrangementClip: (track: string, clipId: string) =>
+        bridge.send({ type: "remove-arrangement-clip", track, clipId }),
       setBackingGenerator,
       regenerateBackingTrack,
       renderBackingTrack,

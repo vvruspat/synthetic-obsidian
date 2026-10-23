@@ -1,0 +1,38 @@
+name: Arrangement editor
+on:
+  pull_request:
+    paths:
+      - 'frontend/**'
+      - 'tools/vocal_annotation_tool/**'
+      - 'Source/web/**'
+      - 'CMakeLists.txt'
+      - '.github/workflows/arrangement.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci && npm run check
+        working-directory: frontend
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, windows-2022]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build-arrangement -DCMAKE_BUILD_TYPE=Release -DSYNTHETIC_OBSIDIAN_BUILD_NATIVE_ANNOTATOR=OFF -DSYNTHETIC_OBSIDIAN_ARRANGEMENT_TESTS=ON
+      - name: Build
+        run: cmake --build build-arrangement --config Release --target ArrangementTests VocalAnnotationTool --parallel 3
+      - name: Verify playback and project round-trip
+        run: ctest --test-dir build-arrangement/vocal_annotation_tool_build -C Release -R ArrangementTests --output-on-failure

@@ -128,7 +128,25 @@ export type PitchEditorHistoryState = {
   canRedo: boolean;
 };
 
+export type ArrangementClip = {
+  id: string;
+  name: string;
+  start: number;
+  offset: number;
+  duration: number;
+  waveform: WaveformData;
+};
+
+export type ArrangementTrack = {
+  id: string;
+  name: string;
+  parentId: string;
+  collapsed: boolean;
+  clips: ArrangementClip[];
+};
+
 export type StudioProject = {
+  tracks?: ArrangementTrack[];
   tempo: number;
   meter: string;
   hasInstrumental: boolean;

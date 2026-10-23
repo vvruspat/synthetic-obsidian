@@ -1,5 +1,6 @@
 #include "ArrangementPlayback.h"
 #include "AnnotationJson.h"
+#include "../../Source/web/AudioFileTransfer.h"
 #include <cmath>
 #include <iostream>
 #include <limits>
@@ -11,6 +12,35 @@ namespace
 void require(bool condition, const char* message)
 {
     if (! condition) throw std::runtime_error(message);
+}
+void testAudioFileTransfer(const juce::File& directory)
+{
+    using synthetic_obsidian::AudioFileTransfer;
+    AudioFileTransfer transfer(directory.getChildFile("imports"));
+    auto request = [](std::initializer_list<std::pair<juce::Identifier, juce::var>> fields)
+    {
+        auto* object = new juce::DynamicObject();
+        for (const auto& [key, value] : fields) object->setProperty(key, value);
+        return juce::var(object);
+    };
+    auto send = [&](std::initializer_list<std::pair<juce::Identifier, juce::var>> fields)
+    { return transfer.process(request(fields)); };
+    require(send({ { "action", "begin" }, { "name", "bad.exe" }, { "size", 4 } }).hasProperty("error"), "reject nonaudio drops");
+    const auto token = send({ { "action", "begin" }, { "name", "take.wav" }, { "size", 4 } })["token"];
+    require(token.toString().isNotEmpty(), "begin audio transfer");
+    require(send({ { "action", "finish" }, { "token", token } }).hasProperty("error"), "cannot finish partial transfer");
+    require(send({ { "action", "append" }, { "token", token }, { "offset", 1 }, { "data", "AAE=" } }).hasProperty("error"), "reject out of order chunks");
+    require(static_cast<bool>(send({ { "action", "append" }, { "token", token }, { "offset", 0 }, { "data", "AAE=" } })["ok"]), "write first binary chunk");
+    require(send({ { "action", "append" }, { "token", token }, { "offset", 0 }, { "data", "AAE=" } }).hasProperty("error"), "reject duplicate chunk");
+    require(static_cast<bool>(send({ { "action", "append" }, { "token", token }, { "offset", 2 }, { "data", "Av8=" } })["ok"]), "write second binary chunk");
+    const juce::File result(send({ { "action", "finish" }, { "token", token } })["path"].toString());
+    juce::MemoryBlock data;
+    const unsigned char expected[] { 0, 1, 2, 255 };
+    require(result.loadFileAsData(data) && data.getSize() == 4 && std::memcmp(data.getData(), expected, 4) == 0, "transfer preserves binary file");
+    require(result.getFileName() == "take.wav", "keep original clip name");
+    const auto abort = send({ { "action", "begin" }, { "name", "cancel.wav" }, { "size", 4 } })["token"];
+    require(static_cast<bool>(send({ { "action", "abort" }, { "token", abort } })["ok"]), "abort import");
+    require(! directory.getChildFile("imports").getChildFile(abort.toString()).exists(), "abort removes partial assets");
 }
 juce::File makeAudio(const juce::File& directory)
 {
@@ -66,6 +96,7 @@ int main()
     directory.createDirectory();
     try
     {
+        testAudioFileTransfer(directory);
         const auto audio = makeAudio(directory);
         auto document = fixture(audio);
         const auto render = directory.getChildFile("render.wav");

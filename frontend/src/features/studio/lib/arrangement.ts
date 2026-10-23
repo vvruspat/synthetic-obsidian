@@ -79,6 +79,45 @@ export function visibleTrackRows(tracks: ArrangementTrack[]) {
   return rows;
 }
 
+export type ArrangementRow = {
+  kind: "track" | "backing-group";
+  key: string;
+  track: ArrangementTrack;
+  depth: number;
+  childCount: number;
+  color: string;
+  number: number;
+};
+
+export function arrangementRows(tracks: ArrangementTrack[]): ArrangementRow[] {
+  const rows: ArrangementRow[] = [];
+  const visited = new Set<string>();
+  const colors = ["#d0cb35", "#20bfc5", "#ad85e4", "#e7a35b", "#e27f9c"];
+  let sourceIndex = 0;
+  const visit = (track: ArrangementTrack, depth: number, color: string) => {
+    if (visited.has(track.id)) return;
+    visited.add(track.id);
+    const children = tracks.filter((candidate) => candidate.parentId === track.id);
+    const common = { track, depth, color, childCount: children.length };
+    rows.push({ ...common, key: track.id, kind: "track", number: rows.length + 1 });
+    if (children.length || (!track.parentId && track.id !== "Instrumental")) {
+      rows.push({
+        ...common,
+        key: `group:${track.id}`,
+        kind: "backing-group",
+        number: rows.length + 1,
+      });
+    }
+    if (!track.collapsed) for (const child of children) visit(child, depth + 1, color);
+  };
+  for (const track of tracks) {
+    if (track.parentId) continue;
+    const color = track.id === "Instrumental" ? "#559fe1" : colors[sourceIndex++ % colors.length];
+    visit(track, 0, color);
+  }
+  return rows;
+}
+
 export function clipStartAfterDrag(
   start: number,
   deltaPixels: number,

@@ -2,6 +2,8 @@
 
 #include <JuceHeader.h>
 
+#include "AudioFileTransfer.h"
+
 #include <functional>
 #include <optional>
 
@@ -14,6 +16,7 @@ public:
     using CommandHandler = std::function<void(const juce::var&)>;
 
     explicit SyntheticObsidianWebView(CommandHandler commandHandler);
+    ~SyntheticObsidianWebView() override;
 
     void dispatch(const juce::var& event);
     void resized() override;
@@ -31,6 +34,8 @@ private:
     static std::optional<juce::WebBrowserComponent::Resource> getResource(const juce::String& path);
 
     CommandHandler commandHandler_;
+    AudioFileTransfer audioTransfer_;
+    juce::ThreadPool transferWorker_ { 1 };
     LocalBrowser browser_;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SyntheticObsidianWebView)

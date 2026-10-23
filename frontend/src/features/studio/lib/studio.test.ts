@@ -92,6 +92,7 @@ describe("studio value helpers", () => {
   });
 
   it("supports single and Shift track selection", () => {
+    expect(getNextTrackSelection(["Voice Main"], "Voice Main", true)).toEqual([]);
     expect(getNextTrackSelection(["Voice Main"], "Third Below", false)).toEqual(["Third Below"]);
     expect(getNextTrackSelection(["Voice Main"], "Third Below", true)).toEqual([
       "Voice Main",

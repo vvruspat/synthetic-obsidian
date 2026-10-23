@@ -1977,7 +1977,7 @@ private:
         event->setProperty("message", statusLabel_.getText());
         event->setProperty(
             "vocalAnalysisRunning",
-            analysisRunning_ || aiPartsAnalysisRunning_ || analyzeAfterAiParts_);
+            analysisRunning_ || aiPartsAnalysisRunning_ || analyzeAfterAiParts_ || arrangementImportRunning_ || preparingBackingSource_);
         event->setProperty(
             "instrumentalAnalysisRunning",
             musicalContextAnalysisRunning_);
@@ -4978,97 +4978,137 @@ private:
         });
     }
 
+    void appendArrangementTrack(const juce::String& id, const juce::String& name)
+    {
+        ArrangementTrack track;
+        track.id = id;
+        track.name = name;
+        track.notesMuted = true;
+        BackingVocalTrack content;
+        content.id = id;
+        content.styleName = name;
+        document_.backingTracks.push_back(std::move(content));
+        document_.tracks.push_back(std::move(track));
+    }
+
+    void selectArrangementTrack(const juce::String& id)
+    {
+        selectedWebTrack_ = id;
+        auto* event = new juce::DynamicObject();
+        event->setProperty("type", "track-selected");
+        event->setProperty("track", id);
+        webView_.dispatch(event);
+    }
+
     void importArrangementAudio(const juce::String& trackId)
     {
-        if (arrangementImportRunning_ || projectHasBackgroundWork())
+        if (arrangementImportRunning_ || projectHasBackgroundWork() || preparingBackingSource_)
         {
             setStatus("Wait for the current operation before importing clips.");
             return;
         }
-        chooser_ = std::make_unique<juce::FileChooser>("Add audio clips", juce::File(), "*.wav;*.aif;*.aiff;*.flac;*.mp3;*.ogg");
+        const auto start = currentTransportPosition();
+        chooser_ = std::make_unique<juce::FileChooser>("Import audio files", juce::File(), "*.wav;*.aif;*.aiff;*.flac;*.mp3;*.ogg");
         juce::WeakReference<MainComponent> safeThis(this);
         chooser_->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles
                              | juce::FileBrowserComponent::canSelectMultipleItems,
-            [safeThis, trackId](const juce::FileChooser& chooser)
+            [safeThis, trackId, start](const juce::FileChooser& chooser)
             {
-                if (safeThis == nullptr || chooser.getResults().isEmpty()) return;
-                const auto* target = arrangement::findTrack(safeThis->document_, trackId);
-                if (target == nullptr) return;
-                auto start = safeThis->currentTransportPosition();
-                for (const auto& clip : target->clips) start = juce::jmax(start, clip.start + clip.duration);
-                safeThis->arrangementImportRunning_ = true;
-                safeThis->setStatus("Importing and analyzing audio clips...");
-                const auto files = chooser.getResults();
-                const auto model = RuntimeManager::noteBoundaryModelFile();
-                const auto sibilants = RuntimeManager::sibilantModelFile();
-                const auto cancelled = safeThis->noteAnalysisCancelled_;
-                juce::Thread::launch([safeThis, trackId, files, start, model, sibilants, cancelled]() mutable
-                {
-                    std::vector<ArrangementClip> clips;
-                    std::vector<NoteBlock> importedNotes;
-                    juce::String error;
-                    juce::AudioFormatManager formats;
-                    formats.registerBasicFormats();
-                    SashaNoteAnalysis analyzer;
-                    for (const auto& file : files)
-                    {
-                        if (cancelled->load()) return;
-                        std::unique_ptr<juce::AudioFormatReader> reader(formats.createReaderFor(file));
-                        if (reader == nullptr || reader->sampleRate <= 0.0 || reader->lengthInSamples <= 0)
-                        { error = "Could not read " + file.getFileName(); continue; }
-                        ArrangementClip clip { "clip-" + juce::Uuid().toString(), file.getFileNameWithoutExtension(),
-                            file, start, 0.0, static_cast<double>(reader->lengthInSamples) / reader->sampleRate };
-                        if (trackId != "Instrumental")
-                        {
-                            AnnotationDocument annotation;
-                            const auto sidecar = file.withFileExtension(".annotation.json");
-                            if (! sidecar.existsAsFile() || AnnotationJson::load(sidecar, annotation).failed())
-                            {
-                                try
-                                {
-                                    auto draft = analyzer.analyze(file, model, *cancelled, sibilants);
-                                    annotation.notes = std::move(draft.notes);
-                                    if (! draft.succeeded) error = "Audio imported; note analysis: " + draft.error;
-                                }
-                                catch (const std::exception& exception) { error = exception.what(); }
-                            }
-                            for (auto note : annotation.notes)
-                            {
-                                note.id = clip.id + ":" + note.id;
-                                note.clipId = clip.id;
-                                arrangement::shiftNote(note, start);
-                                importedNotes.push_back(std::move(note));
-                            }
-                        }
-                        start += clip.duration;
-                        clips.push_back(std::move(clip));
-                    }
-                    juce::MessageManager::callAsync([safeThis, trackId, readyClips = std::move(clips),
-                                                    readyNotes = std::move(importedNotes), error]() mutable
-                    {
-                        if (safeThis == nullptr) return;
-                        safeThis->arrangementImportRunning_ = false;
-                        auto* track = arrangement::findTrack(safeThis->document_, trackId);
-                        if (track == nullptr) return;
-                        safeThis->beginUndoableAction();
-                        for (auto& clip : readyClips) track->clips.push_back(std::move(clip));
-                        auto& notes = arrangement::notes(safeThis->document_, trackId);
-                        notes.insert(notes.end(), readyNotes.begin(), readyNotes.end());
-                        if (trackId == "Voice Main" && ! track->clips.empty())
-                            safeThis->document_.audioFile = track->clips.front().audioFile;
-                        if (trackId == "Instrumental" && ! track->clips.empty())
-                            safeThis->document_.instrumentalFile = track->clips.front().audioFile;
-                        safeThis->markChanged();
-                        safeThis->setStatus(error.isEmpty() ? "Audio clips imported." : error);
-                        if (trackId == "Instrumental") safeThis->runMusicalContextAnalysis();
-                    });
-                });
+                if (safeThis != nullptr && ! chooser.getResults().isEmpty())
+                    safeThis->importArrangementFiles(chooser.getResults(), trackId, start);
             });
+    }
+
+    void importArrangementFiles(const juce::Array<juce::File>& files, juce::String trackId, double start)
+    {
+        if (arrangementImportRunning_ || projectHasBackgroundWork() || preparingBackingSource_)
+        { setStatus("Wait for the current operation before importing clips."); return; }
+        if (files.isEmpty() || ! std::isfinite(start) || start < 0.0) return;
+        const auto createTrack = arrangement::findTrack(document_, trackId) == nullptr;
+        if (createTrack) trackId = "audio-" + juce::Uuid().toString();
+        arrangementImportRunning_ = true;
+        setStatus("Importing and analyzing audio clips...");
+        const auto model = RuntimeManager::noteBoundaryModelFile();
+        const auto sibilants = RuntimeManager::sibilantModelFile();
+        const auto cancelled = noteAnalysisCancelled_;
+        juce::WeakReference<MainComponent> safeThis(this);
+        juce::Thread::launch([safeThis, trackId, createTrack, files, start, model, sibilants, cancelled]() mutable
+        {
+            std::vector<ArrangementClip> clips;
+            std::vector<NoteBlock> importedNotes;
+            juce::String error;
+            juce::AudioFormatManager formats;
+            formats.registerBasicFormats();
+            SashaNoteAnalysis analyzer;
+            for (const auto& file : files)
+            {
+                if (cancelled->load()) return;
+                std::unique_ptr<juce::AudioFormatReader> reader(formats.createReaderFor(file));
+                if (reader == nullptr || reader->sampleRate <= 0.0 || reader->lengthInSamples <= 0)
+                { error = "Could not read " + file.getFileName(); continue; }
+                ArrangementClip clip { "clip-" + juce::Uuid().toString(), file.getFileNameWithoutExtension(),
+                    file, start, 0.0, static_cast<double>(reader->lengthInSamples) / reader->sampleRate };
+                if (trackId != "Instrumental")
+                {
+                    AnnotationDocument annotation;
+                    const auto sidecar = file.withFileExtension(".annotation.json");
+                    if (! sidecar.existsAsFile() || AnnotationJson::load(sidecar, annotation).failed())
+                    {
+                        try
+                        {
+                            auto draft = analyzer.analyze(file, model, *cancelled, sibilants);
+                            annotation.notes = std::move(draft.notes);
+                            if (! draft.succeeded) error = "Audio imported; note analysis: " + draft.error;
+                        }
+                        catch (const std::exception& exception) { error = exception.what(); }
+                    }
+                    for (auto note : annotation.notes)
+                    {
+                        note.id = clip.id + ":" + note.id;
+                        note.clipId = clip.id;
+                        arrangement::shiftNote(note, start);
+                        importedNotes.push_back(std::move(note));
+                    }
+                }
+                start += clip.duration;
+                clips.push_back(std::move(clip));
+            }
+            juce::MessageManager::callAsync([safeThis, trackId, createTrack, readyClips = std::move(clips),
+                                            readyNotes = std::move(importedNotes), error]() mutable
+            {
+                if (safeThis == nullptr) return;
+                safeThis->arrangementImportRunning_ = false;
+                if (readyClips.empty())
+                { safeThis->setStatus(error.isNotEmpty() ? error : "No audio files imported."); return; }
+                auto* track = arrangement::findTrack(safeThis->document_, trackId);
+                if (track == nullptr && ! createTrack) return;
+                safeThis->beginUndoableAction();
+                if (track == nullptr)
+                {
+                    safeThis->appendArrangementTrack(trackId, readyClips.front().name);
+                    track = arrangement::findTrack(safeThis->document_, trackId);
+                }
+                for (auto& clip : readyClips) track->clips.push_back(std::move(clip));
+                auto& notes = arrangement::notes(safeThis->document_, trackId);
+                notes.insert(notes.end(), readyNotes.begin(), readyNotes.end());
+                if (trackId == "Voice Main" && ! track->clips.empty())
+                    safeThis->document_.audioFile = track->clips.front().audioFile;
+                if (trackId == "Instrumental" && ! track->clips.empty())
+                    safeThis->document_.instrumentalFile = track->clips.front().audioFile;
+                safeThis->clearPitchTrackHistory(trackId);
+                safeThis->markChanged();
+                safeThis->scheduleArrangementPitchPreview(trackId);
+                safeThis->selectArrangementTrack(trackId);
+                safeThis->setStatus(error.isEmpty() ? "Audio clips imported." : error);
+                if (trackId == "Instrumental") safeThis->runMusicalContextAnalysis();
+            });
+        });
     }
 
     bool handleArrangementCommand(juce::DynamicObject& root, const juce::String& type)
     {
         const auto isEdit = type == "add-track" || type == "remove-track" || type == "import-track-audio"
+            || type == "import-audio" || type == "import-dropped-audio"
             || type == "move-arrangement-clip" || type == "remove-arrangement-clip";
         if (isEdit && (projectHasBackgroundWork() || arrangementImportRunning_ || preparingBackingSource_))
         {
@@ -5079,21 +5119,25 @@ private:
         if (type == "add-track")
         {
             beginUndoableAction();
-            ArrangementTrack track;
-            track.id = "audio-" + juce::Uuid().toString();
-            track.name = "Audio " + juce::String(static_cast<int>(document_.tracks.size()) + 1);
-            track.notesMuted = true;
-            BackingVocalTrack content;
-            content.id = track.id;
-            content.styleName = track.name;
-            document_.backingTracks.push_back(std::move(content));
-            document_.tracks.push_back(std::move(track));
+            const auto trackId = "audio-" + juce::Uuid().toString();
+            appendArrangementTrack(trackId, "Audio " + juce::String(static_cast<int>(document_.tracks.size()) + 1));
             markChanged();
+            selectArrangementTrack(trackId);
             return true;
         }
         const auto id = root.getProperty("track").toString();
         auto* track = arrangement::findTrack(document_, id);
-        if (type == "import-track-audio") { if (track != nullptr) importArrangementAudio(id); return true; }
+        if (type == "import-track-audio" || type == "import-audio")
+        { importArrangementAudio(id); return true; }
+        if (type == "import-dropped-audio")
+        {
+            juce::Array<juce::File> files;
+            if (const auto* paths = root.getProperty("files").getArray())
+                for (const auto& path : *paths)
+                    if (juce::File::isAbsolutePath(path.toString())) files.add(juce::File(path.toString()));
+            importArrangementFiles(files, id, static_cast<double>(root.getProperty("start")));
+            return true;
+        }
         if (type == "set-track-collapsed")
         {
             if (track != nullptr)

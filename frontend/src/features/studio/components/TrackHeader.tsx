@@ -1,11 +1,7 @@
 import {
-  ChevronDownIcon,
-  ChevronRightIcon,
   MicrophoneIcon,
   MusicalNoteIcon,
-  PlusIcon,
   SignalIcon,
-  SparklesIcon,
   SpeakerWaveIcon,
   TrashIcon,
 } from "@heroicons/react/24/outline";
@@ -20,10 +16,7 @@ import { RangeInput, ToggleButton } from "@/ui";
 
 type TrackHeaderProps = {
   depth?: number;
-  childCount?: number;
-  collapsed?: boolean;
-  onToggleCollapsed?(): void;
-  onImport?(): void;
+  rowNumber?: number;
   id: TrackName;
   name: TrackName;
   state: TrackChannelState;
@@ -40,10 +33,7 @@ type TrackHeaderProps = {
 
 export function TrackHeader({
   depth = 0,
-  childCount = 0,
-  collapsed = false,
-  onToggleCollapsed,
-  onImport,
+  rowNumber,
   id,
   name,
   state,
@@ -57,8 +47,7 @@ export function TrackHeader({
   onSelect,
   onDelete,
 }: TrackHeaderProps) {
-  const TrackIcon =
-    name === "Voice Main" ? MicrophoneIcon : name === "Instrumental" ? SignalIcon : SparklesIcon;
+  const TrackIcon = depth || id === "Instrumental" ? SignalIcon : MicrophoneIcon;
   const volumeControlId = `track-volume-${id.toLowerCase().replace(/\s+/g, "-")}`;
 
   return (
@@ -71,8 +60,9 @@ export function TrackHeader({
       ]
         .filter(Boolean)
         .join(" ")}
-      style={{ paddingLeft: `${28 + depth * 14}px` }}
+      style={{ paddingLeft: `${36 + depth * 16}px` }}
     >
+      <span className="track-row-number">{rowNumber}</span>
       <button
         type="button"
         className="track-selection-target"
@@ -80,36 +70,6 @@ export function TrackHeader({
         aria-pressed={selected}
         onClick={(event) => onSelect(event.shiftKey)}
       />
-      {childCount > 0 ? (
-        <button
-          type="button"
-          className="track-disclosure"
-          aria-label={`${collapsed ? "Expand" : "Collapse"} ${name} backing tracks`}
-          aria-expanded={!collapsed}
-          title={`${childCount} backing tracks`}
-          onClick={onToggleCollapsed}
-        >
-          {collapsed ? (
-            <ChevronRightIcon aria-hidden="true" />
-          ) : (
-            <ChevronDownIcon aria-hidden="true" />
-          )}
-          <span>{childCount}</span>
-        </button>
-      ) : (
-        <span className="track-disclosure-placeholder" />
-      )}
-      {onImport ? (
-        <button
-          type="button"
-          className="track-import-button"
-          aria-label={`Add clips to ${name}`}
-          title="Add audio clips"
-          onClick={onImport}
-        >
-          <PlusIcon aria-hidden="true" />
-        </button>
-      ) : null}
       {onDelete ? (
         <button
           type="button"

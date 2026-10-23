@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { ArrangementTrack } from "@/domain/studio";
-import { arrangementWaveform, clipStartAfterDrag, visibleTrackRows } from "./arrangement";
+import {
+  arrangementRows,
+  arrangementWaveform,
+  clipStartAfterDrag,
+  visibleTrackRows,
+} from "./arrangement";
 
 const track = (id: string, parentId = "", collapsed = false): ArrangementTrack => ({
   id,
@@ -72,5 +77,38 @@ describe("arranged waveforms", () => {
     expect(waveform[0]).toEqual([0, 0]);
     expect(waveform[700]).toEqual([-0.5, 0.5]);
     expect(waveform[1500]).toEqual([0, 0]);
+  });
+});
+
+describe("backing group rows", () => {
+  it("places a distinct Add Back group between each source and its children", () => {
+    const rows = arrangementRows([
+      track("Instrumental"),
+      track("Verse"),
+      track("Chorus"),
+      track("Double", "Verse"),
+    ]);
+    expect(rows.map((row) => row.key)).toEqual([
+      "Instrumental",
+      "Verse",
+      "group:Verse",
+      "Double",
+      "Chorus",
+      "group:Chorus",
+    ]);
+    expect(rows.map((row) => row.number)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(rows[3].depth).toBe(1);
+    expect(rows[1].color).toBe(rows[2].color);
+    expect(rows[2].color).toBe(rows[3].color);
+    expect(rows[4].color).not.toBe(rows[1].color);
+  });
+  it("keeps the group and Add Back visible when its children are collapsed", () => {
+    const rows = arrangementRows([
+      track("Verse", "", true),
+      track("Double", "Verse"),
+      track("Chorus"),
+    ]);
+    expect(rows.map((row) => row.key)).toEqual(["Verse", "group:Verse", "Chorus", "group:Chorus"]);
+    expect(rows[1].childCount).toBe(1);
   });
 });

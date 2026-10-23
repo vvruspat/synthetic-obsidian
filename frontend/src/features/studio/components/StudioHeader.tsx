@@ -102,6 +102,17 @@ export function StudioHeader({
               <span>Save project</span>
               <kbd>{formatShortcut(shortcutBindings["project.save"])}</kbd>
             </button>
+            <button
+              type="button"
+              onClick={(event) => {
+                actions.importAudio();
+                event.currentTarget.closest("details")?.removeAttribute("open");
+              }}
+            >
+              <FolderOpenIcon className="header-project-option-icon" aria-hidden="true" />
+              <span>File Import</span>
+              <kbd />
+            </button>
             <i className="header-project-separator" aria-hidden="true" />
             <button
               type="button"

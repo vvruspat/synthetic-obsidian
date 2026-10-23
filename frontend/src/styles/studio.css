@@ -4928,8 +4928,7 @@ button {
   border-bottom: 1px solid #193957;
   font-size: 11px;
 }
-.arrangement-add-toolbar > button,
-.empty-track-import {
+.arrangement-add-toolbar > button {
   color: #9ce7ff;
   background: #10253d;
   border: 1px solid #285572;
@@ -4939,52 +4938,6 @@ button {
 .arrangement-add-toolbar > span {
   color: #9baec5;
   white-space: nowrap;
-}
-.track-header.is-child-track {
-  background: #07101e;
-  border-left: 2px solid #6956a4;
-}
-.track-disclosure,
-.track-import-button {
-  z-index: 3;
-  position: relative;
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  padding: 2px;
-  background: transparent;
-  border: 0;
-  color: #9cb4d0;
-  font-size: 9px;
-}
-.track-disclosure {
-  flex: 0 0 26px;
-}
-.track-disclosure svg,
-.track-import-button svg {
-  width: 14px;
-  height: 14px;
-}
-.track-disclosure-placeholder {
-  width: 26px;
-  flex-shrink: 0;
-}
-.track-import-button {
-  position: absolute;
-  top: 6px;
-  right: 30px;
-}
-.track-header .track-name {
-  max-width: 135px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.empty-track-import {
-  position: sticky;
-  left: 14px;
-  top: 24px;
-  z-index: 3;
 }
 .arrangement-clip {
   position: absolute;
@@ -4996,10 +4949,6 @@ button {
   background: #102f4c;
   border-radius: 5px;
   overflow: hidden;
-}
-.harmony-lane .arrangement-clip {
-  background: #29233f;
-  border-color: #7158a1;
 }
 .arrangement-clip.is-dragging,
 .arrangement-clip:focus-within {
@@ -5068,18 +5017,209 @@ button {
   pointer-events: none;
 }
 
-.track-disclosure {
+.audio-drop-zone {
+  height: 100%;
+  position: relative;
+}
+.audio-drop-overlay {
   position: absolute;
-  left: 2px;
-  top: 28px;
+  inset: 8px;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  gap: 12px;
+  background: #071222ed;
+  border: 2px dashed #73d7ed;
+  border-radius: 10px;
+  color: #d3f7ff;
+  pointer-events: none;
+}
+.audio-drop-overlay strong {
+  font-size: 22px;
+}
+.audio-import-error {
+  position: absolute;
+  left: 20px;
+  right: 20px;
+  bottom: 40px;
+  z-index: 101;
+  display: flex;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 15px;
+  border: 1px solid #b35b62;
+  background: #301a28;
+  color: #ffe0e1;
+  border-radius: 6px;
+}
+.audio-import-error button {
+  color: inherit;
+  background: transparent;
+  border: 0;
+}
+.sidebar-add-toolbar > button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.sidebar-add-toolbar svg {
+  width: 15px;
+  height: 15px;
+}
+.sidebar-add-toolbar .add-track-button {
+  padding: 3px 10px;
+}
+.sidebar-add-toolbar .add-track-button svg {
   width: 22px;
+  height: 22px;
 }
-.track-disclosure-placeholder {
-  display: none;
+.track-header,
+.track-header.is-voice {
+  background: #101a27;
 }
-.track-header:has(.track-delete-button) .track-control-stack {
-  padding-right: 0;
+.track-header.is-selected {
+  background: color-mix(in srgb, var(--track-color) 14%, #101a27);
+}
+.track-row-number {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 23px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #eff7ff;
+  background: color-mix(in srgb, var(--track-color) 65%, #1a2637);
+  font-size: 11px;
+  font-weight: 600;
+  pointer-events: none;
+}
+.track-header.is-child-track {
+  background: #0d1724;
+}
+.track-header.is-child-track::before {
+  content: "";
+  position: absolute;
+  left: 35px;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: color-mix(in srgb, var(--track-color) 32%, transparent);
 }
 .track-header .track-name {
-  padding-right: 38px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.track-header:has(.track-delete-button) .track-control-stack {
+  padding-right: 18px;
+}
+.track-layer-toggle svg,
+.track-icon {
+  color: var(--track-color);
+}
+.backing-group-header,
+.backing-group-lane {
+  height: var(--track-row);
+  min-height: var(--track-row);
+  position: relative;
+  background: color-mix(in srgb, var(--track-color) 9%, #0e1825);
+  border-bottom: 1px solid #263140;
+}
+.backing-group-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-right: 8px;
+}
+.backing-group-header > div {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+}
+.backing-group-header strong {
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.backing-group-header span:not(.track-row-number) {
+  font-size: 10px;
+  color: #a5b1c1;
+}
+.backing-group-disclosure {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  color: var(--track-color);
+  border: 1px solid #465064;
+  border-radius: 5px;
+  background: #ffffff07;
+  padding: 6px 5px;
+  cursor: pointer;
+}
+.backing-group-disclosure svg {
+  width: 20px;
+  height: 20px;
+}
+.backing-group-disclosure svg:first-child {
+  width: 12px;
+}
+.backing-group-actions {
+  position: sticky;
+  left: 0;
+  height: 100%;
+  width: min(100%, calc(100vw - var(--sidebar-width) - var(--shell-horizontal-padding) - 2px));
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 12px;
+}
+.backing-group-actions > span {
+  position: absolute;
+  left: 12px;
+  color: var(--track-color);
+  font-size: 11px;
+  max-width: 25%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.backing-group-actions .backing-track-select {
+  width: 200px;
+  max-width: 45%;
+}
+.backing-group-actions .backing-track-select summary {
+  color: var(--track-color);
+  border-color: color-mix(in srgb, var(--track-color) 45%, #243448);
+}
+.empty-track-hint {
+  position: sticky;
+  left: 16px;
+  display: inline-block;
+  margin: 28px 16px;
+  color: #748399;
+  font-size: 11px;
+  pointer-events: none;
+}
+.audio-lane.harmony-lane {
+  background: color-mix(in srgb, var(--track-color) 5%, transparent);
+}
+.arrangement-clip {
+  background: color-mix(in srgb, var(--track-color) 32%, #101d2c);
+  border-color: var(--track-color);
+}
+.arrangement-clip-drag {
+  color: color-mix(in srgb, var(--track-color) 22%, white);
+}
+.arrangement-clip-drag path {
+  stroke: color-mix(in srgb, var(--track-color) 30%, white);
+}
+.workspace {
+  --track-stack-row: minmax(calc(var(--track-row) * 3 + var(--backing-add-row)), 1.3fr);
 }

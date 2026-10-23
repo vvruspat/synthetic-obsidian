@@ -1,4 +1,5 @@
 import { ArrowPathIcon, SpeakerWaveIcon } from "@heroicons/react/24/outline";
+import type { CSSProperties } from "react";
 import type { StudioProject, VoiceProfileOption } from "@/domain/studio";
 import { ArrangementClip } from "@/features/studio/components/ArrangementClip";
 import { BackingTrackSelect } from "@/features/studio/components/BackingTrackSelect";
@@ -92,7 +93,7 @@ export function Arrangement({
   onOpenVoiceTraining,
 }: ArrangementProps) {
   const {
-    trackRows,
+    displayRows,
     backingGenerator,
     cycleRange,
     horizontalZoom,
@@ -185,31 +186,37 @@ export function Arrangement({
           </div>
           <div className="arrangement-track-section">
             <div className="arrangement-add-toolbar">
-              <BackingTrackSelect
-                options={project.backingTrackOptions}
-                generator={backingGenerator}
-                disabled={
-                  selectedTracks.length !== 1 ||
-                  !controller.trackLayerAvailability[selectedTracks[0]]?.notesAvailable ||
-                  backingGenerationRunning ||
-                  backingAudioRenderRunning
-                }
-                disabledReason="Select a track with notes to generate backing vocals"
-                onGeneratorChange={actions.setBackingGenerator}
-                onSelect={actions.addBackingTrack}
-              />
-              <span>
-                for{" "}
-                {controller.arrangementTracks.find((track) => track.id === selectedTracks[0])
-                  ?.name ?? "selected track"}
-              </span>
+              <span>Drop audio files to import at the playhead</span>
             </div>
             <div
               className="arrangement-track-stack"
               ref={refs.arrangementTrackScrollRef}
               onScroll={() => actions.syncTrackScroll("arrangement")}
             >
-              {trackRows.map(({ track, depth }) => {
+              {displayRows.map(({ kind, key, track, depth, color }) => {
+                const rowStyle = { "--track-color": color } as CSSProperties;
+                if (kind === "backing-group")
+                  return (
+                    <div className="backing-group-lane" key={key} style={rowStyle}>
+                      <div className="backing-group-actions">
+                        <span>{track.name}</span>
+                        <BackingTrackSelect
+                          label="Add Back"
+                          parentName={track.name}
+                          options={project.backingTrackOptions}
+                          generator={backingGenerator}
+                          disabled={
+                            !controller.trackLayerAvailability[track.id]?.notesAvailable ||
+                            backingGenerationRunning ||
+                            backingAudioRenderRunning
+                          }
+                          disabledReason="Import or add notes to this track to generate backing vocals"
+                          onGeneratorChange={actions.setBackingGenerator}
+                          onSelect={(name) => actions.addBackingTrack(name, track.id)}
+                        />
+                      </div>
+                    </div>
+                  );
                 const content = project.backingTrackContents.find((item) => item.id === track.id);
                 const generating = backingGenerationRunning && backingGenerationTrack === track.id;
                 const rendering = backingAudioRenderRunning && backingAudioRenderTrack === track.id;
@@ -218,7 +225,8 @@ export function Arrangement({
                   <div
                     className={`audio-lane ${depth ? "harmony-lane" : "voice-lane"} ${selectedTracks.includes(track.id) ? "is-selected" : ""}`}
                     data-track-id={track.id}
-                    key={track.id}
+                    key={key}
+                    style={rowStyle}
                   >
                     <button
                       type="button"
@@ -241,13 +249,7 @@ export function Arrangement({
                       />
                     ))}
                     {track.clips.length === 0 && !depth ? (
-                      <button
-                        type="button"
-                        className="empty-track-import"
-                        onClick={() => actions.importTrackAudio(track.id)}
-                      >
-                        Add audio clips
-                      </button>
+                      <span className="empty-track-hint">Drop audio files or use File Import</span>
                     ) : null}
                     {depth > 0 && !layerState?.notesMuted ? (
                       <div className="harmony-notes">

@@ -8,16 +8,20 @@ Standalone offline annotator for creating gold vocal note/syllable datasets.
 
 ## Tracks and clips
 
-Use **Add track** for another audio track, then its import button to add one or
-more recordings as clips. Files selected together are appended in order. Drag
+Use **+** above the track list to add an audio track. **File Import** (also in
+the Project menu) or dropping audio files into the window inserts clips at the
+playhead on the single selected track. With no single track selected, import
+creates and selects a new track. Shift-click toggles track selection, including
+clearing the last selected track. Multiple files are placed consecutively from
+that playhead position, without moving existing clips. Drag
 a clip horizontally to change its time or vertically to another track; its notes
 and pitch curves move with it. A focused clip also supports Left/Right (0.1 s),
 Shift+Left/Right (1 s), and Delete. The clip's trash button removes just that clip.
 Project Undo/Redo restores arrangement edits.
 
-Select a source track before choosing **Add backing track**. Each generated
-backing is a separate child immediately below that source; repeated generation
-adds more children. The disclosure arrow hides or shows that track's children
+Each source has a separate backing group row with its own **Add Back** menu.
+Generated backings are indented below that group and share their source color;
+repeated generation adds more children. The group disclosure arrow hides or shows its children
 without changing playback. Removing a parent removes its descendants too, with
 confirmation and undo. There is no fixed track count limit.
 
@@ -27,6 +31,10 @@ are migrated to one clip per existing audio track. Consolidated saves copy all
 clip media, and stem export includes clip positions and silent gaps. Older app
 versions do not understand the new arrangement field; use this version to edit
 and save projects containing multiple clips.
+
+Dropped files cross the WebView bridge in bounded chunks and are written on a
+dedicated background worker. Completed imports are stored in the application
+data directory until project consolidation; unfinished transfers are removed.
 
 Playback plans and source buffers are prepared on a background worker. The audio
 callback only reads prepared buffers and returns retired plans for worker-side

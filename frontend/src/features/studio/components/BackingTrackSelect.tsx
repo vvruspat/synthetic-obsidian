@@ -8,6 +8,8 @@ type BackingTrackSelectProps = {
   generator: BackingGenerator;
   disabled: boolean;
   disabledReason?: string;
+  label?: string;
+  parentName?: string;
   onGeneratorChange(generator: BackingGenerator): void;
   onSelect(track: BackingTrackName): void;
 };
@@ -17,6 +19,8 @@ export function BackingTrackSelect({
   generator,
   disabled,
   disabledReason,
+  label = "Add backing track",
+  parentName,
   onGeneratorChange,
   onSelect,
 }: BackingTrackSelectProps) {
@@ -146,12 +150,16 @@ export function BackingTrackSelect({
     >
       <summary
         aria-label={
-          disabled ? (disabledReason ?? "Backing tracks unavailable") : "Add backing track"
+          disabled
+            ? (disabledReason ?? "Backing tracks unavailable")
+            : parentName
+              ? `Add Back to ${parentName}`
+              : label
         }
         title={disabled ? disabledReason : "Add backing track"}
       >
         <PlusIcon className="backing-track-select-icon" strokeWidth={1.8} aria-hidden="true" />
-        <strong>Add backing track</strong>
+        <strong>{label}</strong>
         <ChevronDownIcon
           className="backing-track-select-chevron"
           strokeWidth={2}

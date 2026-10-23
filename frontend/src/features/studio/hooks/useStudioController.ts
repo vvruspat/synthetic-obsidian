@@ -23,6 +23,7 @@ import type {
   VocalClip,
 } from "@/domain/studio";
 import {
+  arrangementRows,
   arrangementWaveform,
   projectTracks,
   visibleTrackRows,
@@ -128,6 +129,7 @@ export function useStudioController(
 ) {
   const arrangementTracks = useMemo(() => projectTracks(project), [project]);
   const trackRows = useMemo(() => visibleTrackRows(arrangementTracks), [arrangementTracks]);
+  const displayRows = useMemo(() => arrangementRows(arrangementTracks), [arrangementTracks]);
   const minimumClipWidth = getMinimumClipWidthPercent(project.timelineDurationSeconds);
   const [playing, setPlaying] = useState(false);
   const [playhead, setPlayhead] = useState(project.initialPlayhead);
@@ -212,6 +214,7 @@ export function useStudioController(
   useEffect(() => {
     const availableTracks = new Set(trackRows.map(({ track }) => track.id));
     setSelectedTracks((current) => {
+      if (current.length === 0) return current;
       const availableSelection = current.filter((track) => availableTracks.has(track));
       if (availableSelection.length > 0) return availableSelection;
       const hidden = arrangementTracks.find((track) => current.includes(track.id));
@@ -289,6 +292,11 @@ export function useStudioController(
               ...current,
               [event.track]: event.state,
             }));
+            break;
+          case "track-selected":
+            setSelectedTracks([event.track]);
+            setSelectedClipIds([]);
+            bridge.send({ type: "select-tracks", tracks: [event.track] });
             break;
           case "backing-track-created":
             setBackingTracks((current) =>
@@ -582,8 +590,7 @@ export function useStudioController(
     bridge.send({ type: "select-tracks", tracks: nextSelection });
   };
 
-  const addBackingTrack = (name: BackingTrackName) => {
-    const parentId = selectedTracks[0];
+  const addBackingTrack = (name: BackingTrackName, parentId = selectedTracks[0]) => {
     if (!parentId) return;
     bridge.send({ type: "add-backing-track", track: name, generator: backingGenerator, parentId });
   };
@@ -1363,6 +1370,7 @@ export function useStudioController(
     backingTracks,
     arrangementTracks,
     trackRows,
+    displayRows,
     backingGenerator,
     voiceProfiles: project.voiceProfiles,
     selectedTracks,
@@ -1398,7 +1406,13 @@ export function useStudioController(
       addBackingTrack,
       addTrack: () => bridge.send({ type: "add-track" }),
       removeTrack: (track: string) => bridge.send({ type: "remove-track", track }),
-      importTrackAudio: (track: string) => bridge.send({ type: "import-track-audio", track }),
+      importAudio: () =>
+        bridge.send({
+          type: "import-audio",
+          track: selectedTracks.length === 1 ? selectedTracks[0] : "",
+        }),
+      importDroppedAudio: (files: string[], track: string, start: number) =>
+        bridge.send({ type: "import-dropped-audio", track, start, files }),
       toggleTrackCollapsed: (track: string, collapsed: boolean) =>
         bridge.send({ type: "set-track-collapsed", track, collapsed }),
       moveArrangementClip: (track: string, clipId: string, targetTrack: string, start: number) =>

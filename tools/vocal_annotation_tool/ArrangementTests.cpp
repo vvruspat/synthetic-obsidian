@@ -1,8 +1,10 @@
 #include "ArrangementPlayback.h"
 #include "AnnotationJson.h"
 #include "../../Source/web/AudioFileTransfer.h"
+#include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <iterator>
 #include <limits>
 #include <stdexcept>
 
@@ -87,6 +89,39 @@ AnnotationDocument fixture(const juce::File& audio)
     document.notes.push_back(note);
     return document;
 }
+void testInstrumentalTrack(const juce::File& directory, const juce::File& audio)
+{
+    auto document = fixture(audio);
+    document.instrumentalFile = audio;
+    const auto json = directory.getChildFile("instrumental-project.json");
+    require(AnnotationJson::save(document, json).wasOk(), "save project missing instrumental row");
+    require(AnnotationJson::load(json, document).wasOk(), "restore missing instrumental row");
+    require(document.tracks.size() == 3 && document.tracks.front().id == "Instrumental",
+            "instrumental is the first track in an existing arrangement");
+    auto& instrumental = document.tracks.front();
+    require(instrumental.clips.size() == 1 && instrumental.clips.front().audioFile == audio,
+            "recover the existing instrumental file when its row is missing");
+    instrumental.clips.front().start = 3.0;
+    instrumental.muted = true;
+    instrumental.parentId = "other";
+    std::rotate(document.tracks.begin(), std::next(document.tracks.begin()), document.tracks.end());
+    require(AnnotationJson::save(document, json).wasOk(), "save displaced instrumental");
+    require(AnnotationJson::load(json, document).wasOk(), "reload displaced instrumental");
+    const auto& restored = document.tracks.front();
+    require(document.tracks.size() == 3 && restored.id == "Instrumental" && restored.parentId.isEmpty(),
+            "instrumental stays first and outside backing groups without duplication");
+    require(restored.muted && std::abs(restored.clips.front().start - 3.0) < 0.00001,
+            "restoring instrumental placement preserves its clips and mixer state");
+    require(! arrangement::removeTrack(document, "Instrumental") && document.tracks.size() == 3,
+            "instrumental track cannot be deleted");
+    const auto clipId = restored.clips.front().id;
+    require(arrangement::removeClip(document, "Instrumental", clipId), "instrumental clips can be deleted");
+    require(AnnotationJson::save(document, json).wasOk(), "save empty instrumental");
+    require(AnnotationJson::load(json, document).wasOk(), "reload empty instrumental");
+    arrangement::migrate(document);
+    require(document.tracks.size() == 3 && document.tracks.front().clips.empty(),
+            "restoring instrumental never resurrects a deleted clip");
+}
 }
 int main()
 {
@@ -98,6 +133,7 @@ int main()
     {
         testAudioFileTransfer(directory);
         const auto audio = makeAudio(directory);
+        testInstrumentalTrack(directory, audio);
         auto document = fixture(audio);
         const auto render = directory.getChildFile("render.wav");
         require(ArrangementPlayback::renderTrack(document, "Voice Main", render).wasOk(), "render arrangement");
@@ -129,12 +165,12 @@ int main()
         require(json.loadFileAsString().contains("\"audio\": \"source.wav\""), "portable relative clip paths");
         AnnotationDocument loaded;
         require(AnnotationJson::load(json, loaded).wasOk(), "load project");
-        require(loaded.tracks.size() == 42, "no 26-track limit on restoration");
-        require(loaded.tracks[1].collapsed && loaded.tracks[2].parentId == "other", "hierarchy and collapse persist");
-        require(loaded.tracks[1].clips[0].audioFile == audio, "relative clip source resolves");
+        require(loaded.tracks.size() == 43 && loaded.tracks.front().id == "Instrumental", "restore instrumental without limiting track count");
+        require(loaded.tracks[2].collapsed && loaded.tracks[3].parentId == "other", "hierarchy and collapse persist");
+        require(loaded.tracks[2].clips[0].audioFile == audio, "relative clip source resolves");
         require(arrangement::removeClip(loaded, "other", "one"), "delete clip");
         require(arrangement::notes(std::as_const(loaded), "other").empty(), "deleted clip cannot leave sounding notes");
-        require(arrangement::removeTrack(loaded, "other") && loaded.tracks.size() == 1, "delete descendants only");
+        require(arrangement::removeTrack(loaded, "other") && loaded.tracks.size() == 2, "delete descendants only");
         auto invalid = arrangement::toJson(document, directory);
         invalid.getArray()->getReference(1).getDynamicObject()->setProperty("parentId", "child-0");
         require(arrangement::fromJson(invalid, loaded, directory).failed(), "reject cyclic project hierarchy");

@@ -63,7 +63,7 @@ export function TrackSidebar({ controller }: { controller: StudioController }) {
       }
       selected={selectedTracks.includes(id)}
       onSelect={(additive) => actions.selectTrack(id, additive)}
-      onDelete={onDelete}
+      onDelete={id === "Instrumental" ? undefined : onDelete}
     />
   );
 

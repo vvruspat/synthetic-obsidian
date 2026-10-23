@@ -5165,6 +5165,7 @@ private:
         }
         if (type == "remove-track")
         {
+            if (id == "Instrumental") return true;
             beginUndoableAction();
             if (arrangement::removeTrack(document_, id))
             {

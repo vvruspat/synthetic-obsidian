@@ -1,6 +1,7 @@
 #include "ArrangementModel.h"
 #include <algorithm>
 #include <cmath>
+#include <iterator>
 #include <set>
 #include <utility>
 
@@ -71,18 +72,36 @@ void syncGeneratedTracks(AnnotationDocument& document)
     }
     assignClipIds(document);
 }
+static void ensureInstrumentalTrack(AnnotationDocument& document)
+{
+    const auto instrumental = std::find_if(document.tracks.begin(), document.tracks.end(),
+        [](const auto& track) { return track.id == "Instrumental"; });
+    if (instrumental != document.tracks.end())
+    {
+        instrumental->parentId.clear();
+        std::rotate(document.tracks.begin(), instrumental, std::next(instrumental));
+        return;
+    }
+    ArrangementTrack track;
+    track.id = track.name = "Instrumental";
+    if (document.instrumentalFile.existsAsFile())
+    {
+        auto clip = legacyClip(track.id, document.instrumentalFile, document.duration);
+        clip.id = "clip-" + juce::Uuid().toString();
+        track.clips.push_back(std::move(clip));
+    }
+    document.tracks.insert(document.tracks.begin(), std::move(track));
+}
 void migrate(AnnotationDocument& document)
 {
+    ensureInstrumentalTrack(document);
     if (document.hasArrangement) return;
     document.hasArrangement = true;
-    for (const auto& id : { juce::String("Instrumental"), juce::String("Voice Main") })
-    {
-        ArrangementTrack track;
-        track.id = track.name = id;
-        const auto& file = id == "Instrumental" ? document.instrumentalFile : document.audioFile;
-        if (file.existsAsFile()) track.clips.push_back(legacyClip(id, file, document.duration));
-        document.tracks.push_back(std::move(track));
-    }
+    ArrangementTrack track;
+    track.id = track.name = "Voice Main";
+    if (document.audioFile.existsAsFile())
+        track.clips.push_back(legacyClip(track.id, document.audioFile, document.duration));
+    document.tracks.push_back(std::move(track));
     syncGeneratedTracks(document);
 }
 void assignClipIds(AnnotationDocument& document)
@@ -178,7 +197,7 @@ bool removeClip(AnnotationDocument& document, const juce::String& trackId, const
 }
 bool removeTrack(AnnotationDocument& document, const juce::String& trackId)
 {
-    if (findTrack(document, trackId) == nullptr) return false;
+    if (trackId == "Instrumental" || findTrack(document, trackId) == nullptr) return false;
     std::set<juce::String> removed { trackId };
     bool changed = true;
     while (changed)
@@ -187,11 +206,11 @@ bool removeTrack(AnnotationDocument& document, const juce::String& trackId)
         for (const auto& track : document.tracks)
             if (removed.contains(track.parentId)) changed |= removed.insert(track.id).second;
     }
+    if (removed.contains("Instrumental")) return false;
     std::erase_if(document.tracks, [&](const auto& track) { return removed.contains(track.id); });
     std::erase_if(document.backingTracks, [&](const auto& track) { return removed.contains(track.id); });
     if (removed.contains("Voice Main"))
     { document.notes.clear(); document.regions.clear(); document.boundaries.clear(); document.audioFile = juce::File(); }
-    if (removed.contains("Instrumental")) document.instrumentalFile = juce::File();
     return true;
 }
 juce::var toJson(const AnnotationDocument& document, const juce::File& baseDirectory)
@@ -281,6 +300,7 @@ juce::Result fromJson(const juce::var& value, AnnotationDocument& document, cons
     }
     document.tracks = std::move(tracks);
     document.hasArrangement = true;
+    ensureInstrumentalTrack(document);
     assignClipIds(document);
     return juce::Result::ok();
 }

@@ -1968,38 +1968,19 @@ button {
   --piano-row: minmax(180px, 1fr);
   --track-row: 79px;
   --backing-add-row: 40px;
-  --track-stack-row: calc(
-    var(--track-row) +
-    var(--track-row) +
-    var(--track-row) +
-    var(--backing-add-row)
-  );
   --tempo-row: 58px;
   --signature-row: 50px;
   --chord-row: 54px;
+  --piano-keyboard-width: 108px;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1.3fr) var(--piano-toolbar-row) var(--piano-row);
   width: 100%;
-  max-width: 100%;
-  grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
   min-width: 0;
   min-height: 0;
+  overflow: hidden;
   border: 1px solid rgba(12, 81, 148, 0.55);
   border-radius: 7px;
-  overflow: hidden;
-  box-shadow:
-    0 0 22px rgba(0, 83, 169, 0.13),
-    inset 0 0 20px rgba(0, 75, 151, 0.06);
-}
-
-.lane-sidebar {
-  display: grid;
-  z-index: 4;
-  grid-template-rows: 46px var(--tempo-row) var(--signature-row) var(--chord-row) var(
-      --track-stack-row
-    ) var(--piano-toolbar-row) var(--piano-row);
-  min-height: 0;
-  border-right: 1px solid rgba(19, 111, 190, 0.72);
-  background: #020b19;
 }
 
 .sidebar-spacer {
@@ -2317,37 +2298,6 @@ button {
   outline-offset: 2px;
 }
 
-.sidebar-track-section,
-.arrangement-track-section {
-  display: grid;
-  min-width: 0;
-  min-height: 0;
-  overflow: hidden;
-  grid-template-rows:
-    var(--track-row)
-    var(--track-row)
-    var(--backing-add-row)
-    minmax(0, 1fr);
-}
-
-.sidebar-track-stack,
-.arrangement-track-stack {
-  min-height: 0;
-  overflow-x: hidden;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-}
-
-.sidebar-track-stack {
-  z-index: 3;
-  scrollbar-width: none;
-  background: #020b19;
-}
-
-.sidebar-track-stack::-webkit-scrollbar {
-  display: none;
-}
-
 .backing-track-toolbar-side,
 .backing-track-toolbar {
   border-bottom: 1px solid rgba(15, 97, 178, 0.65);
@@ -2542,12 +2492,13 @@ button {
 }
 
 .piano-labels {
-  --piano-keyboard-width: clamp(80px, 62%, 108px);
-  position: relative;
-  overflow: hidden;
-  color: #e2f1ff;
+  position: sticky;
+  left: 0;
+  z-index: 10;
+  grid-column: 1;
+  height: 100%;
   background: #020d1e;
-  border-bottom: 1px solid rgba(15, 97, 178, 0.65);
+  border-right: 1px solid rgba(19, 111, 190, 0.72);
 }
 
 .piano-toolbar-side {
@@ -2650,34 +2601,18 @@ button {
     0 0 10px #00dfff;
 }
 
-.piano-keyboard-viewport {
-  position: absolute;
-  inset: 0;
-  overflow-x: hidden;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  scrollbar-width: none;
-}
-
-.piano-keyboard-viewport::-webkit-scrollbar {
-  display: none;
-}
-
 .piano-zoom-control {
   position: absolute;
   top: 10px;
   bottom: 10px;
-  left: calc((100% - var(--piano-keyboard-width) - 14px) / 2);
+  left: calc((var(--sidebar-width) - var(--piano-keyboard-width) - 14px) / 2);
   z-index: 12;
   display: grid;
   width: 14px;
   place-items: center;
   border: 1px solid rgba(38, 121, 182, 0.52);
   border-radius: 8px;
-  background: linear-gradient(180deg, rgba(7, 27, 49, 0.94), rgba(2, 12, 27, 0.96));
-  box-shadow:
-    inset 0 0 6px rgba(31, 155, 218, 0.1),
-    0 0 8px rgba(0, 80, 149, 0.18);
+  background: #031222;
 }
 
 .piano-zoom-control input {
@@ -2741,17 +2676,13 @@ button {
     0 0 10px #00dfff;
 }
 
-.piano-keyboard-scroll-content {
-  position: relative;
-  min-height: 100%;
-}
-
 .sidebar-keyboard {
   position: absolute;
   inset: 0 0 0 auto;
+  display: grid;
+  grid-template-rows: repeat(var(--pitch-rows), minmax(0, 1fr));
   width: var(--piano-keyboard-width);
   background: #edf4ff;
-  box-shadow: inset -8px 0 18px rgba(77, 120, 181, 0.26);
 }
 
 .sidebar-keyboard::after {
@@ -2762,96 +2693,28 @@ button {
   background: linear-gradient(90deg, transparent 65%, rgba(40, 103, 180, 0.12));
 }
 
-.piano-white-keys {
-  position: absolute;
-  inset: 0;
-}
-
-.piano-white-key {
-  position: absolute;
-  right: 0;
-  left: 0;
-  border-bottom: 1px solid rgba(69, 111, 157, 0.76);
-  background: linear-gradient(90deg, #f8fbff 0%, #e3ebf7 72%, #c9d8eb 100%);
-  box-shadow: inset 0 -1px 0 rgba(255, 255, 255, 0.72);
-}
-
-.piano-white-key.is-chord-tone {
-  border-bottom-color: rgba(0, 180, 221, 0.9);
-  background: linear-gradient(90deg, #d8fbff 0%, #83e9f2 72%, #42cbdc 100%);
-  box-shadow:
-    inset 0 0 0 1px rgba(19, 160, 190, 0.55),
-    inset 0 0 12px rgba(255, 255, 255, 0.7);
-}
-
-.piano-white-key span {
-  position: absolute;
-  top: 50%;
-  right: 5px;
-  z-index: 2;
-  color: #456078;
-  font-family: var(--font-mono);
-  font-size: 9px;
-  font-style: normal;
-  font-weight: 750;
-  line-height: 1;
-  text-shadow: 0 1px rgba(255, 255, 255, 0.7);
-  transform: translateY(-50%);
-}
-
-.piano-black-key {
-  position: absolute;
-  left: 0;
-  z-index: 3;
-  width: 64%;
-  border: 1px solid #1464a6;
-  border-left: 0;
-  border-radius: 0 3px 3px 0;
-  background: linear-gradient(90deg, #020814 0%, #07182d 72%, #0b2846 100%);
-  box-shadow:
-    1px 2px 4px rgba(0, 0, 0, 0.72),
-    inset -2px 0 4px rgba(41, 119, 190, 0.18);
-}
-
-.piano-black-key.is-chord-tone {
-  border-color: #39d9e9;
-  background: linear-gradient(90deg, #071b2d 0%, #0b728a 72%, #1ac6d8 100%);
-  box-shadow:
-    1px 2px 4px rgba(0, 0, 0, 0.72),
-    inset -2px 0 7px rgba(108, 247, 255, 0.6),
-    0 0 8px rgba(44, 226, 235, 0.42);
-}
-
 .arrangement {
   position: relative;
   min-width: 0;
   min-height: 0;
-  overflow-x: auto;
-  overflow-y: hidden;
-  overscroll-behavior-x: contain;
-  scrollbar-width: none;
+  overflow: auto;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(38, 168, 218, 0.72) #020e1d;
+  container-type: inline-size;
   background: #010711;
 }
 
 .arrangement::-webkit-scrollbar {
-  display: none;
+  width: 7px;
+  height: 7px;
 }
 
 .timeline-content {
-  width: 100%;
+  position: relative;
+  width: calc(var(--sidebar-width) + (100% - var(--sidebar-width)) * var(--horizontal-zoom));
   min-width: 100%;
-  height: 100%;
-  contain: style;
-}
-
-.arrangement-viewport-toolbars {
-  position: sticky;
-  top: 0;
-  left: 0;
-  z-index: 20;
-  width: 100%;
-  height: 0;
-  pointer-events: none;
+  min-height: 100%;
 }
 
 .track-lane-overlay {
@@ -2886,20 +2749,19 @@ button {
 }
 
 .backing-track-action-overlay {
-  position: fixed;
-  left: calc(var(--shell-horizontal-padding) / 2 + var(--sidebar-width) + 1px);
+  position: sticky;
+  left: var(--sidebar-width);
   z-index: 9;
   display: flex;
-  width: calc(100vw - var(--shell-horizontal-padding) - var(--sidebar-width) - 2px);
+  width: calc(100cqw - var(--sidebar-width));
+  max-width: 100%;
   height: var(--track-row);
   gap: 9px;
   align-items: center;
   justify-content: center;
   padding: 0 18px;
   pointer-events: auto;
-  background:
-    linear-gradient(90deg, transparent, rgba(10, 29, 52, 0.84) 23% 77%, transparent),
-    rgba(1, 8, 19, 0.28);
+  background: rgba(1, 8, 19, 0.65);
 }
 
 .voice-profile-select {
@@ -3150,8 +3012,6 @@ button {
   background: rgba(139, 32, 67, 0.24);
 }
 
-.arrangement-track-section:has(.voice-profile-select[open]),
-.arrangement-track-stack:has(.voice-profile-select[open]),
 .audio-lane:has(.voice-profile-select[open]),
 .backing-track-action-overlay:has(.voice-profile-select[open]) {
   z-index: 25;
@@ -3523,17 +3383,6 @@ button {
   box-shadow: 0 0 6px #22cfff;
 }
 
-.arrangement-canvas {
-  position: relative;
-  display: grid;
-  grid-template-rows: var(--tempo-row) var(--signature-row) var(--chord-row) var(--track-stack-row) var(
-      --piano-toolbar-row
-    ) var(--piano-row);
-  height: calc(100% - 46px);
-  min-height: calc(100% - 46px);
-  overflow: clip;
-}
-
 .tempo-lane,
 .signature-lane,
 .chord-lane {
@@ -3622,9 +3471,9 @@ button {
 .audio-lane,
 .piano-roll {
   position: relative;
-  z-index: 2;
+  min-height: 0;
   min-width: 0;
-  border-bottom: 1px solid rgba(12, 80, 151, 0.58);
+  overflow: hidden;
 }
 
 .audio-lane {
@@ -3649,88 +3498,16 @@ button {
   z-index: 3;
 }
 
-.arrangement-track-stack {
-  position: relative;
-  z-index: 2;
-  scrollbar-width: none;
-  background: transparent;
-}
-
-.arrangement-track-section {
-  position: relative;
-  z-index: 2;
-  background: transparent;
-}
-
-.arrangement-track-section > .audio-lane {
-  height: var(--track-row);
-  min-height: var(--track-row);
-}
-
-.arrangement-track-stack::-webkit-scrollbar {
-  display: none;
-}
-
-.track-scrollbar {
-  position: absolute;
-  top: var(--backing-add-row);
-  bottom: 0;
-  left: calc(
-    var(--timeline-scroll-left, 0px) +
-    100vw -
-    var(--sidebar-width) -
-    var(--shell-horizontal-padding) -
-    12px
-  );
-  z-index: 30;
-  width: 10px;
-  overflow-x: hidden;
-  overflow-y: auto;
-  scrollbar-width: thin;
-  scrollbar-color: rgba(38, 168, 218, 0.72) rgba(2, 14, 29, 0.9);
-}
-
-.track-scrollbar::-webkit-scrollbar {
-  width: 5px;
-}
-
-.track-scrollbar::-webkit-scrollbar-track {
-  background: rgba(2, 14, 29, 0.9);
-}
-
-.track-scrollbar::-webkit-scrollbar-thumb {
-  border-radius: 99px;
-  background: rgba(38, 168, 218, 0.72);
-}
-
-.arrangement-track-stack > .audio-lane {
-  height: var(--track-row);
-  min-height: var(--track-row);
-}
-
 .piano-toolbar {
-  position: fixed;
-  left: calc(var(--shell-horizontal-padding) / 2 + var(--sidebar-width) + 1px);
+  position: relative;
   z-index: 10;
   display: grid;
-  width: calc(100vw - var(--shell-horizontal-padding) - var(--sidebar-width) - 2px);
-  height: 38px;
+  min-width: 0;
+  height: 100%;
   grid-template-columns: 1fr auto 1fr;
   align-items: center;
-  pointer-events: auto;
   border-bottom: 1px solid rgba(15, 97, 178, 0.65);
-  background:
-    linear-gradient(
-      90deg,
-      rgba(0, 132, 202, 0.04),
-      transparent 28%,
-      transparent 72%,
-      rgba(0, 132, 202, 0.04)
-    ),
-    linear-gradient(180deg, #07182b, #030c19);
-  box-shadow:
-    inset 0 1px 0 rgba(104, 184, 234, 0.08),
-    0 4px 12px rgba(0, 0, 0, 0.3);
+  background: linear-gradient(180deg, #07182b, #030c19);
 }
 
 .piano-toolbar-slot {
@@ -4104,24 +3881,15 @@ button {
 
 .workspace.is-piano-collapsed {
   --piano-row: 0px;
-  --track-stack-row: minmax(
-    calc(var(--track-row) + var(--track-row) + var(--track-row) + var(--backing-add-row)),
-    1fr
-  );
 }
 
 .workspace.is-piano-unavailable {
   --piano-toolbar-row: 0px;
   --piano-row: 0px;
-  --track-stack-row: minmax(
-    calc(var(--track-row) + var(--track-row) + var(--track-row) + var(--backing-add-row)),
-    1fr
-  );
 }
 
 .workspace.is-piano-unavailable .piano-toolbar-side,
 .workspace.is-piano-unavailable .piano-labels,
-.workspace.is-piano-unavailable .piano-toolbar-slot,
 .workspace.is-piano-unavailable .piano-toolbar,
 .workspace.is-piano-unavailable .piano-roll {
   display: none;
@@ -4301,9 +4069,9 @@ button {
 .piano-vertical-scroll {
   position: absolute;
   inset: 0;
-  overflow-x: hidden;
-  overflow-y: auto;
+  overflow: auto;
   overscroll-behavior: contain;
+  scrollbar-gutter: stable;
   scrollbar-color: rgba(30, 173, 226, 0.72) rgba(2, 18, 35, 0.88);
   scrollbar-width: thin;
 }
@@ -4324,8 +4092,11 @@ button {
 
 .piano-scroll-content {
   position: relative;
-  min-height: 100%;
-  contain: layout paint style;
+  display: grid;
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+  width: calc(var(--sidebar-width) + (100% - var(--sidebar-width)) * var(--horizontal-zoom));
+  min-width: 100%;
+  height: calc(18px * var(--pitch-rows) * var(--vertical-zoom));
 }
 
 .clip-field {
@@ -4679,22 +4450,8 @@ button {
     height: 36px;
   }
 
-  .lane-sidebar {
-    grid-template-rows: 40px var(--tempo-row) var(--signature-row) var(--chord-row) var(
-        --track-stack-row
-      ) var(--piano-toolbar-row) var(--piano-row);
-  }
-
   .timeline-ruler {
     height: 40px;
-  }
-
-  .arrangement-canvas {
-    grid-template-rows: var(--tempo-row) var(--signature-row) var(--chord-row) var(
-        --track-stack-row
-      ) var(--piano-toolbar-row) var(--piano-row);
-    height: calc(100% - 40px);
-    min-height: calc(100% - 40px);
   }
 }
 
@@ -4880,21 +4637,8 @@ button {
     --chord-row: 48px;
   }
 
-  .lane-sidebar {
-    grid-template-rows: 40px var(--tempo-row) var(--signature-row) var(--chord-row) var(
-        --track-stack-row
-      ) var(--piano-toolbar-row) var(--piano-row);
-  }
-
   .timeline-ruler {
     height: 40px;
-  }
-
-  .arrangement-canvas {
-    grid-template-rows: var(--tempo-row) var(--signature-row) var(--chord-row) var(
-        --track-stack-row
-      ) var(--piano-toolbar-row) var(--piano-row);
-    min-height: calc(100% - 40px);
   }
 
   .meta-header,
@@ -4923,11 +4667,6 @@ button {
   }
 }
 
-/* Shared row geometry keeps the hierarchical sidebar and timeline aligned. */
-.sidebar-track-section,
-.arrangement-track-section {
-  grid-template-rows: var(--backing-add-row) minmax(0, 1fr);
-}
 .arrangement-add-toolbar {
   display: flex;
   align-items: center;
@@ -5158,9 +4897,10 @@ button {
 }
 .backing-group-actions {
   position: sticky;
-  left: var(--timeline-scroll-left, 0px);
+  left: var(--sidebar-width);
+  width: calc(100cqw - var(--sidebar-width));
+  max-width: 100%;
   height: 100%;
-  width: min(100%, calc(100vw - var(--sidebar-width) - var(--shell-horizontal-padding) - 2px));
   display: flex;
   align-items: center;
   justify-content: center;
@@ -5197,6 +4937,119 @@ button {
 .arrangement-clip-drag path {
   stroke: color-mix(in srgb, var(--track-color) 30%, white);
 }
-.workspace {
-  --track-stack-row: minmax(calc(var(--track-row) * 3 + var(--backing-add-row)), 1.3fr);
+
+/* Each editor owns one native scroll surface. Headers and keys freeze in CSS. */
+.workspace-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+}
+.track-row-header {
+  position: sticky;
+  left: 0;
+  z-index: 12;
+  border-right: 1px solid rgba(19, 111, 190, 0.72);
+  background: #020b19;
+  scroll-margin-top: calc(
+    var(--timeline-ruler-row) +
+    var(--tempo-row) +
+    var(--signature-row) +
+    var(--chord-row) +
+    var(--backing-add-row)
+  );
+}
+.timeline-header {
+  position: sticky;
+  top: 0;
+  z-index: 25;
+  height: var(--timeline-ruler-row);
+  background: #020b19;
+}
+.timeline-guide {
+  position: absolute;
+  top: var(--timeline-ruler-row);
+  bottom: 0;
+  left: var(--sidebar-width);
+  right: 0;
+  pointer-events: none;
+}
+.timeline-guide .playhead-line {
+  pointer-events: auto;
+}
+.service-row {
+  position: sticky;
+  z-index: 24;
+  background: #020b19;
+}
+.tempo-row {
+  top: var(--timeline-ruler-row);
+  height: var(--tempo-row);
+}
+.signature-row {
+  top: calc(var(--timeline-ruler-row) + var(--tempo-row));
+  height: var(--signature-row);
+}
+.chord-row {
+  top: calc(var(--timeline-ruler-row) + var(--tempo-row) + var(--signature-row));
+  height: var(--chord-row);
+}
+.workspace.is-service-tracks-collapsed .service-row {
+  display: none;
+}
+.track-add-row {
+  position: sticky;
+  top: calc(var(--timeline-ruler-row) + var(--tempo-row) + var(--signature-row) + var(--chord-row));
+  z-index: 23;
+  height: var(--backing-add-row);
+}
+.track-row {
+  height: var(--track-row);
+}
+.track-row > .audio-lane {
+  height: 100%;
+}
+.piano-toolbar-row {
+  display: grid;
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+  min-width: 0;
+}
+.workspace.is-piano-collapsed .piano-roll,
+.workspace.is-piano-unavailable .piano-toolbar-row {
+  display: none;
+}
+.piano-key {
+  position: relative;
+  min-height: 0;
+  border-bottom: 1px solid #91a9c6;
+  background: linear-gradient(90deg, #f8fbff, #c9d8eb);
+}
+.piano-key.is-black::before {
+  position: absolute;
+  content: "";
+  inset: 0 auto 0 0;
+  width: 64%;
+  border-radius: 0 3px 3px 0;
+  background: linear-gradient(90deg, #020814, #0b2846);
+}
+.piano-key.is-chord-tone {
+  background: #83e9f2;
+}
+.piano-key.is-black.is-chord-tone::before {
+  background: #0b728a;
+}
+.piano-key span {
+  position: absolute;
+  right: 5px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: #456078;
+  font-size: 10px;
+  font-style: normal;
+}
+.clip-field {
+  grid-column: 2;
+}
+.piano-waveform-canvas {
+  width: 100%;
+  opacity: 0.2;
 }

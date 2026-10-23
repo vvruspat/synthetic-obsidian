@@ -5890,9 +5890,7 @@ private:
         const auto trackIndex = activeBackingTrackIndex_.load(std::memory_order_relaxed);
         if (trackIndex >= 0 && trackIndex < static_cast<int>(kMaxBackingTracks))
         {
-            deviceManager.closeAudioDevice();
             clearBackingAudioTransport(static_cast<size_t>(trackIndex));
-            deviceManager.restartLastAudioDevice();
         }
         requestWaveformData(WaveformTrack::backing, {});
         editor_.setBackingAudioFile({});
@@ -5908,34 +5906,30 @@ private:
 
     void clearAllBackingAudioTransports()
     {
-        deviceManager.closeAudioDevice();
         for (size_t index = 0; index < kMaxBackingTracks; ++index)
             clearBackingAudioTransport(index);
-        deviceManager.restartLastAudioDevice();
     }
 
     void configureTransportForFile(const juce::File& file)
     {
+        // These readers serve the legacy editor. ArrangementPlayback owns output,
+        // so replacing a reader must not tear down the active audio device.
         std::unique_ptr<juce::AudioFormatReader> reader(formatManager_.createReaderFor(file));
         if (reader == nullptr)
         {
-            deviceManager.closeAudioDevice();
             transport_.stop();
             transport_.setSource(nullptr);
             readerSource_.reset();
-            deviceManager.restartLastAudioDevice();
             return;
         }
 
         const auto sampleRate = reader->sampleRate;
         auto nextReaderSource = std::make_unique<juce::AudioFormatReaderSource>(reader.release(), true);
 
-        deviceManager.closeAudioDevice();
         transport_.stop();
         transport_.setSource(nullptr);
         readerSource_ = std::move(nextReaderSource);
         transport_.setSource(readerSource_.get(), 0, nullptr, sampleRate);
-        deviceManager.restartLastAudioDevice();
         playButton_.setButtonText("Play");
     }
 
@@ -5944,23 +5938,19 @@ private:
         std::unique_ptr<juce::AudioFormatReader> reader(formatManager_.createReaderFor(file));
         if (reader == nullptr)
         {
-            deviceManager.closeAudioDevice();
             instrumentalTransport_.stop();
             instrumentalTransport_.setSource(nullptr);
             instrumentalReaderSource_.reset();
-            deviceManager.restartLastAudioDevice();
             return;
         }
 
         const auto sampleRate = reader->sampleRate;
         auto nextReaderSource = std::make_unique<juce::AudioFormatReaderSource>(reader.release(), true);
 
-        deviceManager.closeAudioDevice();
         instrumentalTransport_.stop();
         instrumentalTransport_.setSource(nullptr);
         instrumentalReaderSource_ = std::move(nextReaderSource);
         instrumentalTransport_.setSource(instrumentalReaderSource_.get(), 0, nullptr, sampleRate);
-        deviceManager.restartLastAudioDevice();
     }
 
     void configureBackingAudioTransportForFile(const juce::File& file)
@@ -5975,16 +5965,13 @@ private:
         std::unique_ptr<juce::AudioFormatReader> reader(formatManager_.createReaderFor(file));
         if (reader == nullptr)
         {
-            deviceManager.closeAudioDevice();
             clearBackingAudioTransport(static_cast<size_t>(activeTrackIndex));
-            deviceManager.restartLastAudioDevice();
             return;
         }
 
         const auto sampleRate = reader->sampleRate;
         auto nextReaderSource = std::make_unique<juce::AudioFormatReaderSource>(reader.release(), true);
 
-        deviceManager.closeAudioDevice();
         const auto index = static_cast<size_t>(activeTrackIndex);
         clearBackingAudioTransport(index);
         backingAudioReaderSources_[index] = std::move(nextReaderSource);
@@ -5995,7 +5982,6 @@ private:
             sampleRate);
         backingAudioTransportFiles_[index] = file;
         backingAudioTransports_[index].setPosition(position);
-        deviceManager.restartLastAudioDevice();
         if (shouldResume)
             backingAudioTransports_[index].start();
     }
@@ -6038,7 +6024,6 @@ private:
 
         const auto position = currentTransportPosition();
         const auto shouldResume = isPlaybackRunning();
-        deviceManager.closeAudioDevice();
         for (size_t index = 0; index < kMaxBackingTracks; ++index)
         {
             clearBackingAudioTransport(index);
@@ -6054,7 +6039,6 @@ private:
             backingAudioTransportFiles_[index] = sourceFiles[index];
             backingAudioTransports_[index].setPosition(position);
         }
-        deviceManager.restartLastAudioDevice();
         if (shouldResume)
             startBackingAudioTransports();
     }
@@ -6100,6 +6084,19 @@ private:
         if (isPlaybackRunning()) stopPlayback();
         else
         {
+            auto* device = deviceManager.getCurrentAudioDevice();
+            if (device == nullptr || ! device->isOpen() || ! device->isPlaying())
+            {
+                const auto savedSettings = loadAudioDeviceSettings();
+                audioSettingsError_ = deviceManager.initialise(0, 2, savedSettings.get(), true);
+                device = deviceManager.getCurrentAudioDevice();
+                if (audioSettingsError_.isNotEmpty() || device == nullptr || ! device->isPlaying())
+                {
+                    setStatus("Could not start audio output. " + audioSettingsError_);
+                    sendWebAudioSettingsState();
+                    return;
+                }
+            }
             if (currentTransportPosition() >= timelineDuration() - 0.01) setTransportPosition(0.0);
             arrangementPlayback_.setPlaying(true);
             playButton_.setButtonText("Stop");
@@ -6253,7 +6250,6 @@ private:
         arrangementPlayback_.seek(0.0);
         resetHistory();
 
-        deviceManager.closeAudioDevice();
         transport_.setSource(nullptr);
         instrumentalTransport_.setSource(nullptr);
         for (auto& backingTransport : backingAudioTransports_)
@@ -6265,8 +6261,6 @@ private:
             backingAudioReaderSources_[index].reset();
             backingAudioTransportFiles_[index] = juce::File();
         }
-        deviceManager.restartLastAudioDevice();
-
         document_.clear();
         ++documentRevision_;
         currentJsonFile_ = juce::File();

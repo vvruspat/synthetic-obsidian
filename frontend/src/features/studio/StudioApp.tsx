@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { AudioSettingsState, PluginBridge, VoiceTrainingState } from "@/bridge/plugin-bridge";
 import type { CorrectionToolId } from "@/domain/studio";
 import { Arrangement } from "@/features/studio/components/Arrangement";
@@ -10,7 +10,6 @@ import {
   SettingsDialog,
 } from "@/features/studio/components/SettingsDialog";
 import { StudioHeader } from "@/features/studio/components/StudioHeader";
-import { TrackSidebar } from "@/features/studio/components/TrackSidebar";
 import {
   EMPTY_VOICE_TRAINING_STATE,
   VoiceTrainingDialog,
@@ -143,6 +142,8 @@ function StudioWorkspace({
   const controller = useStudioController(bridge, project, shortcuts);
   const [voiceTrainingOpen, setVoiceTrainingOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const closeSettings = useCallback(() => setSettingsOpen(false), []);
+  const closeVoiceTraining = useCallback(() => setVoiceTrainingOpen(false), []);
   const { pianoCollapsed, serviceTracksCollapsed } = controller;
   const pitchEditorAvailable = project.hasVocal || project.initialBackingTracks.length > 0;
 
@@ -247,15 +248,6 @@ function StudioWorkspace({
             .filter(Boolean)
             .join(" ")}
         >
-          <TrackSidebar
-            controller={controller}
-            backingRenderBusy={
-              vocalAnalysisRunning ||
-              instrumentalAnalysisRunning ||
-              backingGenerationRunning ||
-              backingAudioRenderRunning
-            }
-          />
           <Arrangement
             controller={controller}
             project={project}
@@ -275,14 +267,14 @@ function StudioWorkspace({
           bridge={bridge}
           state={voiceTraining}
           open={voiceTrainingOpen}
-          onClose={() => setVoiceTrainingOpen(false)}
+          onClose={closeVoiceTraining}
         />
         <SettingsDialog
           bridge={bridge}
           audio={audioSettings}
           shortcuts={shortcuts}
           open={settingsOpen}
-          onClose={() => setSettingsOpen(false)}
+          onClose={closeSettings}
           onShortcutsChange={updateShortcuts}
         />
       </main>

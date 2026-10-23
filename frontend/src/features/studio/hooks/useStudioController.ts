@@ -40,7 +40,12 @@ import {
   formatMusicalPosition,
   getMusicalContext,
 } from "@/features/studio/lib/musical-time";
-import { createPitchPath, PITCH_ROW_HEIGHT, PITCH_TOP } from "@/features/studio/lib/pitch";
+import {
+  createPitchPath,
+  PITCH_ROW_HEIGHT,
+  PITCH_ROWS,
+  PITCH_TOP,
+} from "@/features/studio/lib/pitch";
 import {
   createManualClip,
   getJoinCandidateIds,
@@ -242,13 +247,10 @@ export function useStudioController(
   const editorRef = useRef<HTMLFieldSetElement>(null);
   const arrangementScrollRef = useRef<HTMLElement>(null);
   const timelineContentRef = useRef<HTMLDivElement>(null);
-  const sidebarTrackScrollRef = useRef<HTMLDivElement>(null);
-  const arrangementTrackScrollRef = useRef<HTMLDivElement>(null);
-  const trackScrollbarRef = useRef<HTMLDivElement>(null);
   const pianoRollScrollRef = useRef<HTMLDivElement>(null);
-  const pianoKeysScrollRef = useRef<HTMLDivElement>(null);
   const horizontalZoomAnchorRef = useRef<number | null>(null);
   const verticalZoomAnchorRef = useRef<number | null>(null);
+  const pianoViewportInitialised = useRef(false);
   const zoomWheelRef = useRef({ frame: 0, horizontal: 0, vertical: 0 });
   const editorGestureRef = useRef<PitchEditorGesture | null>(null);
   const playheadDragRef = useRef(false);
@@ -332,7 +334,7 @@ export function useStudioController(
   );
 
   useEffect(() => {
-    if (!playing) return;
+    if (!playing || window.syntheticObsidianHost) return;
     let animation = 0;
     let previous = performance.now();
     const tick = (now: number) => {
@@ -360,25 +362,12 @@ export function useStudioController(
   }, [cycleRange.end, cycleRange.start, looping, playing, project.timelineDurationSeconds]);
 
   useLayoutEffect(() => {
-    const arrangement = arrangementTrackScrollRef.current;
-    const sidebar = sidebarTrackScrollRef.current;
     const selected = selectedTracks[0];
-    if (
-      !arrangement ||
-      !sidebar ||
-      !selected ||
-      !trackRows.some(({ track }) => track.id === selected)
-    )
-      return;
-    const row = arrangement.querySelector<HTMLElement>(`[data-track-id="${CSS.escape(selected)}"]`);
-    if (!row) return;
-    const top = row.offsetTop;
-    const bottom = top + row.offsetHeight;
-    if (top < arrangement.scrollTop) arrangement.scrollTop = top;
-    else if (bottom > arrangement.scrollTop + arrangement.clientHeight)
-      arrangement.scrollTop = bottom - arrangement.clientHeight;
-    sidebar.scrollTop = arrangement.scrollTop;
-  }, [selectedTracks, trackRows]);
+    if (!selected) return;
+    arrangementScrollRef.current
+      ?.querySelector<HTMLElement>(`[data-track-header="${CSS.escape(selected)}"]`)
+      ?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [selectedTracks]);
 
   const timeLabel = useMemo(
     () => formatTime(playhead, project.timelineStartSeconds, project.timelineDurationSeconds),
@@ -517,12 +506,11 @@ export function useStudioController(
   };
 
   const togglePlayback = () => {
-    setPlaying((current) => {
-      bridge.send({
-        type: "transport",
-        action: current ? "pause" : "play",
-      });
-      return !current;
+    const next = !playing;
+    setPlaying(next);
+    bridge.send({
+      type: "transport",
+      action: next ? "play" : "pause",
     });
   };
 
@@ -665,33 +653,28 @@ export function useStudioController(
     bridge.send({ type: "project-action", action: "export-midi" });
   };
 
-  const syncVerticalScroll = (source: "roll" | "keys") => {
-    const sourceElement =
-      source === "roll" ? pianoRollScrollRef.current : pianoKeysScrollRef.current;
-    const targetElement =
-      source === "roll" ? pianoKeysScrollRef.current : pianoRollScrollRef.current;
-    if (!sourceElement || !targetElement) return;
-    const sourceMax = sourceElement.scrollHeight - sourceElement.clientHeight;
-    const targetMax = targetElement.scrollHeight - targetElement.clientHeight;
-    const progress = sourceMax > 0 ? sourceElement.scrollTop / sourceMax : 0;
-    const next = progress * Math.max(0, targetMax);
-    if (Math.abs(targetElement.scrollTop - next) > 0.5) {
-      targetElement.scrollTop = next;
-    }
+  const syncHorizontalScroll = (source: "arrangement" | "piano") => {
+    const from =
+      source === "arrangement" ? arrangementScrollRef.current : pianoRollScrollRef.current;
+    const to = source === "arrangement" ? pianoRollScrollRef.current : arrangementScrollRef.current;
+    if (from && to && Math.abs(to.scrollLeft - from.scrollLeft) > 0.5)
+      to.scrollLeft = from.scrollLeft;
   };
 
-  const syncTrackScroll = (source: "sidebar" | "arrangement" | "scrollbar") => {
-    const scrollers = {
-      sidebar: sidebarTrackScrollRef.current,
-      arrangement: arrangementTrackScrollRef.current,
-      scrollbar: trackScrollbarRef.current,
-    };
-    const sourceElement = scrollers[source];
-    if (!sourceElement) return;
-    for (const target of Object.values(scrollers))
-      if (target && Math.abs(target.scrollTop - sourceElement.scrollTop) > 0.5)
-        target.scrollTop = sourceElement.scrollTop;
-  };
+  useLayoutEffect(() => {
+    const scroller = pianoRollScrollRef.current;
+    if (
+      !pianoCollapsed &&
+      (project.hasVocal || project.initialBackingTracks.length > 0) &&
+      scroller &&
+      scroller.clientHeight > 0 &&
+      !pianoViewportInitialised.current
+    ) {
+      scroller.scrollTop =
+        ((PITCH_TOP - 60) / PITCH_ROWS) * scroller.scrollHeight - scroller.clientHeight / 2;
+      pianoViewportInitialised.current = true;
+    }
+  }, [pianoCollapsed, project.hasVocal, project.initialBackingTracks.length]);
 
   const changeHorizontalZoom = (wheelDelta: number) => {
     horizontalZoomAnchorRef.current = playhead / 100;
@@ -747,8 +730,10 @@ export function useStudioController(
     if (scroller && anchor !== null) {
       scroller.scrollLeft = getCenteredTimelineScrollLeft(
         anchor,
-        scroller.scrollWidth,
-        scroller.clientWidth,
+        timelineContentRef.current?.clientWidth ?? scroller.scrollWidth,
+        scroller.clientWidth -
+          (scroller.scrollWidth -
+            (timelineContentRef.current?.clientWidth ?? scroller.scrollWidth)),
       );
     }
     horizontalZoomAnchorRef.current = null;
@@ -761,13 +746,6 @@ export function useStudioController(
       const anchor = verticalZoomAnchorRef.current;
       if (scroller && anchor !== null) {
         scroller.scrollTop = anchor * scroller.scrollHeight - scroller.clientHeight / 2;
-        const keyboard = pianoKeysScrollRef.current;
-        if (keyboard) {
-          const rollMax = scroller.scrollHeight - scroller.clientHeight;
-          const keyboardMax = keyboard.scrollHeight - keyboard.clientHeight;
-          const progress = rollMax > 0 ? scroller.scrollTop / rollMax : 0;
-          keyboard.scrollTop = progress * Math.max(0, keyboardMax);
-        }
       }
       verticalZoomAnchorRef.current = null;
     });
@@ -787,12 +765,6 @@ export function useStudioController(
         scroller.scrollLeft += event.shiftKey ? event.deltaY : event.deltaX;
       }
     }
-  };
-
-  const handleTimelineScroll = () => {
-    const scroller = arrangementScrollRef.current;
-    // Backing controls stick inside the nested vertical scroller, so account for the outer timeline.
-    scroller?.style.setProperty("--timeline-scroll-left", `${scroller.scrollLeft}px`);
   };
 
   const handlePianoWheel = (event: WheelEvent<HTMLDivElement>) => {
@@ -1327,7 +1299,7 @@ export function useStudioController(
         id: String(Date.now()),
         label,
         x: Math.max(0, Math.min(92, ((event.clientX - rect.left) / rect.width) * 100)),
-        pitch: Math.max(48, Math.min(PITCH_TOP, pitch)),
+        pitch: Math.max(PITCH_BOTTOM, Math.min(PITCH_TOP, pitch)),
         width: 6,
         color: "cyan",
       },
@@ -1392,11 +1364,7 @@ export function useStudioController(
       editorRef,
       arrangementScrollRef,
       timelineContentRef,
-      sidebarTrackScrollRef,
-      arrangementTrackScrollRef,
-      trackScrollbarRef,
       pianoRollScrollRef,
-      pianoKeysScrollRef,
     },
     actions: {
       returnToStart,
@@ -1454,11 +1422,9 @@ export function useStudioController(
       setServiceTracksCollapsed,
       setHorizontalZoomFromInput,
       setVerticalZoomFromInput,
-      syncVerticalScroll,
-      syncTrackScroll,
       handleTimelineWheel,
-      handleTimelineScroll,
       handlePianoWheel,
+      syncHorizontalScroll,
       startPlayheadDrag,
       startClipTool,
       startEditorTool,

@@ -17,6 +17,8 @@ import {
   createPitchPath,
   getClipVisualWidthPercent,
   getPitchFill,
+  PIANO_KEYS,
+  PITCH_ROW_HEIGHT,
   pitchToTop,
 } from "@/features/studio/lib/pitch";
 import {
@@ -119,9 +121,12 @@ describe("studio value helpers", () => {
   });
 
   it("maps pitch into the visible piano range", () => {
-    expect(pitchToTop(72)).toBe(0);
-    expect(pitchToTop(48)).toBe(96);
-    expect(pitchToTop(100)).toBe(0);
+    expect(PIANO_KEYS).toHaveLength(128);
+    expect(pitchToTop(127)).toBe(0);
+    expect(pitchToTop(0)).toBe(100 - PITCH_ROW_HEIGHT);
+    expect(pitchToTop(36)).toBeGreaterThan(pitchToTop(48));
+    expect(pitchToTop(84)).toBeLessThan(pitchToTop(72));
+    expect(pitchToTop(128)).toBe(0);
   });
 
   it("builds clip color and curve data", () => {
@@ -171,13 +176,16 @@ describe("studio value helpers", () => {
       },
       { id: "n002", label: "two", x: 20, pitch: 70, width: 8, color: "violet" },
     ];
-    const moved = moveSelectedClips(clips, ["n001", "n002"], 8);
+    const moved = moveSelectedClips(clips, ["n001", "n002"], 100);
 
     expect(moved[0].x).toBe(2);
     expect(moved[1].x).toBe(20);
-    expect(moved[0].pitch).toBe(62);
-    expect(moved[1].pitch).toBe(72);
-    expect(moved[0].pitchCurve?.[0]).toEqual({ x: 4, pitch: 62.25 });
+    expect(moved[0].pitch).toBe(117);
+    expect(moved[1].pitch).toBe(127);
+    expect(moved[0].pitchCurve?.[0]).toEqual({ x: 4, pitch: 117.25 });
+    expect(moveSelectedClips(clips, ["n001", "n002"], -100).map((clip) => clip.pitch)).toEqual([
+      0, 10,
+    ]);
   });
 
   it("snaps backing pitches to the active chord tones", () => {

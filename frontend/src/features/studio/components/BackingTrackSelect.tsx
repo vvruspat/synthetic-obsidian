@@ -48,6 +48,7 @@ export function BackingTrackSelect({
   }, [options.length]);
 
   useEffect(() => {
+    if (!open) return;
     const closeOnOutsideClick = (event: PointerEvent) => {
       const details = detailsRef.current;
       const menu = menuRef.current;
@@ -78,7 +79,7 @@ export function BackingTrackSelect({
       window.removeEventListener("resize", reposition);
       window.removeEventListener("scroll", reposition, true);
     };
-  }, [updateMenuPosition]);
+  }, [open, updateMenuPosition]);
 
   useLayoutEffect(() => {
     if (open) updateMenuPosition();

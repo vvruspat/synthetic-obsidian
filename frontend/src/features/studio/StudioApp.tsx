@@ -247,7 +247,15 @@ function StudioWorkspace({
             .filter(Boolean)
             .join(" ")}
         >
-          <TrackSidebar controller={controller} />
+          <TrackSidebar
+            controller={controller}
+            backingRenderBusy={
+              vocalAnalysisRunning ||
+              instrumentalAnalysisRunning ||
+              backingGenerationRunning ||
+              backingAudioRenderRunning
+            }
+          />
           <Arrangement
             controller={controller}
             project={project}

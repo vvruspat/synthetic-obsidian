@@ -6,7 +6,7 @@ import {
   SpeakerWaveIcon,
   TrashIcon,
 } from "@heroicons/react/24/outline";
-import type { CSSProperties } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import type {
   TrackChannelState,
   TrackLayerAvailability,
@@ -29,7 +29,8 @@ type TrackHeaderProps = {
   onToggleLayer?(layer: keyof TrackLayerState): void;
   selected: boolean;
   onSelect(additive: boolean): void;
-  onOpenFile(): void;
+  onOpenFile?(): void;
+  voiceControl?: ReactNode;
   onDelete?(): void;
 };
 
@@ -48,6 +49,7 @@ export function TrackHeader({
   selected,
   onSelect,
   onOpenFile,
+  voiceControl,
   onDelete,
 }: TrackHeaderProps) {
   const TrackIcon = depth || id === "Instrumental" ? SignalIcon : MicrophoneIcon;
@@ -153,12 +155,17 @@ export function TrackHeader({
           >
             S
           </ToggleButton>
-          <IconButton
-            className="ui-compact-button track-open-button"
-            label={`Open audio file on ${name}`}
-            icon={FolderOpenIcon}
-            onClick={onOpenFile}
-          />
+          <div className="track-secondary-action">
+            {voiceControl ??
+              (onOpenFile ? (
+                <IconButton
+                  className="ui-compact-button"
+                  label={`Open audio file on ${name}`}
+                  icon={FolderOpenIcon}
+                  onClick={onOpenFile}
+                />
+              ) : null)}
+          </div>
         </div>
         {volume !== undefined && onVolumeChange ? (
           <label

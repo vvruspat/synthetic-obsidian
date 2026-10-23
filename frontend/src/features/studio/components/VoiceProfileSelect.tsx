@@ -8,6 +8,7 @@ import {
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { VoiceProfileOption } from "@/domain/studio";
+import { VocalistIcon } from "@/ui";
 
 const qualityLabel = (profile: VoiceProfileOption) => {
   if (profile.quality === "low") return "Low quality";
@@ -20,6 +21,7 @@ export function VoiceProfileSelect({
   profiles,
   value,
   disabled,
+  compact = false,
   onChange,
   onDelete,
   onCreateVoice,
@@ -28,9 +30,10 @@ export function VoiceProfileSelect({
   profiles: VoiceProfileOption[];
   value: string;
   disabled: boolean;
+  compact?: boolean;
   onChange(profileId: string): void;
-  onDelete(profileId: string): void;
-  onCreateVoice(): void;
+  onDelete?(profileId: string): void;
+  onCreateVoice?(): void;
 }) {
   const detailsRef = useRef<HTMLDetailsElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -94,6 +97,13 @@ export function VoiceProfileSelect({
     if (open) updateMenuPosition();
   }, [open, updateMenuPosition]);
 
+  useEffect(() => {
+    if (disabled) {
+      detailsRef.current?.removeAttribute("open");
+      setOpen(false);
+    }
+  }, [disabled]);
+
   const closeMenu = () => {
     detailsRef.current?.removeAttribute("open");
     setOpen(false);
@@ -115,7 +125,7 @@ export function VoiceProfileSelect({
             aria-checked={profile.id === selected?.id}
             className={profile.id === selected?.id ? "is-selected" : ""}
             onClick={() => {
-              onChange(profile.id);
+              if (profile.id !== selected?.id) onChange(profile.id);
               closeMenu();
             }}
           >
@@ -129,7 +139,7 @@ export function VoiceProfileSelect({
             </span>
             {profile.id === selected?.id ? <CheckIcon aria-hidden="true" /> : null}
           </button>
-          {profile.id !== "source-timbre" ? (
+          {onDelete && profile.id !== "source-timbre" ? (
             <button
               type="button"
               className="voice-profile-delete-option"
@@ -147,28 +157,32 @@ export function VoiceProfileSelect({
           ) : null}
         </div>
       ))}
-      <i className="voice-profile-menu-separator" aria-hidden="true" />
-      <button
-        type="button"
-        role="menuitem"
-        className="voice-profile-create-option"
-        onClick={() => {
-          onCreateVoice();
-          closeMenu();
-        }}
-      >
-        <PlusCircleIcon className="voice-profile-option-icon" aria-hidden="true" />
-        <span>
-          <strong>Create new voice</strong>
-          <small>Train a new LoRA profile</small>
-        </span>
-      </button>
+      {onCreateVoice ? (
+        <>
+          <i className="voice-profile-menu-separator" aria-hidden="true" />
+          <button
+            type="button"
+            role="menuitem"
+            className="voice-profile-create-option"
+            onClick={() => {
+              onCreateVoice();
+              closeMenu();
+            }}
+          >
+            <PlusCircleIcon className="voice-profile-option-icon" aria-hidden="true" />
+            <span>
+              <strong>Create new voice</strong>
+              <small>Train a new LoRA profile</small>
+            </span>
+          </button>
+        </>
+      ) : null}
     </div>
   );
 
   return (
     <details
-      className={`voice-profile-select ${disabled ? "is-disabled" : ""}`}
+      className={`voice-profile-select ${compact ? "is-compact" : ""} ${disabled ? "is-disabled" : ""}`}
       ref={detailsRef}
       aria-disabled={disabled}
       inert={disabled}
@@ -178,13 +192,23 @@ export function VoiceProfileSelect({
         if (nextOpen) updateMenuPosition();
       }}
     >
-      <summary aria-label={`Voice model for ${track}`} title={`Voice model for ${track}`}>
-        <UserCircleIcon className="voice-profile-summary-icon" aria-hidden="true" />
-        <span className="voice-profile-summary-copy">
-          <strong>{selected?.name ?? "Choose voice"}</strong>
-          <small>{selected ? qualityLabel(selected) : "No voice selected"}</small>
-        </span>
-        <ChevronDownIcon className="voice-profile-chevron" aria-hidden="true" />
+      <summary
+        className={compact ? `ui-compact-button ${open ? "selected" : ""}` : undefined}
+        aria-label={`Voice model for ${track}`}
+        title={`Voice for ${track}: ${selected?.name ?? "Choose voice"} · Change to rerender`}
+      >
+        {compact ? (
+          <VocalistIcon aria-hidden="true" />
+        ) : (
+          <>
+            <UserCircleIcon className="voice-profile-summary-icon" aria-hidden="true" />
+            <span className="voice-profile-summary-copy">
+              <strong>{selected?.name ?? "Choose voice"}</strong>
+              <small>{selected ? qualityLabel(selected) : "No voice selected"}</small>
+            </span>
+            <ChevronDownIcon className="voice-profile-chevron" aria-hidden="true" />
+          </>
+        )}
       </summary>
       {open ? createPortal(menu, document.body) : null}
     </details>

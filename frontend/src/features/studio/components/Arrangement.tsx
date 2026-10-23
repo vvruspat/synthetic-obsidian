@@ -287,6 +287,14 @@ export function Arrangement({
                 );
               })}
             </div>
+            <div
+              className="track-scrollbar"
+              ref={refs.trackScrollbarRef}
+              onScroll={() => actions.syncTrackScroll("scrollbar")}
+              aria-hidden="true"
+            >
+              <div style={{ height: `calc(${displayRows.length} * var(--track-row))` }} />
+            </div>
           </div>
           <PianoRoll
             controller={controller}

@@ -5024,6 +5024,9 @@ private:
         if (arrangementImportRunning_ || projectHasBackgroundWork() || preparingBackingSource_)
         { setStatus("Wait for the current operation before importing clips."); return; }
         if (files.isEmpty() || ! std::isfinite(start) || start < 0.0) return;
+        if (const auto* target = arrangement::findTrack(document_, trackId);
+            target != nullptr && target->parentId.isNotEmpty())
+            trackId.clear();
         const auto createTrack = arrangement::findTrack(document_, trackId) == nullptr;
         if (createTrack) trackId = "audio-" + juce::Uuid().toString();
         arrangementImportRunning_ = true;
@@ -5499,7 +5502,7 @@ private:
 
         if (type == "set-backing-voice-profile")
         {
-            if (backingAudioRenderRunning_)
+            if (projectHasBackgroundWork())
                 return;
 
             const auto trackId = root->getProperty("track").toString();
@@ -5527,7 +5530,9 @@ private:
             beginUndoableAction();
             backingTrack->voiceProfileId = profileId;
             markChanged();
-            setStatus("Voice for " + backingTrackDisplayName(*backingTrack) + ": " + profile->name + ".");
+            makeBackingTrackActive(*backingTrack);
+            ++backingPitchPreviewRevisions_[trackId];
+            runBackingAudioRender();
             return;
         }
 

@@ -244,6 +244,7 @@ export function useStudioController(
   const timelineContentRef = useRef<HTMLDivElement>(null);
   const sidebarTrackScrollRef = useRef<HTMLDivElement>(null);
   const arrangementTrackScrollRef = useRef<HTMLDivElement>(null);
+  const trackScrollbarRef = useRef<HTMLDivElement>(null);
   const pianoRollScrollRef = useRef<HTMLDivElement>(null);
   const pianoKeysScrollRef = useRef<HTMLDivElement>(null);
   const horizontalZoomAnchorRef = useRef<number | null>(null);
@@ -679,18 +680,17 @@ export function useStudioController(
     }
   };
 
-  const syncTrackScroll = (source: "sidebar" | "arrangement") => {
-    const sourceElement =
-      source === "sidebar" ? sidebarTrackScrollRef.current : arrangementTrackScrollRef.current;
-    const targetElement =
-      source === "sidebar" ? arrangementTrackScrollRef.current : sidebarTrackScrollRef.current;
-    if (
-      sourceElement &&
-      targetElement &&
-      Math.abs(targetElement.scrollTop - sourceElement.scrollTop) > 0.5
-    ) {
-      targetElement.scrollTop = sourceElement.scrollTop;
-    }
+  const syncTrackScroll = (source: "sidebar" | "arrangement" | "scrollbar") => {
+    const scrollers = {
+      sidebar: sidebarTrackScrollRef.current,
+      arrangement: arrangementTrackScrollRef.current,
+      scrollbar: trackScrollbarRef.current,
+    };
+    const sourceElement = scrollers[source];
+    if (!sourceElement) return;
+    for (const target of Object.values(scrollers))
+      if (target && Math.abs(target.scrollTop - sourceElement.scrollTop) > 0.5)
+        target.scrollTop = sourceElement.scrollTop;
   };
 
   const changeHorizontalZoom = (wheelDelta: number) => {
@@ -1379,6 +1379,7 @@ export function useStudioController(
     displayRows,
     backingGenerator,
     voiceProfiles: project.voiceProfiles,
+    backingTrackContents: project.backingTrackContents,
     selectedTracks,
     trackState,
     trackLayerState,
@@ -1393,6 +1394,7 @@ export function useStudioController(
       timelineContentRef,
       sidebarTrackScrollRef,
       arrangementTrackScrollRef,
+      trackScrollbarRef,
       pianoRollScrollRef,
       pianoKeysScrollRef,
     },
@@ -1415,7 +1417,11 @@ export function useStudioController(
       importAudio: () =>
         bridge.send({
           type: "import-audio",
-          track: selectedTracks.length === 1 ? selectedTracks[0] : "",
+          track:
+            selectedTracks.length === 1 &&
+            arrangementTracks.some((track) => track.id === selectedTracks[0] && !track.parentId)
+              ? selectedTracks[0]
+              : "",
         }),
       importTrackAudio: (track: string) => bridge.send({ type: "import-track-audio", track }),
       importDroppedAudio: (files: string[], track: string, start: number) =>

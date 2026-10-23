@@ -10,6 +10,7 @@ import {
 import type { CSSProperties } from "react";
 import { BackingGroupHeader } from "@/features/studio/components/BackingGroupHeader";
 import { TrackHeader } from "@/features/studio/components/TrackHeader";
+import { VoiceProfileSelect } from "@/features/studio/components/VoiceProfileSelect";
 import type { StudioController } from "@/features/studio/hooks/useStudioController";
 import {
   BLACK_KEY_PITCHES,
@@ -20,13 +21,21 @@ import {
 } from "@/features/studio/lib/pitch";
 import { IconButton, RangeInput } from "@/ui";
 
-export function TrackSidebar({ controller }: { controller: StudioController }) {
+export function TrackSidebar({
+  controller,
+  backingRenderBusy,
+}: {
+  controller: StudioController;
+  backingRenderBusy: boolean;
+}) {
   const {
     displayRows,
     selectedTracks,
     trackState,
     trackLayerState,
     trackLayerAvailability,
+    voiceProfiles,
+    backingTrackContents,
     horizontalZoom,
     verticalZoom,
     instrumentalVolume,
@@ -62,7 +71,19 @@ export function TrackSidebar({ controller }: { controller: StudioController }) {
       }
       selected={selectedTracks.includes(id)}
       onSelect={(additive) => actions.selectTrack(id, additive)}
-      onOpenFile={() => actions.importTrackAudio(id)}
+      onOpenFile={depth ? undefined : () => actions.importTrackAudio(id)}
+      voiceControl={
+        depth ? (
+          <VoiceProfileSelect
+            compact
+            track={name}
+            profiles={voiceProfiles}
+            value={backingTrackContents.find((track) => track.id === id)?.voiceProfileId ?? ""}
+            disabled={backingRenderBusy || !trackLayerAvailability[id]?.notesAvailable}
+            onChange={(profileId) => actions.setBackingVoiceProfile(id, profileId)}
+          />
+        ) : undefined
+      }
       onDelete={id === "Instrumental" ? undefined : onDelete}
     />
   );
@@ -132,14 +153,7 @@ export function TrackSidebar({ controller }: { controller: StudioController }) {
                 renderTrackHeader(
                   row.track.id,
                   row.track.name,
-                  () => {
-                    if (
-                      window.confirm(
-                        `Delete track “${row.track.name}”${row.childCount ? " and its backing tracks" : ""}?`,
-                      )
-                    )
-                      actions.removeTrack(row.track.id);
-                  },
+                  () => actions.removeTrack(row.track.id),
                   row.depth,
                   row.number,
                 )

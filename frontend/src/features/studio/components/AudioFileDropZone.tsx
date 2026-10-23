@@ -18,7 +18,9 @@ export function AudioFileDropZone({
   const transferring = useRef(false);
   const selected =
     controller.selectedTracks.length === 1
-      ? controller.arrangementTracks.find((track) => track.id === controller.selectedTracks[0])
+      ? controller.arrangementTracks.find(
+          (track) => track.id === controller.selectedTracks[0] && !track.parentId,
+        )
       : undefined;
   const start = (controller.musicalTimeline.duration * controller.playhead) / 100;
 

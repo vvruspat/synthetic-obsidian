@@ -11,7 +11,9 @@ stage_root="${build_root}/stage"
 app_stage="${stage_root}/Synthetic Obsidian.app"
 dmg_stage="${build_root}/dmg-root"
 output_dir="${project_root}/dist"
-output_dmg="${output_dir}/Synthetic-Obsidian-1.0-Apple-Silicon.dmg"
+release_version="$(sed -nE 's/^project\(SyntheticObsidian VERSION ([0-9.]+)\)/\1/p' "${project_root}/CMakeLists.txt")"
+output_dmg="${output_dir}/Synthetic-Obsidian-${release_version}-Apple-Silicon.dmg"
+core_python="${SYNTHETIC_OBSIDIAN_CORE_PYTHON:-${project_root}/research/.venv_seed_vc/bin/python}"
 identity="${SYNTHETIC_OBSIDIAN_CODESIGN_IDENTITY:-Developer ID Application: Aleksandr  Kolesov (3WKK5AGY66)}"
 notary_profile="${SYNTHETIC_OBSIDIAN_NOTARY_PROFILE:-SMC-notarize}"
 
@@ -20,6 +22,9 @@ soulx_source="${legacy_root}/runtime/soulx-singer/source"
 soulx_svc_model="${legacy_root}/models/SoulX-Singer/model-svc.pt"
 backing_models="${legacy_root}/models/backing_vocals"
 boundary_model="${project_root}/data/user_boundary_alignment/sasha_manual_boundary_tcn.pt"
+note_boundary_model="${SYNTHETIC_OBSIDIAN_APP_NOTE_MODEL:-${legacy_root}/models/note-boundaries/sasha-v11-melismas/model.json}"
+sibilant_model="${SYNTHETIC_OBSIDIAN_APP_SIBILANT_MODEL:-${legacy_root}/models/sibilants/sasha-v1-experimental/native-model.json}"
+rmvpe_model="${legacy_root}/models/rmvpe/rmvpe.pt"
 non_vocal_model="${project_root}/data/gtsinger_alignment/multilingual_mps_full_strict_pause_silence_head_thr090_tcn.pt"
 wav2vec_model="${HOME}/.cache/torch/hub/checkpoints/wav2vec2_fairseq_base_ls960_asr_ls960.pth"
 
@@ -56,6 +61,11 @@ require_dir "${soulx_source}"
 require_dir "${backing_models}/backing_transformer_v1"
 require_file "${soulx_svc_model}"
 require_file "${boundary_model}"
+require_file "${note_boundary_model}"
+require_file "${sibilant_model}"
+require_file "${rmvpe_model}"
+require_file "${core_python}"
+require_file "${soulx_source}/preprocess/tools/f0_extraction.py"
 require_file "${non_vocal_model}"
 require_file "${wav2vec_model}"
 require_file "${script_dir}/THIRD_PARTY_NOTICES.md"
@@ -65,6 +75,13 @@ if ! security find-identity -v -p codesigning | grep -F "${identity}" >/dev/null
     echo "Developer ID signing identity is not available: ${identity}" >&2
     exit 1
 fi
+
+echo "Freezing the current Core AI worker"
+SYNTHETIC_OBSIDIAN_CODESIGN_IDENTITY="${identity}" \
+    "${core_python}" -m PyInstaller --noconfirm \
+    --distpath "${runtime_build}" \
+    --workpath "${build_root}/work/core" \
+    "${script_dir}/pyinstaller/core.spec"
 
 echo "Building the embedded interface"
 (
@@ -77,7 +94,9 @@ cmake -S "${project_root}" -B "${release_build}" \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_OSX_ARCHITECTURES=arm64 \
     -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 \
-    -DSYNTHETIC_OBSIDIAN_BUILD_TOOLS=ON
+    -DSYNTHETIC_OBSIDIAN_BUILD_TOOLS=ON \
+    -DSYNTHETIC_OBSIDIAN_APP_NOTE_MODEL="${note_boundary_model}" \
+    -DSYNTHETIC_OBSIDIAN_APP_SIBILANT_MODEL="${sibilant_model}"
 cmake --build "${release_build}" --config Release --target VocalAnnotationTool --parallel
 
 built_app="${release_build}/vocal_annotation_tool_build/VocalAnnotationTool_artefacts/Release/Synthetic Obsidian.app"
@@ -117,6 +136,8 @@ mkdir -p \
 
 /usr/bin/ditto "${soulx_svc_model}" \
     "${runtime_resources}/voice-engine/models/model-svc.pt"
+/usr/bin/ditto "${rmvpe_model}" \
+    "${runtime_resources}/voice-engine/models/rmvpe.pt"
 /usr/bin/ditto "${soulx_source}" \
     "${runtime_resources}/voice-engine/source"
 

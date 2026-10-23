@@ -42,6 +42,11 @@ packs, and the required local model files into one signed Apple Silicon DMG.
 The user only drags Synthetic Obsidian into Applications; Python, Conda,
 Homebrew, and network model downloads are not required.
 
+The filename uses the version from the top-level CMake project. The builder
+refreshes the Core worker from the current source using the existing training
+environment (override with `SYNTHETIC_OBSIDIAN_CORE_PYTHON`) and includes the
+RMVPE checkpoint and implementation alongside the v11 and sibilant models.
+
 The script notarizes and staples the disk image with the existing
 `SMC-notarize` Keychain profile. Set `SYNTHETIC_OBSIDIAN_NOTARY_PROFILE` to
 override the profile name, or explicitly set

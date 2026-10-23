@@ -1,0 +1,7 @@
+# Offline MIDI generation / packaging / voicebank extraction only.
+# Inference uses the pinned OpenUtau .NET core and its ONNX Runtime dependency.
+numpy>=1.26
+soundfile>=0.12
+mido==1.3.3
+PyYAML>=6
+py7zr>=1.0

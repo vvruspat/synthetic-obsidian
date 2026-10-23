@@ -30,6 +30,7 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(JUCE)
 
 option(SYNTHETIC_OBSIDIAN_BUILD_TOOLS "Build offline Synthetic Obsidian tools" ON)
+option(SYNTHETIC_OBSIDIAN_BUILD_NATIVE_ANNOTATOR "Build the native JUCE note annotator" ${SYNTHETIC_OBSIDIAN_BUILD_TOOLS})
 
 # ── Embedded React frontend ──────────────────────────────────────────────────
 # The checked-in dist bundle keeps C++ builds independent from Node.js. Rebuild
@@ -82,7 +83,7 @@ juce_add_plugin(SyntheticObsidian
     FORMATS                     VST3 Standalone
 
     PRODUCT_NAME                "Synthetic Obsidian"
-    VERSION                     "1.0.0"
+    VERSION                     "${PROJECT_VERSION}"
 
     VST3_CATEGORIES             "Fx" "Analyzer"
 
@@ -190,4 +191,7 @@ endif()
 
 if(SYNTHETIC_OBSIDIAN_BUILD_TOOLS)
     add_subdirectory(tools/vocal_annotation_tool ${CMAKE_BINARY_DIR}/vocal_annotation_tool_build)
+endif()
+if(SYNTHETIC_OBSIDIAN_BUILD_NATIVE_ANNOTATOR)
+    add_subdirectory(tools/native_note_annotator)
 endif()

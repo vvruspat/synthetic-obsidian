@@ -25,6 +25,11 @@ __pycache__/
 .venv-*/
 venv/
 research/.venv_seed_vc/
+research/.venv_diffsinger/
+research/.dotnet/
+research/vendor/
+research/native_notes/openutau_render/bin/
+research/native_notes/openutau_render/obj/
 
 # Large local datasets, downloads, and experiment artifacts
 data/*

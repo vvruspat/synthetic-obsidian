@@ -4,7 +4,7 @@ juce_add_gui_app(VocalAnnotationTool
     COMPANY_EMAIL       ""
     BUNDLE_ID           "com.syntheticobsidian.vocalannotationtool"
     PRODUCT_NAME        "Synthetic Obsidian"
-    VERSION             "1.0"
+    VERSION             "${PROJECT_VERSION}"
     ICON_BIG            "${CMAKE_SOURCE_DIR}/distribution/macos-arm64/AppIcon.png"
     ICON_SMALL          "${CMAKE_SOURCE_DIR}/distribution/macos-arm64/AppIcon.png"
     NEEDS_WEB_BROWSER   TRUE
@@ -24,6 +24,11 @@ target_sources(VocalAnnotationTool
         AnnotationEditorComponent.cpp
         AlgorithmicPitchPreview.cpp
         RuntimeManager.cpp
+        SashaNoteAnalysis.cpp
+        SibilantModel.cpp
+        ../native_note_annotator/NoteAnalysis.cpp
+        ../native_note_annotator/NoteBoundaryModel.cpp
+        ../native_note_annotator/PitchStructureFeatures.cpp
         ${CMAKE_SOURCE_DIR}/Source/web/SyntheticObsidianWebView.cpp
 )
 
@@ -48,6 +53,7 @@ target_link_libraries(VocalAnnotationTool
         juce::juce_audio_formats
         juce::juce_audio_utils
         juce::juce_core
+        juce::juce_cryptography
         juce::juce_data_structures
         juce::juce_dsp
         juce::juce_events
@@ -101,4 +107,59 @@ elseif(WIN32)
     target_compile_definitions(VocalAnnotationTool PUBLIC
         UNICODE _UNICODE
     )
+endif()
+
+option(SYNTHETIC_OBSIDIAN_VOCAL_ANALYSIS_TESTS "Build Sasha AI Parts integration checks" OFF)
+if(SYNTHETIC_OBSIDIAN_VOCAL_ANALYSIS_TESTS)
+    enable_testing()
+    juce_add_console_app(SashaNoteAnalysisTests PRODUCT_NAME "Sasha AI Parts checks")
+    juce_generate_juce_header(SashaNoteAnalysisTests)
+    target_sources(SashaNoteAnalysisTests PRIVATE
+        SashaNoteAnalysisTests.cpp SashaNoteAnalysis.cpp SibilantModel.cpp RuntimeManager.cpp
+        AnnotationDocument.cpp AnnotationJson.cpp
+        ../native_note_annotator/NoteAnalysis.cpp
+        ../native_note_annotator/NoteBoundaryModel.cpp
+        ../native_note_annotator/PitchStructureFeatures.cpp)
+    target_include_directories(SashaNoteAnalysisTests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_compile_definitions(SashaNoteAnalysisTests PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
+    target_link_libraries(SashaNoteAnalysisTests PRIVATE
+        juce::juce_audio_utils juce::juce_gui_extra juce::juce_cryptography juce::juce_dsp
+        juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)
+    add_test(NAME SashaNoteAnalysisTests COMMAND SashaNoteAnalysisTests)
+endif()
+
+set(SYNTHETIC_OBSIDIAN_APP_SIBILANT_MODEL "" CACHE FILEPATH "Optional native Sasha sibilant model")
+if(SYNTHETIC_OBSIDIAN_APP_SIBILANT_MODEL)
+    if(NOT EXISTS "${SYNTHETIC_OBSIDIAN_APP_SIBILANT_MODEL}")
+        message(FATAL_ERROR "Sibilant model does not exist: ${SYNTHETIC_OBSIDIAN_APP_SIBILANT_MODEL}")
+    endif()
+    if(APPLE)
+        target_sources(VocalAnnotationTool PRIVATE "${SYNTHETIC_OBSIDIAN_APP_SIBILANT_MODEL}")
+        set_source_files_properties("${SYNTHETIC_OBSIDIAN_APP_SIBILANT_MODEL}" PROPERTIES
+            HEADER_FILE_ONLY TRUE MACOSX_PACKAGE_LOCATION "Resources/sibilant-model")
+    else()
+        add_custom_command(TARGET VocalAnnotationTool POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:VocalAnnotationTool>/models/sibilants/sasha-v1-experimental"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${SYNTHETIC_OBSIDIAN_APP_SIBILANT_MODEL}"
+                "$<TARGET_FILE_DIR:VocalAnnotationTool>/models/sibilants/sasha-v1-experimental/native-model.json"
+            VERBATIM)
+    endif()
+endif()
+
+set(SYNTHETIC_OBSIDIAN_APP_NOTE_MODEL "" CACHE FILEPATH "Optional Sasha note-boundary model to bundle in Synthetic Obsidian")
+if(SYNTHETIC_OBSIDIAN_APP_NOTE_MODEL)
+    if(NOT EXISTS "${SYNTHETIC_OBSIDIAN_APP_NOTE_MODEL}")
+        message(FATAL_ERROR "Note boundary model does not exist: ${SYNTHETIC_OBSIDIAN_APP_NOTE_MODEL}")
+    endif()
+    if(APPLE)
+        target_sources(VocalAnnotationTool PRIVATE "${SYNTHETIC_OBSIDIAN_APP_NOTE_MODEL}")
+        set_source_files_properties("${SYNTHETIC_OBSIDIAN_APP_NOTE_MODEL}" PROPERTIES
+            HEADER_FILE_ONLY TRUE MACOSX_PACKAGE_LOCATION "Resources/note-model")
+    else()
+        add_custom_command(TARGET VocalAnnotationTool POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:VocalAnnotationTool>/models/note-boundaries/sasha-v11-melismas"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${SYNTHETIC_OBSIDIAN_APP_NOTE_MODEL}"
+                "$<TARGET_FILE_DIR:VocalAnnotationTool>/models/note-boundaries/sasha-v11-melismas/model.json"
+            VERBATIM)
+    endif()
 endif()

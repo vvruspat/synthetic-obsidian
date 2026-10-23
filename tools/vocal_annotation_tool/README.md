@@ -1,5 +1,9 @@
 # Vocal Annotation Tool
 
+For the separate **native JUCE waveform annotation application** (without a
+WebView), build `NativeNoteAnnotator`. See
+[`../native_note_annotator/README.md`](../native_note_annotator/README.md).
+
 Standalone offline annotator for creating gold vocal note/syllable datasets.
 
 The tool is intentionally isolated from the realtime plugin target. Audio loading,
@@ -30,6 +34,67 @@ segment includes confidence and alternative labels; low-confidence context is
 not treated as an absolute pitch-correction constraint.
 
 ## Build
+
+`AI Parts` now uses the native **Sasha v11** note-boundary TCN instead of the
+GTSinger syllable/breath detector. It proposes note intervals and pauses, keeping
+intervals whose pitch is uncertain. There is no YIN sibilant-rejection postfilter.
+Model inference, decoding, and file loading run on the offline worker; weights
+are loaded lazily and reused between requests. The exact same C++ implementation
+and v11 weights are used by `NativeNoteAnnotator`.
+
+After v11, the separate native **Sasha Sibilants v1** classifier attaches a note
+to the nearest non-sibilant note when **more than 50% of its duration** is classified as sibilant
+at the classifier's balanced 0.48 threshold. Partial edge frames are weighted
+by their overlap with the note. Distance is the gap between intervals; equal gaps
+prefer the previous note. Gaps over 120 ms and clips with no vocal neighbour
+remain unchanged. Whole intervals are retained, including their attacks/tails;
+notes with 50% or less sibilant time keep their boundaries. Marker generation and subsequent
+RMVPE enrichment use the merged intervals. Attached notes carry
+`sibilant_attached` / `sibilants:<model-id>` flags and the status reports the count.
+The classifier is loaded lazily in the same background worker and needs no
+Python runtime. Missing/invalid weights keep raw v11 intervals and show a warning.
+
+A positive voiced-core guard vetoes attachment when the original note contains
+a continuous non-sibilant span with native YIN confidence >= 0.8. The required
+span is 25% of note duration, clamped to 30–80 ms so short notes can be protected.
+Pitch may change during that span; vibrato and legato do not require a constant
+pitch. Sparse or uncertain pitch alone does not decide attachment. The guard
+uses the already computed offline analysis, preserving valid notes with long
+consonants while allowing standalone sibilant fragments to attach.
+
+The temporary white diagnostic overlay and its separate inference worker are
+removed from the release UI. Sibilant classification and the voiced-core guard
+remain part of AI Parts. Diagnostic frame masks are still available through
+the native checks executable's `--inspect-sibilants` mode.
+
+The classifier uses the separate `synthetic-obsidian-sibilant-native-v1` JSON
+contract exported by `research.sibilants.export_native`, including mel filters,
+frozen normalization and transposed convolution arrays. It is discovered at
+`Models/sibilants/sasha-v1-experimental/native-model.json` (Application Support,
+then legacy), or the bundled `Resources/sibilant-model/native-model.json`.
+Bundle with `SYNTHETIC_OBSIDIAN_APP_SIBILANT_MODEL`; the DMG builder includes it.
+Project serialization and parameter IDs are unchanged; all classification,
+resampling and allocations remain outside the audio callback.
+
+`Analyze` obtains RMVPE pitch curves for the current note blocks. It preserves
+their IDs and boundaries, including manual splits, joins, deletions, and moved
+edges. Annotation markers do not reconstruct or resegment notes during pitch
+analysis. When no AI Parts exist it first runs v11. If the pitch
+worker fails, the parts and available native YIN pitch remain. Missing or invalid
+Sasha weights leave the existing document unchanged with a status message.
+
+The model is discovered in Application Support `Models/note-boundaries/sasha-v11-melismas/`,
+then the legacy `~/.synthetic_obsidian/models/note-boundaries/sasha-v11-melismas/`,
+then the app's bundled `Resources/note-model/model.json`. For a portable build,
+pass `-DSYNTHETIC_OBSIDIAN_APP_NOTE_MODEL=/path/to/model.json` to CMake. The DMG
+builder includes that resource, with an optional environment variable of the
+same name. No model weights are checked into Git.
+
+Optional integration checks: configure `-DSYNTHETIC_OBSIDIAN_VOCAL_ANALYSIS_TESTS=ON`,
+build `SashaNoteAnalysisTests`, and run CTest in the tool's build directory.
+They cover pauses, connected notes, missing pitch, piano-roll edits, and stale
+results: tempo/chord updates do not cancel vocal analysis, while edits to notes,
+parts, or backing tracks do. The annotation format and audio callback are unchanged.
 
 ```bash
 cmake -S /Users/aleksandrkolesov/synthetic-obsidian \
@@ -79,17 +144,10 @@ mel/audio at each offline render segment.
   energy envelope. It detects editable syllable parts, likely rearticulations,
   and breath/noise boundary candidates. It is deliberately a review aid, not a
   gold pitch detector.
-- `Analyze` runs the existing `research/svc_pitch/analyze_notes_pyin.py` script
-  in a background subprocess. It first creates `AI Parts` when none exist, then
-  conforms pYIN note blocks to the visible AI/lyric boundaries. Manually adjusted
-  AI splitters are therefore treated as the source of truth for note timing.
-- `AI Parts` runs the multilingual GTSinger residual TCN checkpoint in a
-  background Python subprocess. It detects syllable-onset candidates and
-  breath/silence intervals. With aligned lyrics present, existing lyric text is
-  preserved and its boundaries are snapped only to nearby TCN candidates.
-  Syllable times receive an acoustic refinement pass within -180/+50 ms. It
-  finds spectral/RMS attacks and backtracks each one to the beginning of the RMS
-  rise, keeping splitters out of internal waveform peaks.
+- `Analyze` runs `research/svc_pitch/analyze_notes_pyin.py` with the RMVPE backend
+  in a background subprocess, enriching the editable AI Parts with pitch curves.
+- `AI Parts` runs Sasha v11 in C++ and creates note starts and pause boundaries.
+  Existing lyric text is preserved; the model does not classify breath or sibilants.
 - Waveform syllable spans are highlighted with rotating colors between boundary
   markers, with note starts used as a fallback when no boundary markers exist.
 - Trackpad gestures: two-finger pan scrolls time horizontally and pitch

@@ -1431,9 +1431,15 @@ def main() -> None:
     parser.add_argument("audio_file", type=Path)
     parser.add_argument("--sensitivity", type=float, default=0.72)
     parser.add_argument("--pitch-backend", choices=("pyin", "rmvpe", "hybrid", "contextual"), default="contextual")
+    parser.add_argument("--rmvpe-model", type=Path)
+    parser.add_argument("--rmvpe-implementation", type=Path)
     parser.add_argument("--analysis-window", action="append", type=_parse_analysis_window, default=[])
     parser.add_argument("--region", action="append", type=_parse_region, default=[])
     args = parser.parse_args()
+    if args.rmvpe_model is not None:
+        os.environ["SO_RMVPE_MODEL"] = str(args.rmvpe_model.expanduser().resolve())
+    if args.rmvpe_implementation is not None:
+        os.environ["SO_RMVPE_IMPLEMENTATION"] = str(args.rmvpe_implementation.expanduser().resolve())
     if args.region:
         notes = analyze_regions(args.audio_file, args.sensitivity, args.region, args.pitch_backend)
     elif args.analysis_window:

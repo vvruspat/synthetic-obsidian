@@ -1,0 +1,2 @@
+# Optional offline WORLD augmentation; not part of the native app runtime.
+pyworld==0.3.5

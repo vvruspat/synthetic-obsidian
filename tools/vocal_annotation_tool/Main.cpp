@@ -3,6 +3,7 @@
 #include "AnnotationValidator.h"
 #include "AlgorithmicPitchPreview.h"
 #include "RuntimeManager.h"
+#include "SashaNoteAnalysis.h"
 #if JUCE_MAC
 #include "MacApplicationIcon.h"
 #endif
@@ -498,163 +499,13 @@ bool isNonVocalBoundary(BoundaryKind kind)
 
 bool isAiBoundarySource(const juce::String& source)
 {
-    return source.startsWith("boundary_tcn")
+    return source.startsWith("sasha_notes:") || source.startsWith("boundary_tcn")
         || source.startsWith("gtsinger_tcn");
-}
-
-int removeMicroNonVocalBoundaries(std::vector<BoundaryMarker>& boundaries,
-                                  double minimumNonVocalDuration = 0.08,
-                                  double minimumMusicalDuration = 0.05)
-{
-    std::sort(boundaries.begin(), boundaries.end(),
-              [](const auto& a, const auto& b) { return a.time < b.time; });
-
-    auto removed = 0;
-    for (size_t i = 0; i + 1 < boundaries.size();)
-    {
-        const auto& left = boundaries[i];
-        const auto& right = boundaries[i + 1];
-        const auto leftIsNonVocal = isNonVocalBoundary(left.kind);
-        const auto rightIsNonVocal = isNonVocalBoundary(right.kind);
-        const auto minimumDuration = leftIsNonVocal || rightIsNonVocal
-            ? minimumNonVocalDuration
-            : minimumMusicalDuration;
-        if (right.time - left.time >= minimumDuration)
-        {
-            ++i;
-            continue;
-        }
-
-        if (! leftIsNonVocal && ! rightIsNonVocal)
-        {
-            const auto hasLyricText = [](const BoundaryMarker& boundary)
-            {
-                const auto text = boundary.text.trim();
-                return text.isNotEmpty() && text != toString(boundary.kind);
-            };
-            const auto leftHasLyric = hasLyricText(left);
-            const auto rightHasLyric = hasLyricText(right);
-            if (leftHasLyric && rightHasLyric && left.text.trim() != right.text.trim())
-            {
-                ++i;
-                continue;
-            }
-
-            // Generic close candidates describe the same onset. Keep the
-            // earlier one so an unvoiced consonant remains part of the syllable.
-            const auto eraseIndex = leftHasLyric != rightHasLyric
-                ? (leftHasLyric ? i + 1 : i)
-                : i + 1;
-            boundaries.erase(boundaries.begin() + static_cast<std::ptrdiff_t>(eraseIndex));
-            ++removed;
-            if (i > 0)
-                --i;
-            continue;
-        }
-
-        auto eraseIndex = leftIsNonVocal ? i : i + 1;
-        if (leftIsNonVocal && rightIsNonVocal)
-            eraseIndex = left.confidence < right.confidence ? i : i + 1;
-
-        boundaries.erase(boundaries.begin() + static_cast<std::ptrdiff_t>(eraseIndex));
-        ++removed;
-        if (i > 0)
-            --i;
-    }
-
-    return removed;
-}
-
-bool isVocalBoundary(BoundaryKind kind)
-{
-    return kind == BoundaryKind::syllable
-        || kind == BoundaryKind::rearticulation
-        || kind == BoundaryKind::legato;
 }
 
 bool isNonVocalRegionKind(const juce::String& kind)
 {
     return kind == "breath" || kind == "noise" || kind == "pause";
-}
-
-int normalizeNonVocalRegions(std::vector<AnnotationRegion>& regions,
-                             std::vector<BoundaryMarker>& boundaries,
-                             double documentDuration,
-                             double mergeGapSeconds = 0.20)
-{
-    std::vector<AnnotationRegion> nonVocal;
-    std::vector<AnnotationRegion> other;
-    nonVocal.reserve(regions.size());
-    other.reserve(regions.size());
-
-    for (const auto& region : regions)
-    {
-        if (isNonVocalRegionKind(region.kind))
-        {
-            auto clipped = region;
-            clipped.start = juce::jlimit(0.0, documentDuration, clipped.start);
-            clipped.end = juce::jlimit(clipped.start, documentDuration, clipped.end);
-            if (clipped.end - clipped.start >= 0.04)
-                nonVocal.push_back(std::move(clipped));
-        }
-        else
-        {
-            other.push_back(region);
-        }
-    }
-
-    if (nonVocal.empty())
-        return 0;
-
-    std::sort(nonVocal.begin(), nonVocal.end(), [](const auto& a, const auto& b) { return a.start < b.start; });
-    std::vector<AnnotationRegion> merged;
-    merged.reserve(nonVocal.size());
-    auto mergedCount = 0;
-
-    for (const auto& region : nonVocal)
-    {
-        if (merged.empty()
-            || region.kind != merged.back().kind
-            || region.start > merged.back().end + mergeGapSeconds)
-        {
-            merged.push_back(region);
-            continue;
-        }
-
-        auto& last = merged.back();
-        last.end = juce::jmax(last.end, region.end);
-        ++mergedCount;
-    }
-
-    boundaries.erase(std::remove_if(boundaries.begin(),
-                                    boundaries.end(),
-                                    [&merged](const auto& boundary)
-                                    {
-                                        if (! isVocalBoundary(boundary.kind))
-                                            return false;
-
-                                        return std::any_of(merged.begin(), merged.end(),
-                                                           [&boundary](const auto& region)
-                                                           {
-                                                               return boundary.time > region.start + 0.015
-                                                                   && boundary.time < region.end - 0.015;
-                                                           });
-                                    }),
-                     boundaries.end());
-
-    boundaries.erase(std::remove_if(boundaries.begin(),
-                                    boundaries.end(),
-                                    [](const auto& boundary)
-                                    {
-                                        return isNonVocalBoundary(boundary.kind)
-                                            && isAiBoundarySource(boundary.source);
-                                    }),
-                     boundaries.end());
-
-    std::sort(boundaries.begin(), boundaries.end(), [](const auto& a, const auto& b) { return a.time < b.time; });
-    regions = std::move(other);
-    regions.insert(regions.end(), merged.begin(), merged.end());
-    return mergedCount;
 }
 
 int collapseShortNoteGaps(std::vector<NoteBlock>& notes,
@@ -1317,6 +1168,7 @@ public:
 
     ~MainComponent() override
     {
+        noteAnalysisCancelled_->store(true, std::memory_order_release);
         if (voiceProfileCancellation_ != nullptr)
             voiceProfileCancellation_->store(true, std::memory_order_release);
         stopTimer();
@@ -6974,7 +6826,8 @@ private:
         return std::any_of(document_.boundaries.begin(), document_.boundaries.end(),
                            [](const auto& boundary)
                            {
-                               return ((boundary.source == "boundary_tcn"
+                               return boundary.source.startsWith("sasha_notes:")
+                                   || ((boundary.source == "boundary_tcn"
                                         || boundary.source == "gtsinger_tcn")
                                        && boundary.kind == BoundaryKind::syllable)
                                    || ((boundary.source == "boundary_tcn_snap"
@@ -8853,7 +8706,10 @@ private:
 
         analysisRunning_ = true;
         const auto analysisWindows = buildVocalPitchAnalysisWindows(document_);
-        setStatus(analysisWindows.empty()
+        auto learnedParts = SashaNoteAnalysis::partsForPitch(document_);
+        setStatus(learnedParts.succeeded
+            ? "Running RMVPE pitch on the current AI Parts boundaries..."
+            : analysisWindows.empty()
             ? "Running RMVPE pitch analysis..."
             : "Running RMVPE pitch analysis in "
                 + juce::String(static_cast<int>(analysisWindows.size()))
@@ -8861,10 +8717,28 @@ private:
 
         juce::WeakReference<MainComponent> safeThis(this);
         const auto audioFile = document_.audioFile;
-        juce::Thread::launch([safeThis, audioFile, analysisWindows]
+        const auto cancelled = noteAnalysisCancelled_;
+        const auto inputSignature = SashaNoteAnalysis::inputSignature(document_);
+        juce::Thread::launch([safeThis, audioFile, inputSignature, analysisWindows, cancelled, learnedDraft = std::move(learnedParts)]() mutable
         {
             juce::String output;
             juce::String error;
+            if (cancelled->load(std::memory_order_acquire))
+                return;
+            if (learnedDraft.succeeded && learnedDraft.notes.empty())
+            {
+                juce::MessageManager::callAsync([safeThis, audioFile, inputSignature, draft = std::move(learnedDraft)]() mutable
+                {
+                    if (safeThis != nullptr)
+                    {
+                        if (safeThis->document_.audioFile == audioFile && SashaNoteAnalysis::inputSignature(safeThis->document_) == inputSignature)
+                            safeThis->applyPyinAnalysis({}, {}, std::move(draft));
+                        else
+                            safeThis->analysisRunning_ = false;
+                    }
+                });
+                return;
+            }
 
             juce::ChildProcess process;
             auto args = RuntimeManager::workerCommand(
@@ -8876,7 +8750,18 @@ private:
             args.add("0.72");
             args.add("--pitch-backend");
             args.add("rmvpe");
-            for (const auto& window : analysisWindows)
+            args.add("--rmvpe-model");
+            args.add(RuntimeManager::rmvpeModelFile().getFullPathName());
+            args.add("--rmvpe-implementation");
+            args.add(RuntimeManager::soulXSourceRoot().getChildFile("preprocess/tools/f0_extraction.py").getFullPathName());
+            if (learnedDraft.succeeded)
+            {
+                // Pitch enrichment covers the original vocal, including tails after 120 s.
+                // AI Parts windows must not mask notes retained by the boundary model.
+                args.add("--analysis-window");
+                args.add("0:" + juce::String(learnedDraft.duration, 6));
+            }
+            else for (const auto& window : analysisWindows)
             {
                 args.add("--analysis-window");
                 args.add(juce::String(window.start, 6) + ":" + juce::String(window.end, 6));
@@ -8892,6 +8777,11 @@ private:
             {
                 while (process.isRunning())
                 {
+                    if (cancelled->load(std::memory_order_acquire))
+                    {
+                        process.kill();
+                        return;
+                    }
                     output += process.readAllProcessOutput();
                     juce::Thread::sleep(40);
                 }
@@ -8908,10 +8798,15 @@ private:
                 }
             }
 
-            juce::MessageManager::callAsync([safeThis, output, error]
+            juce::MessageManager::callAsync([safeThis, audioFile, inputSignature, output, error, draft = std::move(learnedDraft)]() mutable
             {
                 if (safeThis != nullptr)
-                    safeThis->applyPyinAnalysis(output, error);
+                {
+                    if (safeThis->document_.audioFile == audioFile && SashaNoteAnalysis::inputSignature(safeThis->document_) == inputSignature)
+                        safeThis->applyPyinAnalysis(output, error, std::move(draft));
+                    else
+                        safeThis->analysisRunning_ = false;
+                }
             });
         });
     }
@@ -8920,313 +8815,74 @@ private:
     {
         if (! document_.audioFile.existsAsFile())
         {
-            setStatus("Open an audio file before running AI parts analysis.");
+            setStatus("Open an audio file before running AI Parts.");
             return;
         }
-
-        if (aiPartsAnalysisRunning_)
+        if (aiPartsAnalysisRunning_ || analysisRunning_)
             return;
-
         aiPartsAnalysisRunning_ = true;
-        setStatus("Running offline boundary AI analysis...");
-
-        juce::WeakReference<MainComponent> safeThis(this);
+        setStatus("AI Parts: Sasha v11 + sibilant attachment...");
         const auto audioFile = document_.audioFile;
-        const auto revision = documentRevision_;
-        juce::Thread::launch([safeThis, audioFile, revision]
+        const auto inputSignature = SashaNoteAnalysis::inputSignature(document_);
+        const auto modelFile = RuntimeManager::noteBoundaryModelFile();
+        const auto sibilantFile = RuntimeManager::sibilantModelFile();
+        const auto analyzer = sashaNoteAnalysis_;
+        const auto cancelled = noteAnalysisCancelled_;
+        juce::WeakReference<MainComponent> safeThis(this);
+        juce::Thread::launch([safeThis, audioFile, inputSignature, modelFile, sibilantFile, analyzer, cancelled]
         {
-            const auto checkpoint =
-                RuntimeManager::boundaryCheckpointFile();
-            const auto nonVocalCheckpoint =
-                RuntimeManager::boundaryNonVocalCheckpointFile();
-            juce::String output;
-            juce::String error;
-
-            juce::ChildProcess process;
-            auto args = RuntimeManager::workerCommand(
-                RuntimePack::core,
-                "infer_gtsinger_boundaries.py");
-            const auto workerAvailable = ! args.isEmpty();
-            args.add(audioFile.getFullPathName());
-            args.add("--checkpoint");
-            args.add(checkpoint.getFullPathName());
-            args.add("--non-vocal-checkpoint");
-            args.add(nonVocalCheckpoint.getFullPathName());
-
-            if (! workerAvailable)
-                error = "The Apple Silicon Core AI runtime is not installed.";
-            else if (! checkpoint.existsAsFile())
-                error = "AI parts checkpoint not found: " + checkpoint.getFullPathName();
-            else if (! nonVocalCheckpoint.existsAsFile())
-                error = "AI non-vocal checkpoint not found: " + nonVocalCheckpoint.getFullPathName();
-            else if (! process.start(args))
-                error = "Could not start AI parts subprocess.";
-            else
+            SashaNoteAnalysis::Draft draft;
+            try
             {
-                while (process.isRunning())
-                {
-                    output += process.readAllProcessOutput();
-                    juce::Thread::sleep(40);
-                }
-
-                output += process.readAllProcessOutput();
-                const auto exitCode = process.getExitCode();
-                if (exitCode != 0)
-                    error = "AI parts analysis failed with exit code " + juce::String(exitCode) + ": " + output;
+                draft = analyzer->analyze(audioFile, modelFile, *cancelled, sibilantFile);
             }
-
-            juce::MessageManager::callAsync([safeThis, output, error, audioFile, revision]
+            catch (const std::exception& exception)
+            {
+                draft.error = juce::String("Sasha analysis failed: ") + exception.what();
+            }
+            if (cancelled->load(std::memory_order_acquire))
+                return;
+            juce::MessageManager::callAsync([safeThis, audioFile, inputSignature, result = std::move(draft)]() mutable
             {
                 if (safeThis != nullptr)
-                    safeThis->applyAiPartsAnalysis(output, error, audioFile, revision);
+                    safeThis->applySashaParts(std::move(result), audioFile, inputSignature);
             });
         });
     }
 
-    void applyAiPartsAnalysis(const juce::String& output,
-                              const juce::String& error,
-                              const juce::File& expectedAudioFile,
-                              unsigned int expectedRevision)
+    void applySashaParts(SashaNoteAnalysis::Draft draft, const juce::File& audioFile, const juce::String& inputSignature)
     {
         aiPartsAnalysisRunning_ = false;
-        if (document_.audioFile != expectedAudioFile || documentRevision_ != expectedRevision)
+        if (document_.audioFile != audioFile || SashaNoteAnalysis::inputSignature(document_) != inputSignature)
         {
             analyzeAfterAiParts_ = false;
-            setStatus("Discarded stale AI parts result because the document changed.");
+            setStatus("Discarded stale AI Parts because the document changed.");
             return;
         }
-
-        if (error.isNotEmpty())
+        if (! draft.succeeded)
         {
             analyzeAfterAiParts_ = false;
-            setStatus(error);
+            setStatus(draft.error.isNotEmpty() ? draft.error : "AI Parts analysis was cancelled.");
             return;
         }
-
-        const auto jsonStart = output.indexOfChar('{');
-        const auto jsonEnd = output.lastIndexOfChar('}');
-        auto parsed = juce::JSON::parse(
-            jsonStart >= 0 && jsonEnd >= jsonStart
-                ? output.substring(jsonStart, jsonEnd + 1)
-                : output);
-        auto* root = parsed.getDynamicObject();
-        auto* events = root != nullptr ? root->getProperty("events").getDynamicObject() : nullptr;
-        auto* intervals = root != nullptr ? root->getProperty("intervals").getDynamicObject() : nullptr;
-        auto* syllables = events != nullptr ? events->getProperty("syllable").getArray() : nullptr;
-        if (syllables == nullptr || intervals == nullptr)
-        {
-            analyzeAfterAiParts_ = false;
-            setStatus("AI parts analysis returned invalid JSON.");
-            return;
-        }
-
-        struct Candidate
-        {
-            double time = 0.0;
-            double confidence = 0.0;
-        };
-
-        std::vector<Candidate> syllableCandidates;
-        for (const auto& value : *syllables)
-        {
-            if (auto* object = value.getDynamicObject())
-                syllableCandidates.push_back({
-                    static_cast<double>(object->getProperty("time")),
-                    static_cast<double>(object->getProperty("confidence"))
-                });
-        }
-
+        const auto modelName = draft.modelName;
+        const auto sibilantMerges = draft.sibilantMerges;
+        const auto warning = draft.warning;
         beginUndoableAction();
-        const auto preserveLyrics = hasLyricBoundaryStructure();
-        document_.boundaries.erase(
-            std::remove_if(document_.boundaries.begin(), document_.boundaries.end(),
-                           [](const auto& boundary)
-                           {
-                               return isAiBoundarySource(boundary.source)
-                                   || boundary.source == "energy_draft"
-                                   || boundary.source == "pyin_draft";
-                           }),
-            document_.boundaries.end());
-        document_.regions.erase(
-            std::remove_if(document_.regions.begin(), document_.regions.end(),
-                           [](const auto& region)
-                           {
-                               return region.kind == "breath"
-                                   || region.kind == "noise"
-                                   || region.kind == "pause";
-                           }),
-            document_.regions.end());
-
-        if (preserveLyrics)
-        {
-            std::vector<BoundaryMarker*> lyricBoundaries;
-            for (auto& boundary : document_.boundaries)
-            {
-                if (boundary.kind == BoundaryKind::syllable
-                    || boundary.kind == BoundaryKind::rearticulation
-                    || boundary.kind == BoundaryKind::legato)
-                    lyricBoundaries.push_back(&boundary);
-            }
-            std::sort(lyricBoundaries.begin(), lyricBoundaries.end(),
-                      [](const auto* a, const auto* b) { return a->time < b->time; });
-
-            size_t candidateStart = 0;
-            auto previousTime = -1.0;
-            for (auto* boundary : lyricBoundaries)
-            {
-                size_t nearestIndex = syllableCandidates.size();
-                auto nearestDistance = 0.13;
-                for (size_t index = candidateStart; index < syllableCandidates.size(); ++index)
-                {
-                    const auto& candidate = syllableCandidates[index];
-                    if (candidate.time <= previousTime + 0.03)
-                        continue;
-
-                    const auto distance = std::abs(candidate.time - boundary->time);
-                    if (distance < nearestDistance)
-                    {
-                        nearestIndex = index;
-                        nearestDistance = distance;
-                    }
-                }
-
-                if (nearestIndex < syllableCandidates.size())
-                {
-                    const auto& nearest = syllableCandidates[nearestIndex];
-                    boundary->time = juce::jlimit(0.0, document_.duration, nearest.time);
-                    boundary->confidence = juce::jmax(boundary->confidence, nearest.confidence);
-                    boundary->source = "boundary_tcn_snap";
-                    previousTime = boundary->time;
-                    candidateStart = nearestIndex + 1;
-                }
-            }
-        }
-        else
-        {
-            for (const auto& candidate : syllableCandidates)
-            {
-                BoundaryMarker boundary;
-                boundary.id = document_.nextBoundaryId();
-                boundary.time = juce::jlimit(0.0, document_.duration, candidate.time);
-                boundary.kind = BoundaryKind::syllable;
-                boundary.text = "syllable";
-                boundary.confidence = candidate.confidence;
-                boundary.source = "boundary_tcn";
-                document_.boundaries.push_back(std::move(boundary));
-            }
-        }
-
-        const auto vocalOverlapSeconds = [this](double start, double end)
-        {
-            auto overlap = 0.0;
-            for (const auto& note : document_.notes)
-            {
-                const auto overlapStart = juce::jmax(start, note.start);
-                const auto overlapEnd = juce::jmin(end, note.end);
-                if (overlapEnd > overlapStart)
-                    overlap += overlapEnd - overlapStart;
-            }
-            return overlap;
-        };
-
-        const auto containsSyllableCandidate = [&syllableCandidates](double start, double end)
-        {
-            return std::any_of(syllableCandidates.begin(), syllableCandidates.end(),
-                               [start, end](const auto& candidate)
-                               {
-                                   return candidate.time >= start - 0.05
-                                       && candidate.time <= end + 0.05;
-                               });
-        };
-
-        const auto overlapsKnownVocal = [&](double start, double end)
-        {
-            const auto duration = end - start;
-            if (duration <= 0.0)
-                return false;
-
-            if (containsSyllableCandidate(start, end))
-                return true;
-
-            return vocalOverlapSeconds(start, end) > juce::jmax(0.04, duration * 0.20);
-        };
-
-        const auto addIntervals = [this, intervals, &overlapsKnownVocal](const juce::Identifier& property,
-                                                                         BoundaryKind kind)
-        {
-            auto* values = intervals->getProperty(property).getArray();
-            if (values == nullptr)
-                return 0;
-
-            auto count = 0;
-            for (const auto& value : *values)
-            {
-                auto* object = value.getDynamicObject();
-                if (object == nullptr)
-                    continue;
-
-                const auto start = juce::jlimit(0.0, document_.duration,
-                                                static_cast<double>(object->getProperty("start")));
-                const auto end = juce::jlimit(start, document_.duration,
-                                              static_cast<double>(object->getProperty("end")));
-                const auto confidence = juce::jlimit(
-                    0.0,
-                    1.0,
-                    static_cast<double>(object->getProperty("confidence")));
-                if (end - start < 0.08)
-                    continue;
-                if (kind == BoundaryKind::breath && overlapsKnownVocal(start, end))
-                    continue;
-
-                BoundaryMarker boundary;
-                boundary.id = document_.nextBoundaryId();
-                boundary.time = start;
-                boundary.kind = kind;
-                boundary.text = toString(kind);
-                boundary.confidence = confidence;
-                boundary.source = "boundary_tcn";
-                document_.boundaries.push_back(std::move(boundary));
-                document_.regions.push_back({ start, end, toString(kind), {} });
-                ++count;
-            }
-            return count;
-        };
-
-        const auto breathCount = addIntervals("breath", BoundaryKind::breath);
-        const auto silenceCount = addIntervals("silence", BoundaryKind::pause);
-        const auto mergedNonVocalRegions = normalizeNonVocalRegions(document_.regions, document_.boundaries, document_.duration);
-        for (const auto& region : document_.regions)
-        {
-            if (! isNonVocalRegionKind(region.kind))
-                continue;
-
-            BoundaryMarker boundary;
-            boundary.id = document_.nextBoundaryId();
-            boundary.time = region.start;
-            boundary.kind = boundaryKindFromString(region.kind);
-            boundary.text = region.kind;
-            boundary.confidence = 0.85;
-            boundary.source = "boundary_tcn";
-            document_.boundaries.push_back(std::move(boundary));
-        }
-        const auto removedMicroBoundaries = removeMicroNonVocalBoundaries(document_.boundaries, 0.08, 0.11);
-
+        SashaNoteAnalysis::applyParts(document_, std::move(draft));
+        document_.backingNotes.clear();
+        document_.backingStyleId.clear();
+        document_.backingStyleName.clear();
+        document_.backingTracks.clear();
+        resetBackingTrackControls();
+        clearAllBackingAudioTransports();
+        editor_.setBackingAudioFile({});
         editor_.fitToClip();
+        updatePlaybackNotes();
         markChanged();
-        setStatus("Boundary AI applied "
-                  + juce::String(static_cast<int>(syllableCandidates.size()))
-                  + " syllable candidates, "
-                  + juce::String(breathCount) + " breaths, and "
-                  + juce::String(silenceCount) + " pauses"
-                  + (mergedNonVocalRegions > 0
-                         ? "; merged " + juce::String(mergedNonVocalRegions) + " non-vocal splits"
-                         : juce::String())
-                  + (removedMicroBoundaries > 0
-                         ? (mergedNonVocalRegions > 0 ? ", suppressed " : "; suppressed ")
-                            + juce::String(removedMicroBoundaries) + " micro-segments"
-                         : juce::String())
-                  + (preserveLyrics ? " while preserving lyrics." : "."));
-
+        setStatus("AI Parts: " + modelName + ", " + juce::String(static_cast<int>(document_.notes.size())) + " note intervals; "
+            + juce::String(sibilantMerges) + " sibilant intervals attached."
+            + (warning.isNotEmpty() ? " " + warning : ""));
         if (analyzeAfterAiParts_)
         {
             analyzeAfterAiParts_ = false;
@@ -9234,11 +8890,12 @@ private:
         }
     }
 
-    void applyPyinAnalysis(const juce::String& output, const juce::String& error)
+    void applyPyinAnalysis(const juce::String& output, const juce::String& error,
+                           SashaNoteAnalysis::Draft learnedDraft = {})
     {
         analysisRunning_ = false;
 
-        if (error.isNotEmpty())
+        if (error.isNotEmpty() && ! learnedDraft.succeeded)
         {
             setStatus(error);
             return;
@@ -9247,16 +8904,17 @@ private:
         auto parsed = juce::JSON::parse(output);
         auto* root = parsed.getDynamicObject();
         auto* notes = root != nullptr ? root->getProperty("notes").getArray() : nullptr;
-        if (notes == nullptr)
+        if (notes == nullptr && ! learnedDraft.succeeded)
         {
             setStatus("RMVPE analysis returned invalid JSON.");
             return;
         }
 
         std::vector<NoteBlock> pyinNotes;
-        const auto conformToBoundaries = hasConformingBoundaryStructure();
+        const auto conformToBoundaries = ! learnedDraft.succeeded && hasConformingBoundaryStructure();
+        const juce::Array<juce::var> emptyNotes;
 
-        for (const auto& value : *notes)
+        for (const auto& value : notes != nullptr ? *notes : emptyNotes)
         {
             auto* object = value.getDynamicObject();
             if (object == nullptr)
@@ -9294,7 +8952,16 @@ private:
             pyinNotes.push_back(std::move(note));
         }
 
-        if (pyinNotes.empty())
+        auto rmvpeEnrichedNotes = 0;
+        if (learnedDraft.succeeded)
+        {
+            rmvpeEnrichedNotes = SashaNoteAnalysis::attachPitchCurves(learnedDraft.notes, pyinNotes);
+            pyinNotes = std::move(learnedDraft.notes);
+            for (auto& note : pyinNotes)
+                updateRepresentativePitch(note);
+        }
+
+        if (pyinNotes.empty() && ! learnedDraft.succeeded)
         {
             setStatus("RMVPE analysis returned no note blocks.");
             return;
@@ -9331,22 +8998,21 @@ private:
             document_.backingStyleId.clear();
             document_.backingStyleName.clear();
             document_.backingTracks.clear();
-            document_.boundaries.erase(
-                std::remove_if(document_.boundaries.begin(), document_.boundaries.end(),
-                               [](const auto& boundary)
-                               {
-                                   return ! isNonVocalBoundary(boundary.kind);
-                               }),
-                document_.boundaries.end());
-
-            for (const auto& note : document_.notes)
+            if (! learnedDraft.succeeded)
             {
-                BoundaryMarker boundary;
-                boundary.id = document_.nextBoundaryId();
-                boundary.time = note.start;
-                boundary.confidence = 0.55;
-                boundary.source = "pyin_draft";
-                document_.boundaries.push_back(std::move(boundary));
+                document_.boundaries.erase(
+                    std::remove_if(document_.boundaries.begin(), document_.boundaries.end(),
+                                   [](const auto& boundary) { return ! isNonVocalBoundary(boundary.kind); }),
+                    document_.boundaries.end());
+                for (const auto& note : document_.notes)
+                {
+                    BoundaryMarker boundary;
+                    boundary.id = document_.nextBoundaryId();
+                    boundary.time = note.start;
+                    boundary.confidence = 0.55;
+                    boundary.source = "pyin_draft";
+                    document_.boundaries.push_back(std::move(boundary));
+                }
             }
         }
         resetBackingTrackControls();
@@ -9366,13 +9032,21 @@ private:
         editor_.fitToClip();
         updatePlaybackNotes();
         markChanged();
-        setStatus(conformToBoundaries
+        if (learnedDraft.succeeded)
+        {
+            setStatus(learnedDraft.modelName + ": " + juce::String(static_cast<int>(document_.notes.size()))
+                + " notes; RMVPE pitch on " + juce::String(rmvpeEnrichedNotes) + " notes."
+                + (error.isNotEmpty() || notes == nullptr ? " RMVPE unavailable; native pitch retained." : ""));
+            return;
+        }
+        setStatus((conformToBoundaries
             ? "RMVPE analysis conformed " + juce::String(static_cast<int>(document_.notes.size()))
                 + " note blocks to AI Parts / lyric boundaries"
                 + (collapsedNoteGaps > 0
                        ? "; collapsed " + juce::String(collapsedNoteGaps) + " short note gaps."
                        : ".")
-            : "RMVPE analysis imported " + juce::String(static_cast<int>(document_.notes.size())) + " note blocks.");
+            : "RMVPE analysis imported " + juce::String(static_cast<int>(document_.notes.size())) + " note blocks.")
+            + (learnedDraft.error.isNotEmpty() ? " Sasha fallback: " + learnedDraft.error : ""));
     }
 
     void runNoteRecalculation(const juce::StringArray& noteIds)
@@ -10568,6 +10242,8 @@ private:
     std::map<juce::String, juce::File> backingPitchPreviewFiles_;
     juce::String selectedWebTrack_ { "Voice Main" };
     bool dirty_ = false;
+    std::shared_ptr<SashaNoteAnalysis> sashaNoteAnalysis_ = std::make_shared<SashaNoteAnalysis>();
+    std::shared_ptr<std::atomic<bool>> noteAnalysisCancelled_ = std::make_shared<std::atomic<bool>>(false);
     bool analysisRunning_ = false;
     bool aiPartsAnalysisRunning_ = false;
     bool musicalContextAnalysisRunning_ = false;
@@ -10664,7 +10340,7 @@ class VocalAnnotationToolApplication final : public juce::JUCEApplication
 {
 public:
     const juce::String getApplicationName() override { return "Synthetic Obsidian"; }
-    const juce::String getApplicationVersion() override { return "1.0"; }
+    const juce::String getApplicationVersion() override { return ProjectInfo::versionString; }
     bool moreThanOneInstanceAllowed() override { return true; }
 
     void initialise(const juce::String&) override

@@ -380,6 +380,39 @@ juce::File RuntimeManager::rmvpeModelFile()
         .getChildFile("rmvpe.pt");
 }
 
+juce::File RuntimeManager::noteBoundaryModelFile()
+{
+    const auto relative = juce::String("note-boundaries/sasha-v11-melismas/model.json");
+    const std::array candidates {
+        modelsRoot().getChildFile(relative),
+        legacyRoot().getChildFile("models").getChildFile(relative),
+        juce::File::getSpecialLocation(juce::File::currentExecutableFile)
+            .getParentDirectory().getParentDirectory().getChildFile("Resources/note-model/model.json"),
+        juce::File::getSpecialLocation(juce::File::currentExecutableFile)
+            .getParentDirectory().getChildFile("models").getChildFile(relative)
+    };
+    for (const auto& candidate : candidates)
+        if (candidate.existsAsFile())
+            return candidate;
+    return candidates.front();
+}
+
+juce::File RuntimeManager::sibilantModelFile()
+{
+    const auto relative = juce::String("sibilants/sasha-v1-experimental/native-model.json");
+    const std::array candidates {
+        modelsRoot().getChildFile(relative),
+        legacyRoot().getChildFile("models").getChildFile(relative),
+        juce::File::getSpecialLocation(juce::File::currentExecutableFile)
+            .getParentDirectory().getParentDirectory().getChildFile("Resources/sibilant-model/native-model.json"),
+        juce::File::getSpecialLocation(juce::File::currentExecutableFile)
+            .getParentDirectory().getChildFile("models").getChildFile(relative)
+    };
+    for (const auto& candidate : candidates)
+        if (candidate.existsAsFile()) return candidate;
+    return candidates.front();
+}
+
 juce::File RuntimeManager::boundaryCheckpointFile()
 {
     constexpr auto checkpointName = "sasha_manual_boundary_tcn.pt";

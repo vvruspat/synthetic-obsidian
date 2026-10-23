@@ -40,6 +40,8 @@ public:
     static juce::File soulXModelFile();
     static juce::File soulXSingerModelFile();
     static juce::File rmvpeModelFile();
+    static juce::File noteBoundaryModelFile();
+    static juce::File sibilantModelFile();
     static juce::File boundaryCheckpointFile();
     static juce::File boundaryNonVocalCheckpointFile();
     static juce::File backingTransformerModel();

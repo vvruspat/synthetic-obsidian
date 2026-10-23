@@ -1,0 +1,36 @@
+name: Native note annotator
+
+on:
+  pull_request:
+    paths:
+      - 'CMakeLists.txt'
+      - 'tools/native_note_annotator/**'
+      - 'tools/vocal_annotation_tool/Annotation*'
+      - '.github/workflows/native-note-annotator.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'CMakeLists.txt'
+      - 'tools/native_note_annotator/**'
+      - 'tools/vocal_annotation_tool/Annotation*'
+      - '.github/workflows/native-note-annotator.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, windows-2022]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build-native-note -DCMAKE_BUILD_TYPE=Release -DSYNTHETIC_OBSIDIAN_BUILD_TOOLS=OFF -DSYNTHETIC_OBSIDIAN_BUILD_NATIVE_ANNOTATOR=ON -DSYNTHETIC_OBSIDIAN_ANNOTATOR_TESTS=ON
+      - name: Build native app and checks
+        run: cmake --build build-native-note --config Release --target NativeNoteAnnotator NativeNoteAnnotatorTests --parallel 3
+      - name: Check analysis, editing and export
+        run: ctest --test-dir build-native-note/tools/native_note_annotator -C Release --output-on-failure

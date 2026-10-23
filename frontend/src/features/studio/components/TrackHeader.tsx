@@ -1,4 +1,5 @@
 import {
+  FolderOpenIcon,
   MicrophoneIcon,
   MusicalNoteIcon,
   SignalIcon,
@@ -12,7 +13,7 @@ import type {
   TrackLayerState,
   TrackName,
 } from "@/domain/studio";
-import { RangeInput, ToggleButton } from "@/ui";
+import { IconButton, RangeInput, ToggleButton } from "@/ui";
 
 type TrackHeaderProps = {
   depth?: number;
@@ -28,6 +29,7 @@ type TrackHeaderProps = {
   onToggleLayer?(layer: keyof TrackLayerState): void;
   selected: boolean;
   onSelect(additive: boolean): void;
+  onOpenFile(): void;
   onDelete?(): void;
 };
 
@@ -45,6 +47,7 @@ export function TrackHeader({
   onToggleLayer,
   selected,
   onSelect,
+  onOpenFile,
   onDelete,
 }: TrackHeaderProps) {
   const TrackIcon = depth || id === "Instrumental" ? SignalIcon : MicrophoneIcon;
@@ -135,6 +138,7 @@ export function TrackHeader({
         <span className="track-name">{name}</span>
         <div className="track-toggles">
           <ToggleButton
+            className="ui-compact-button"
             active={state.mute}
             onClick={() => onToggle("mute")}
             aria-label={`Mute ${name}`}
@@ -143,12 +147,18 @@ export function TrackHeader({
           </ToggleButton>
           <ToggleButton
             active={state.solo}
-            className={state.solo ? "solo" : ""}
+            className={`ui-compact-button ${state.solo ? "solo" : ""}`}
             onClick={() => onToggle("solo")}
             aria-label={`Solo ${name}`}
           >
             S
           </ToggleButton>
+          <IconButton
+            className="ui-compact-button track-open-button"
+            label={`Open audio file on ${name}`}
+            icon={FolderOpenIcon}
+            onClick={onOpenFile}
+          />
         </div>
         {volume !== undefined && onVolumeChange ? (
           <label

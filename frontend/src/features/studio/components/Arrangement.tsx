@@ -113,6 +113,7 @@ export function Arrangement({
       className="arrangement"
       ref={refs.arrangementScrollRef}
       onWheel={actions.handleTimelineWheel}
+      onScroll={actions.handleTimelineScroll}
     >
       <div
         className="timeline-content"
@@ -185,9 +186,7 @@ export function Arrangement({
             ))}
           </div>
           <div className="arrangement-track-section">
-            <div className="arrangement-add-toolbar">
-              <span>Drop audio files to import at the playhead</span>
-            </div>
+            <div className="arrangement-add-toolbar" />
             <div
               className="arrangement-track-stack"
               ref={refs.arrangementTrackScrollRef}
@@ -248,9 +247,6 @@ export function Arrangement({
                         onDelete={() => actions.removeArrangementClip(track.id, clip.id)}
                       />
                     ))}
-                    {track.clips.length === 0 && !depth ? (
-                      <span className="empty-track-hint">Drop audio files or use File Import</span>
-                    ) : null}
                     {depth > 0 && !layerState?.notesMuted ? (
                       <div className="harmony-notes">
                         {(content?.clips ?? []).map((clip) => (

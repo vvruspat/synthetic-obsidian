@@ -789,6 +789,12 @@ export function useStudioController(
     }
   };
 
+  const handleTimelineScroll = () => {
+    const scroller = arrangementScrollRef.current;
+    // Backing controls stick inside the nested vertical scroller, so account for the outer timeline.
+    scroller?.style.setProperty("--timeline-scroll-left", `${scroller.scrollLeft}px`);
+  };
+
   const handlePianoWheel = (event: WheelEvent<HTMLDivElement>) => {
     if (event.altKey) {
       event.preventDefault();
@@ -1411,6 +1417,7 @@ export function useStudioController(
           type: "import-audio",
           track: selectedTracks.length === 1 ? selectedTracks[0] : "",
         }),
+      importTrackAudio: (track: string) => bridge.send({ type: "import-track-audio", track }),
       importDroppedAudio: (files: string[], track: string, start: number) =>
         bridge.send({ type: "import-dropped-audio", track, start, files }),
       toggleTrackCollapsed: (track: string, collapsed: boolean) =>
@@ -1444,6 +1451,7 @@ export function useStudioController(
       syncVerticalScroll,
       syncTrackScroll,
       handleTimelineWheel,
+      handleTimelineScroll,
       handlePianoWheel,
       startPlayheadDrag,
       startClipTool,

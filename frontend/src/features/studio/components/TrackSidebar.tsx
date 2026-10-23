@@ -1,5 +1,4 @@
 import {
-  ArrowDownTrayIcon,
   ArrowsRightLeftIcon,
   ChevronDoubleDownIcon,
   ChevronDoubleUpIcon,
@@ -19,7 +18,7 @@ import {
   pitchToTop,
   WHITE_KEY_PITCHES,
 } from "@/features/studio/lib/pitch";
-import { RangeInput } from "@/ui";
+import { IconButton, RangeInput } from "@/ui";
 
 export function TrackSidebar({ controller }: { controller: StudioController }) {
   const {
@@ -63,6 +62,7 @@ export function TrackSidebar({ controller }: { controller: StudioController }) {
       }
       selected={selectedTracks.includes(id)}
       onSelect={(additive) => actions.selectTrack(id, additive)}
+      onOpenFile={() => actions.importTrackAudio(id)}
       onDelete={id === "Instrumental" ? undefined : onDelete}
     />
   );
@@ -109,18 +109,12 @@ export function TrackSidebar({ controller }: { controller: StudioController }) {
       </div>
       <div className="sidebar-track-section">
         <div className="arrangement-add-toolbar sidebar-add-toolbar">
-          <button
-            type="button"
-            className="add-track-button"
-            aria-label="Add track"
-            title="Add track"
+          <IconButton
+            className="ui-compact-button"
+            label="Add track"
+            icon={PlusIcon}
             onClick={actions.addTrack}
-          >
-            <PlusIcon aria-hidden="true" />
-          </button>
-          <button type="button" onClick={actions.importAudio}>
-            <ArrowDownTrayIcon aria-hidden="true" /> File Import
-          </button>
+          />
         </div>
         <div
           className="sidebar-track-stack"

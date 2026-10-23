@@ -2162,7 +2162,7 @@ button {
   gap: 4px;
 }
 
-.track-header:has(.track-delete-button) .track-control-stack {
+.track-header:has(.track-delete-button) .track-name {
   padding-right: 20px;
 }
 
@@ -2259,33 +2259,13 @@ button {
 
 .track-toggles {
   display: flex;
+  align-items: center;
   gap: var(--ui-space-sm);
   pointer-events: auto;
 }
 
-.track-toggles button {
-  width: 32px;
-  height: 26px;
-  font-size: var(--ui-font-md);
-  cursor: pointer;
-  border: 1px solid rgba(66, 122, 192, 0.62);
-  border-radius: 5px;
-  background: linear-gradient(180deg, #102441, #071226);
-  box-shadow: inset 0 0 8px rgba(71, 135, 221, 0.15);
-}
-
-.track-toggles button:hover,
-.track-toggles button.selected {
-  color: var(--cyan);
-  border-color: #24aee7;
-  box-shadow:
-    inset 0 0 9px rgba(0, 180, 255, 0.27),
-    0 0 9px rgba(0, 177, 255, 0.16);
-}
-
-.track-toggles button.selected.solo {
-  color: #ffd84c;
-  border-color: #ffb72e;
+.track-open-button {
+  margin-left: auto;
 }
 
 .track-volume-control {
@@ -4903,10 +4883,10 @@ button {
     gap: 5px;
   }
 
-  .track-toggles button {
-    width: 27px;
-    height: 22px;
-    font-size: 11px;
+  .workspace {
+    --track-control-width: 27px;
+    --track-control-height: 22px;
+    --track-control-font-size: 11px;
   }
 }
 
@@ -4927,17 +4907,6 @@ button {
   background: #071222;
   border-bottom: 1px solid #193957;
   font-size: 11px;
-}
-.arrangement-add-toolbar > button {
-  color: #9ce7ff;
-  background: #10253d;
-  border: 1px solid #285572;
-  border-radius: 4px;
-  padding: 5px 10px;
-}
-.arrangement-add-toolbar > span {
-  color: #9baec5;
-  white-space: nowrap;
 }
 .arrangement-clip {
   position: absolute;
@@ -5059,22 +5028,6 @@ button {
   background: transparent;
   border: 0;
 }
-.sidebar-add-toolbar > button {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-.sidebar-add-toolbar svg {
-  width: 15px;
-  height: 15px;
-}
-.sidebar-add-toolbar .add-track-button {
-  padding: 3px 10px;
-}
-.sidebar-add-toolbar .add-track-button svg {
-  width: 22px;
-  height: 22px;
-}
 .track-header,
 .track-header.is-voice {
   background: #101a27;
@@ -5114,7 +5067,7 @@ button {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.track-header:has(.track-delete-button) .track-control-stack {
+.track-header:has(.track-delete-button) .track-name {
   padding-right: 18px;
 }
 .track-layer-toggle svg,
@@ -5172,7 +5125,7 @@ button {
 }
 .backing-group-actions {
   position: sticky;
-  left: 0;
+  left: var(--timeline-scroll-left, 0px);
   height: 100%;
   width: min(100%, calc(100vw - var(--sidebar-width) - var(--shell-horizontal-padding) - 2px));
   display: flex;
@@ -5197,15 +5150,6 @@ button {
 .backing-group-actions .backing-track-select summary {
   color: var(--track-color);
   border-color: color-mix(in srgb, var(--track-color) 45%, #243448);
-}
-.empty-track-hint {
-  position: sticky;
-  left: 16px;
-  display: inline-block;
-  margin: 28px 16px;
-  color: #748399;
-  font-size: 11px;
-  pointer-events: none;
 }
 .audio-lane.harmony-lane {
   background: color-mix(in srgb, var(--track-color) 5%, transparent);

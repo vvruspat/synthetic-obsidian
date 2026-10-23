@@ -6,7 +6,7 @@
   --violet: #ad29ff;
   --panel: rgba(3, 13, 31, 0.94);
   --border: rgba(16, 123, 221, 0.66);
-  --sidebar-width: clamp(128px, 11.55vw, 194px);
+  --sidebar-width: clamp(220px, 16vw, 260px);
   --ui-font-sm: 10px;
   --ui-font-md: 14px;
   --ui-icon-sm: 14px;

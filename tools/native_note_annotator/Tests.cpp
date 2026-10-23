@@ -147,6 +147,8 @@ void editingAndExportChecks()
     require(published.getChildFile(stem + ".notes.csv").loadFileAsString().contains("14400"), "CSV must contain sample positions");
     juce::File second;
     require(native_annotation::DatasetExport::write(document, metadata, audio, temporary, second).wasOk() && second != published, "Repeated exports must not overwrite");
+    // Windows cannot move the bundle while its audio file is open.
+    reader.reset();
     const auto moved = temporary.getChildFile("moved-bundle");
     require(published.moveFileTo(moved), "Could not move bundle");
     require(vocal_annotation::AnnotationJson::load(moved.getChildFile(stem + ".annotation.json"), restored).wasOk()

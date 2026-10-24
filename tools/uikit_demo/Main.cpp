@@ -79,8 +79,14 @@ private:
         target.getParentDirectory().createDirectory();
         const auto image = host_->createComponentSnapshot(host_->getLocalBounds(), true, static_cast<float>(snapshotScale_));
         juce::FileOutputStream stream(target);
-        if (!stream.openedOk() || !juce::PNGImageFormat().writeImageToStream(image, stream)) setApplicationReturnValue(1);
-        stream.flush(); quit();
+        // FileOutputStream opens existing files at the end. A snapshot replaces
+        // its previous PNG rather than appending another image to the file.
+        if (!stream.openedOk() || !stream.setPosition(0) || stream.truncate().failed()
+            || !juce::PNGImageFormat().writeImageToStream(image, stream))
+            setApplicationReturnValue(1);
+        stream.flush();
+        if (stream.getStatus().failed()) setApplicationReturnValue(1);
+        quit();
     }
     std::unique_ptr<Window> window_;
     Host* host_ = nullptr; // Owned by window_'s content component.

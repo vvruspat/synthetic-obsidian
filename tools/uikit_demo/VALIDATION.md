@@ -13,7 +13,7 @@
 
 The dedicated `Native UI kit` CI workflow builds and tests Windows, macOS and Linux, and exports a native screenshot on each platform. Its actual status is reported on the pull request; workflow configuration alone is not a passing result.
 
-AddressSanitizer verification is run separately from the normal Debug test executable; final results are recorded in the PR.
+The separate AddressSanitizer build passed all native tests on macOS (leak detection disabled). Snapshot overwrite was also verified by exporting twice to the same path and checking for a single PNG stream.
 
 ## Scope
 

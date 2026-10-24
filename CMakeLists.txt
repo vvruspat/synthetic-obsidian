@@ -2,7 +2,8 @@ cmake_minimum_required(VERSION 3.22)
 
 project(SyntheticObsidian VERSION 1.0.0)
 
-if(APPLE)
+option(SYNTHETIC_OBSIDIAN_UIKIT_ONLY "Configure only native UI kit, gallery and demo" OFF)
+if(APPLE AND NOT SYNTHETIC_OBSIDIAN_UIKIT_ONLY)
     # MLX 0.29.x is the oldest runtime in the first-test distribution.
     set(CMAKE_OSX_ARCHITECTURES "arm64" CACHE STRING "" FORCE)
     set(CMAKE_OSX_DEPLOYMENT_TARGET "15.0" CACHE STRING "" FORCE)
@@ -28,6 +29,18 @@ FetchContent_Declare(
     GIT_SHALLOW    TRUE
 )
 FetchContent_MakeAvailable(JUCE)
+
+# Standalone native UI kit can be built without frontend assets, audio, or ML.
+option(SYNTHETIC_OBSIDIAN_BUILD_UIKIT "Build the native UI kit and demonstration apps" ON)
+if(SYNTHETIC_OBSIDIAN_BUILD_UIKIT OR SYNTHETIC_OBSIDIAN_UIKIT_ONLY)
+    include(CTest)
+    add_subdirectory(Source/uikit)
+    add_subdirectory(Source/editor_ui)
+    add_subdirectory(tools/uikit_demo)
+endif()
+if(SYNTHETIC_OBSIDIAN_UIKIT_ONLY)
+    return()
+endif()
 
 option(SYNTHETIC_OBSIDIAN_BUILD_TOOLS "Build offline Synthetic Obsidian tools" ON)
 option(SYNTHETIC_OBSIDIAN_BUILD_NATIVE_ANNOTATOR "Build the native JUCE note annotator" ${SYNTHETIC_OBSIDIAN_BUILD_TOOLS})

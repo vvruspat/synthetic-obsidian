@@ -122,6 +122,65 @@ void testInstrumentalTrack(const juce::File& directory, const juce::File& audio)
     require(document.tracks.size() == 3 && document.tracks.front().clips.empty(),
             "restoring instrumental never resurrects a deleted clip");
 }
+void testNoteGainPlayback(const juce::File& audio)
+{
+    auto document = fixture(audio);
+    document.duration = 84.0;
+    document.tracks.front().clips = {
+        { "one", "First", audio, 81.5, 0.0, 0.5 },
+        { "two", "Second", audio, 81.5, 0.0, 0.5 },
+        { "pitch-preview", "Preview", audio, 82.0, 0.0, 0.5 }
+    };
+    document.notes.clear();
+    auto addGain = [&](const char* clipId, double start, double end, double gainDb)
+    {
+        NoteBlock note;
+        note.clipId = clipId;
+        note.start = note.voicedStart = start;
+        note.end = note.voicedEnd = end;
+        note.gainDb = gainDb;
+        document.notes.push_back(note);
+    };
+    const auto doubleGainDb = 20.0 * std::log10(2.0);
+    addGain("one", 81.52, 81.98, doubleGainDb);
+    addGain("one", 81.55, 81.60, -doubleGainDb);
+    addGain("two", 81.60, 81.80, -doubleGainDb);
+    addGain("one", 81.70, 81.90, doubleGainDb);
+    addGain("unrelated", 82.10, 82.30, doubleGainDb);
+
+    ArrangementPlayback playback;
+    playback.prepare(48000.0);
+    playback.request(document);
+    playback.setPlaying(true);
+    juce::AudioBuffer<float> block(2, 1024);
+    auto sample = [&](double time)
+    {
+        block.clear();
+        playback.seek(time);
+        playback.process({ &block, 0, 64 });
+        return block.getSample(0, 0);
+    };
+    for (int attempt = 0; attempt < 200; ++attempt)
+    {
+        if (sample(81.65) > 0.0001f) break;
+        juce::Thread::sleep(5);
+    }
+    require(std::abs(sample(81.65) - 0.25f) < 0.0001f,
+            "late playback keeps a long gain after a nested gain ends, separately for each clip");
+    require(std::abs(sample(81.75) - 0.45f) < 0.0001f, "overlapping note gains multiply");
+    require(std::abs(sample(81.99) - 0.20f) < 0.0001f, "expired gains do not affect later audio");
+    require(std::abs(sample(81.57) - 0.20f) < 0.0001f, "backward seek restores nested gains");
+    require(std::abs(sample(81.5225) - 0.25f) < 0.0001f, "note gain retains its five millisecond fade");
+    require(std::abs(sample(82.15) - 0.20f) < 0.0001f, "pitch preview applies gains across clip IDs");
+
+    playback.setLoop(true, 81.65, 81.75);
+    playback.seek(81.745);
+    block.clear();
+    playback.process({ &block, 0, 1024 });
+    require(std::abs(block.getSample(0, 0) - 0.45f) < 0.0001f
+                && std::abs(block.getSample(0, 1023) - 0.25f) < 0.0001f,
+            "gain lookup resets correctly when a loop wraps within an audio block");
+}
 }
 int main()
 {
@@ -134,6 +193,7 @@ int main()
         testAudioFileTransfer(directory);
         const auto audio = makeAudio(directory);
         testInstrumentalTrack(directory, audio);
+        testNoteGainPlayback(audio);
         auto document = fixture(audio);
         const auto render = directory.getChildFile("render.wav");
         require(ArrangementPlayback::renderTrack(document, "Voice Main", render).wasOk(), "render arrangement");

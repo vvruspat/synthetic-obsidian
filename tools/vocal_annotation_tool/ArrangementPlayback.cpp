@@ -106,7 +106,25 @@ std::unique_ptr<ArrangementPlayback::Plan> ArrangementPlayback::build(
         track.phases.resize(track.notes.size(), 0.0);
         std::sort(track.notes.begin(), track.notes.end(), [](const auto& a, const auto& b) { return a.start < b.start; });
         for (const auto& placement : source.clips)
-            track.clips.push_back({ placement, readAudio(placement.audioFile, cache, error) });
+        {
+            Clip clip;
+            clip.placement = placement;
+            clip.audio = readAudio(placement.audioFile, cache, error);
+            // Resolve clip IDs and dB conversions on the worker, never per audio sample.
+            for (const auto& note : track.notes)
+            {
+                const auto gain = juce::Decibels::decibelsToGain(
+                    static_cast<float>(juce::jlimit(-24.0, 12.0, note.gainDb)));
+                if (juce::approximatelyEqual(gain, 1.0f) || note.start >= placement.start + placement.duration
+                    || note.end <= placement.start
+                    || (note.clipId != placement.id && placement.id != "pitch-preview"))
+                    continue;
+                clip.gains.push_back({ note.start, note.end, gain });
+                clip.gainEndTimes.push_back(juce::jmax(
+                    note.end, clip.gainEndTimes.empty() ? note.end : clip.gainEndTimes.back()));
+            }
+            track.clips.push_back(std::move(clip));
+        }
         plan->tracks.push_back(std::move(track));
     }
     return plan;
@@ -163,6 +181,12 @@ void ArrangementPlayback::mix(Plan& plan, juce::AudioBuffer<float>& buffer,
                 if (! clip.audio || clip.placement.start >= time + count / sampleRate
                     || clip.placement.start + clip.placement.duration <= time) continue;
                 const auto& source = clip.audio->samples;
+                // These bounds include only gains overlapping this block, even after a seek/loop.
+                const auto firstGain = static_cast<size_t>(std::upper_bound(
+                    clip.gainEndTimes.begin(), clip.gainEndTimes.end(), time) - clip.gainEndTimes.begin());
+                const auto lastGain = static_cast<size_t>(std::lower_bound(
+                    clip.gains.begin(), clip.gains.end(), time + count / sampleRate,
+                    [](const auto& gain, double end) { return gain.start < end; }) - clip.gains.begin());
                 for (int i = 0; i < count; ++i)
                 {
                     const auto relative = time + i / sampleRate - clip.placement.start;
@@ -174,12 +198,13 @@ void ArrangementPlayback::mix(Plan& plan, juce::AudioBuffer<float>& buffer,
                     const auto fraction = static_cast<float>(sourcePosition - index);
                     auto noteGain = 1.0f;
                     const auto absoluteTime = time + i / sampleRate;
-                    for (const auto& note : track.notes)
+                    for (auto gainIndex = firstGain; gainIndex < lastGain; ++gainIndex)
                     {
-                        if (note.start > absoluteTime) break;
-                        if ((note.clipId != clip.placement.id && clip.placement.id != "pitch-preview") || absoluteTime >= note.end) continue;
-                        const auto edge = juce::jlimit(0.0, 1.0, juce::jmin(absoluteTime - note.start, note.end - absoluteTime) / 0.005);
-                        noteGain *= 1.0f + (juce::Decibels::decibelsToGain(static_cast<float>(juce::jlimit(-24.0, 12.0, note.gainDb))) - 1.0f) * static_cast<float>(edge);
+                        const auto& gain = clip.gains[gainIndex];
+                        if (absoluteTime < gain.start || absoluteTime >= gain.end) continue;
+                        const auto edge = juce::jlimit(0.0, 1.0,
+                            juce::jmin(absoluteTime - gain.start, gain.end - absoluteTime) / 0.005);
+                        noteGain *= 1.0f + (gain.gain - 1.0f) * static_cast<float>(edge);
                     }
                     const auto fade = static_cast<float>(juce::jlimit(0.0, 1.0,
                         juce::jmin(relative, clip.placement.duration - relative) / 0.003));

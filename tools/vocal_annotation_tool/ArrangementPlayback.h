@@ -31,7 +31,18 @@ private:
         double sampleRate = 44100.0;
         juce::var waveform;
     };
-    struct Clip { ArrangementClip placement; std::shared_ptr<const Audio> audio; };
+    struct NoteGain
+    {
+        double start = 0.0, end = 0.0;
+        float gain = 1.0f;
+    };
+    struct Clip
+    {
+        ArrangementClip placement;
+        std::shared_ptr<const Audio> audio;
+        std::vector<NoteGain> gains;
+        std::vector<double> gainEndTimes; // Prefix maxima, for skipping elapsed gain regions.
+    };
     struct Track
     {
         bool audioAudible = false;

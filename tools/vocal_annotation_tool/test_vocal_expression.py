@@ -26,6 +26,30 @@ def midi_to_hz(midi: np.ndarray | float) -> np.ndarray:
 
 
 class ExpressionAnalysisTests(unittest.TestCase):
+    def test_explicit_backing_curves_survive_automatic_expression_and_manual_scaling(self) -> None:
+        times = np.arange(0.0, 3.2, 1.0 / F0_RATE)
+        source_f0 = np.full(len(times), 220.0, dtype=np.float32)
+        source_f0[70:74] = 0.0
+        for scale in (0.0, 0.5, 2.0):
+            with self.subTest(scale=scale):
+                notes = []
+                expected = np.zeros(len(times))
+                for start, end, pitch in ((0.0, 1.6, 64), (1.6, 3.2, 67)):
+                    points = np.arange(start, end + 0.01, 1.0 / F0_RATE)
+                    offsets = 0.15 * (points - start) + 0.3 * np.sin(2 * np.pi * 5.0 * points)
+                    curve = pitch + scale * offsets
+                    notes.append({
+                        "id": str(pitch), "start": start, "end": end, "pitch": pitch,
+                        "preserve_pitch_curve": True,
+                        "curve": [{"time": float(t), "midi": float(m)} for t, m in zip(points, curve)],
+                    })
+                    active = (times >= start) & (times < end)
+                    expected[active] = np.interp(times[active], points, curve)
+                target, _ = build_target_f0(notes, source_f0, f0_rate=F0_RATE)
+                voiced = source_f0 > 0
+                np.testing.assert_allclose(hz_to_midi(target[voiced]), expected[voiced], rtol=0, atol=0.00005)
+                np.testing.assert_array_equal(target[~voiced], 0.0)
+
     def test_recovers_vibrato_rate_and_depth(self) -> None:
         times = np.arange(0.0, 5.0, 1.0 / F0_RATE)
         midi = 57.0 + 0.32 * np.sin(2.0 * np.pi * 5.8 * times)

@@ -21,6 +21,7 @@ target_sources(VocalAnnotationTool
     PRIVATE
         Main.cpp
         AnnotationDocument.cpp
+        BackingVocalNotes.cpp
         ArrangementModel.cpp
         ArrangementPlayback.cpp
         ClipPitchAnalysis.cpp
@@ -173,7 +174,7 @@ if(SYNTHETIC_OBSIDIAN_ARRANGEMENT_TESTS)
     juce_add_console_app(ArrangementTests PRODUCT_NAME "Arrangement tests")
     juce_generate_juce_header(ArrangementTests)
     target_sources(ArrangementTests PRIVATE ArrangementTests.cpp ArrangementModel.cpp ArrangementPlayback.cpp
-        AnnotationDocument.cpp AnnotationJson.cpp ${CMAKE_SOURCE_DIR}/Source/web/AudioFileTransfer.cpp)
+        AnnotationDocument.cpp AnnotationJson.cpp BackingVocalNotes.cpp ${CMAKE_SOURCE_DIR}/Source/web/AudioFileTransfer.cpp)
     target_compile_definitions(ArrangementTests PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
     target_link_libraries(ArrangementTests PRIVATE juce::juce_audio_utils juce::juce_gui_extra
         juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)

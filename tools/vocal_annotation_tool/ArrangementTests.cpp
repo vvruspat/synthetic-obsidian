@@ -1,5 +1,6 @@
 #include "ArrangementPlayback.h"
 #include "AnnotationJson.h"
+#include "BackingVocalNotes.h"
 #include "../../Source/web/AudioFileTransfer.h"
 #include <algorithm>
 #include <cmath>
@@ -122,6 +123,227 @@ void testInstrumentalTrack(const juce::File& directory, const juce::File& audio)
     require(document.tracks.size() == 3 && document.tracks.front().clips.empty(),
             "restoring instrumental never resurrects a deleted clip");
 }
+void testBackingPitchCurves(const juce::File& directory)
+{
+    NoteBlock lead;
+    lead.id = "source-clip:lead";
+    lead.start = lead.voicedStart = 1.0;
+    lead.end = lead.voicedEnd = 2.0;
+    lead.pitch = 60; lead.pitchExact = 60.2; lead.syllableId = "word-a";
+    lead.curve = { {1.0, 60.2, 0.8}, {1.5, 60.5, 0.9}, {2.0, 59.85, 1.0} };
+    auto other = lead;
+    other.id = "other"; other.start = other.voicedStart = 3.0; other.end = other.voicedEnd = 4.0;
+    other.pitch = 67; other.pitchExact = 67.1; other.syllableId = "word-b";
+    other.curve = { {3.0, 67.1, 1.0}, {4.0, 66.8, 1.0} };
+    const auto sources = leadNotesForBackingGeneration({lead, other});
+    require(sources.size() == 2 && sources[0].curve.size() == 3, "retain lead contour before model generation");
+    const auto response = juce::JSON::parse(R"({"notes":[
+        {"id":"back-b","source_lead_ref":"lead_0002","start":3,"end":4,"midi_note":55},
+        {"id":"back-a","source_lead_ref":"lead_0001","start":1,"end":2,"midi_note":64},
+        {"id":"no-source","source_lead_ref":"missing","start":5,"duration":1,"midi_note":72}
+    ]})");
+    juce::String error;
+    auto notes = parseBackingNotes(*response.getDynamicObject(), sources, error);
+    require(error.isEmpty() && notes.size() == 3, "parse generated notes in arbitrary result order");
+    require(std::abs(notes[0].curve[0].midi - 55.1) < 1e-9, "resolve normalized worker references independently of result order and document IDs");
+    require(notes[1].curve.size() == 3 && std::abs(notes[1].curve[1].midi - 64.5) < 1e-9,
+            "transpose lead expression relative to the generated note");
+    require(std::abs(notes[1].curve[1].time - 1.5) < 1e-9 && std::abs(notes[1].curve[0].confidence - 0.8) < 1e-9,
+            "inherit contour timing and confidence");
+    require(notes[1].flags.contains("explicit_pitch_curve"), "inherited contour takes precedence in audio rendering");
+    require(notes[2].end == 6.0 && notes[2].curve.size() == 2 && std::abs(notes[2].curve[0].midi - 72.0) < 1e-9
+            && ! notes[2].flags.contains("explicit_pitch_curve"), "unknown sources keep the legacy flat fallback");
+    require(lead.curve[1].midi == 60.5 && sources[0].curve[1].midi == 60.5, "generation does not mutate source curves");
+
+    auto plateau = lead;
+    plateau.id = "plateau"; plateau.start = plateau.voicedStart = 2.0; plateau.end = plateau.voicedEnd = 2.4;
+    plateau.curve = { {2.1, 60.3, 1.0}, {2.4, 60.0, 1.0} };
+    const auto merged = leadNotesForBackingGeneration({lead, plateau});
+    require(merged.size() == 1 && merged[0].curve.size() == 5 && merged[0].curve.front().time == 1.0,
+            "merging syllable plateaus retains both the initial and trailing contours");
+
+    auto shiftedResponse = response.clone();
+    auto* shifted = shiftedResponse["notes"][1].getDynamicObject();
+    shifted->setProperty("start", 10.0); shifted->setProperty("end", 12.0);
+    const auto shiftedNotes = parseBackingNotes(*shiftedResponse.getDynamicObject(), sources, error);
+    require(shiftedNotes[1].curve[1].time == 11.0, "remap expression when target timing differs");
+
+    auto sparse = lead;
+    sparse.curve = { {1.5, 60.4, 0.7}, {0.5, 30.0, 1.0}, {1.7, std::numeric_limits<double>::quiet_NaN(), 1.0} };
+    const auto sparseNotes = parseBackingNotes(*response.getDynamicObject(), leadNotesForBackingGeneration({sparse}), error);
+    require(sparseNotes[1].curve.size() == 3 && sparseNotes[1].curve.front().time == 1.0
+            && sparseNotes[1].curve.back().time == 2.0, "filter invalid/out-of-note points and extend sparse contours to boundaries");
+
+    auto noisy = lead;
+    noisy.curve.clear();
+    for (int index = 0; index <= 100; ++index)
+    {
+        const auto time = 1.0 + static_cast<double>(index) * 0.01;
+        const auto expression = 0.2 * (time - 1.0) + 0.35 * std::sin(2.0 * juce::MathConstants<double>::pi * 5.0 * time);
+        const auto outlier = index == 0 || index == 100 || (index >= 30 && index <= 72);
+        noisy.curve.push_back({time, outlier ? (index == 0 ? 40.8 : 71.213) : 60.0 + expression, 0.99});
+    }
+    const auto clean = leadNotesForBackingGeneration({noisy});
+    require(clean[0].curve.size() == noisy.curve.size(), "repair detector dropouts without decimating vibrato");
+    for (size_t index = 0; index < noisy.curve.size(); ++index)
+    {
+        const auto original = noisy.curve[index].midi;
+        const auto repaired = clean[0].curve[index].midi;
+        require(std::abs(repaired - 60.0) < 0.6, "high-confidence harmonic plateaus and boundary spikes are not expression");
+        if (std::abs(original - 60.0) < 3.0)
+            require(std::abs(repaired - original) < 1e-9, "preserve reliable drift and vibrato samples exactly");
+    }
+    require(noisy.curve[30].midi > 71.0, "cleaning does not rewrite the source analysis");
+    noisy.flags.add("explicit_pitch_curve");
+    require(leadNotesForBackingGeneration({noisy})[0].curve[30].midi > 71.0,
+            "deliberately authored large pitch moves are not filtered");
+    plateau.pitch = 72; plateau.pitchExact = 72.0;
+    plateau.curve = { {2.1, 72.3, 1.0}, {2.4, 72.0, 1.0} };
+    require(leadNotesForBackingGeneration({lead, plateau})[0].curve.back().midi > 71.0,
+            "filter each source note before merging to preserve real melodic changes");
+    auto unusable = lead;
+    unusable.curve = { {1.0, 40.0, 0.99}, {2.0, 83.0, 0.99} };
+    const auto fallback = parseBackingNotes(*response.getDynamicObject(), leadNotesForBackingGeneration({unusable}), error);
+    require(!fallback[1].flags.contains("explicit_pitch_curve") && std::abs(fallback[1].curve[0].midi - 64.0) < 1e-9,
+            "entirely unreliable source curves use the flat fallback");
+
+    AnnotationDocument document;
+    document.duration = 6.0;
+    BackingVocalTrack track;
+    track.id = "backing"; track.styleId = "THIRD_UP"; track.styleName = "Third Above";
+    track.notes = notes;
+    document.backingTracks.push_back(track);
+    const auto file = directory.getChildFile("backing-curves.json");
+    require(AnnotationJson::save(document, file).wasOk(), "save inherited backing contours");
+    AnnotationDocument loaded;
+    require(AnnotationJson::load(file, loaded).wasOk(), "load inherited backing contours");
+    const auto& restored = loaded.backingTracks[0].notes[1];
+    require(restored.curve.size() == 3 && std::abs(restored.curve[1].midi - 64.5) < 1e-9
+            && restored.flags.contains("explicit_pitch_curve"), "project round trip preserves contour and render priority");
+}
+
+void testBackingPitchTransitions()
+{
+    const auto pair = []
+    {
+        std::vector<NoteBlock> notes(2);
+        for (size_t index = 0; index < notes.size(); ++index)
+        {
+            auto& note = notes[index];
+            note.id = "note-" + juce::String(static_cast<int>(index));
+            note.clipId = "one-clip";
+            note.start = note.voicedStart = static_cast<double>(index);
+            note.end = note.voicedEnd = note.start + 1.0;
+            note.pitch = 61 + static_cast<int>(index) * 2;
+            note.pitchExact = static_cast<double>(note.pitch);
+            note.flags.add("explicit_pitch_curve");
+            for (int sample = 0; sample <= 100; ++sample)
+            {
+                const auto time = note.start + static_cast<double>(sample) * 0.01;
+                auto offset = 0.3 * std::sin(2.0 * juce::MathConstants<double>::pi * 5.0 * time);
+                if (index == 0 && sample >= 95) offset = -1.6;
+                if (index == 1 && sample < 15) offset = 2.43 - static_cast<double>(sample) * 0.13;
+                note.curve.push_back({time, note.pitchExact + offset, 0.95});
+            }
+        }
+        return notes;
+    };
+    auto notes = pair();
+    const auto original = notes;
+    require(repairBackingPitchTransitions(notes) == 2, "repair opposing tail and attack excursions on an upward step");
+    for (size_t index = 0; index < notes.size(); ++index)
+    {
+        const auto& note = notes[index];
+        require(note.id == original[index].id && std::abs(note.start - original[index].start) < 1e-12
+                    && std::abs(note.end - original[index].end) < 1e-12
+                    && note.pitch == original[index].pitch, "boundary repair does not move or repitch notes");
+        for (const auto& point : note.curve)
+        {
+            const auto distance = index == 0 ? note.end - point.time : point.time - note.start;
+            if (distance >= 0.0 && distance <= 0.08)
+                require(point.midi >= 60.0 - 1e-7 && point.midi <= 64.0 + 1e-7, "allow at most one semitone outside the transition corridor");
+        }
+        for (const auto& point : original[index].curve)
+        {
+            const auto distance = index == 0 ? note.end - point.time : point.time - note.start;
+            if (distance < 0.22) continue;
+            const auto found = std::find_if(note.curve.begin(), note.curve.end(), [&](const auto& value) { return std::abs(value.time - point.time) < 1e-9; });
+            require(found != note.curve.end() && std::abs(found->midi - point.midi) < 1e-9, "sustained drift and vibrato are unchanged");
+        }
+    }
+    require(repairBackingPitchTransitions(notes) == 0, "render retries do not accumulate boundary corrections");
+    require(std::abs(notes[0].curve.back().midi - notes[1].curve.front().midi) < 1e-9,
+            "a repaired connected boundary has no instantaneous F0 jump");
+    const auto shoulder = std::find_if(notes[1].curve.begin(), notes[1].curve.end(), [](const auto& point)
+    { return std::abs(point.time - 1.10) < 1e-9; });
+    require(shoulder != notes[1].curve.end() && shoulder->midi > 63.0 && shoulder->midi < 63.8,
+            "reduce the excursion proportionally instead of clipping the attack to a flat ceiling");
+    auto lastPitch = -1.0;
+    for (const auto& note : notes)
+        for (const auto& point : note.curve)
+            if (point.time >= 0.92 && point.time <= 1.08)
+            {
+                require(point.midi >= lastPitch - 1e-7, "the repaired upward transition is monotonic through the boundary");
+                lastPitch = point.midi;
+            }
+
+    auto down = pair();
+    for (auto& note : down)
+    {
+        note.pitchExact = 124.0 - note.pitchExact;
+        note.pitch = juce::roundToInt(note.pitchExact);
+        for (auto& point : note.curve) point.midi = 124.0 - point.midi;
+    }
+    require(repairBackingPitchTransitions(down) == 2, "descending steps have symmetric limits");
+    for (size_t index = 0; index < notes.size(); ++index)
+    {
+        require(down[index].curve.size() == notes[index].curve.size(), "symmetric repairs keep sampling geometry");
+        for (size_t sample = 0; sample < notes[index].curve.size(); ++sample)
+            require(std::abs(down[index].curve[sample].midi - (124.0 - notes[index].curve[sample].midi)) < 1e-8,
+                    "repair direction follows the generated melody");
+    }
+    auto gentle = pair();
+    for (auto& note : gentle)
+    {
+        note.pitch = 61; note.pitchExact = 61.0;
+        for (auto& point : note.curve)
+            point.midi = note.pitchExact + 0.99 * std::sin(2.0 * juce::MathConstants<double>::pi * 5.0 * point.time);
+    }
+    require(repairBackingPitchTransitions(gentle) == 0, "preserve an already continuous pitch curve and normal vibrato exactly");
+    auto cleanStep = pair();
+    for (auto& note : cleanStep)
+        for (auto& point : note.curve)
+            point.midi = note.pitchExact + 0.3 * std::sin(2.0 * juce::MathConstants<double>::pi * 5.0 * point.time);
+    require(repairBackingPitchTransitions(cleanStep) == 2, "join adjacent notes even without an excessive excursion");
+    require(std::abs(cleanStep[0].curve.back().midi - cleanStep[1].curve.front().midi) < 1e-9,
+            "ordinary note steps also have a shared continuous F0 curve");
+    require(repairBackingPitchTransitions(cleanStep) == 0, "ordinary smooth joins remain stable on render retries");
+
+    auto disconnected = pair();
+    disconnected[1].start += 0.2;
+    require(repairBackingPitchTransitions(disconnected) == 0, "do not connect across a pause");
+    disconnected = pair(); disconnected[1].start -= 0.2;
+    require(repairBackingPitchTransitions(disconnected) == 0, "do not connect overlapping voices");
+    disconnected = pair(); disconnected[1].clipId = "another-clip";
+    require(repairBackingPitchTransitions(disconnected) == 0, "do not connect independent clips");
+
+    auto shortNotes = pair();
+    for (auto& note : shortNotes)
+    {
+        const auto start = note.start;
+        note.start = note.voicedStart = start * 0.08;
+        note.end = note.voicedEnd = note.start + 0.08;
+        for (auto& point : note.curve) point.time *= 0.08;
+    }
+    require(repairBackingPitchTransitions(shortNotes) == 2, "short notes get bounded non-overlapping edge windows");
+    require(repairBackingPitchTransitions(shortNotes) == 0, "short-note repairs are stable on repeated renders");
+    auto sparse = pair();
+    for (auto& point : sparse[0].curve) point.midi = sparse[0].pitchExact;
+    sparse[1].curve = {{1.0, 63.2, 1.0}, {1.07, 63.5, 1.0}, {1.09, 65.0, 1.0}, {2.0, 63.0, 1.0}};
+    require(repairBackingPitchTransitions(sparse) == 2, "detect an interpolated excursion at the guard edge of a sparse contour");
+    require(repairBackingPitchTransitions(sparse) == 0, "interpolated guard extrema are included in proportional repair");
+}
+
 void testNativeNoteTransform()
 {
     NoteBlock note;
@@ -219,6 +441,8 @@ int main()
     directory.createDirectory();
     try
     {
+        testBackingPitchCurves(directory);
+        testBackingPitchTransitions();
         testNativeNoteTransform();
         testAudioFileTransfer(directory);
         const auto audio = makeAudio(directory);

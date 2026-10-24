@@ -77,9 +77,24 @@ void drawIcon(juce::Graphics& g, Icon icon, juce::Rectangle<float> bounds, juce:
                 path.addRoundedRectangle(4.0f + static_cast<float>(x) * 10.0f, 4.0f + static_cast<float>(y) * 10.0f, 6, 6, 1.5f);
             break;
         case Icon::logo:
-            path.addTriangle(6, 2, 0, 12, 11, 12); path.addTriangle(8, 1, 14, 11, 23, 11);
-            path.addTriangle(24, 13, 18, 23, 13, 13); path.addTriangle(16, 24, 10, 14, 1, 14);
-            fill = true; break;
+        {
+            // Match the faceted signal monogram in distribution/macos-arm64/Logo.svg.
+            const auto facet = [&](std::initializer_list<juce::Point<float>> points, juce::uint32 colour)
+            {
+                juce::Path face;
+                auto point = points.begin(); face.startNewSubPath(*point++);
+                for (; point != points.end(); ++point) face.lineTo(*point);
+                face.closeSubPath();
+                g.setColour(juce::Colour(colour).withMultipliedAlpha(ink.getFloatAlpha()));
+                g.fillPath(face);
+            };
+            facet({ {12, 1}, {21, 6}, {21, 9}, {14, 9}, {10.5f, 14.5f}, {3, 14.5f}, {3, 6} }, 0xffbfd3cd);
+            facet({ {12, 1}, {21, 6}, {14, 9}, {10.5f, 9}, {3, 6} }, 0xffdde8df);
+            facet({ {3, 6}, {10.5f, 9}, {10.5f, 14.5f}, {3, 14.5f} }, 0xff829a9b);
+            facet({ {15, 11}, {21, 11}, {21, 18}, {12, 23}, {3, 18}, {3, 16.5f}, {11.5f, 16.5f} }, 0xff718a93);
+            facet({ {15, 11}, {21, 11}, {21, 18}, {12, 23}, {12, 16} }, 0xffa9bfba);
+            return;
+        }
         case Icon::close: line(5, 5, 19, 19); line(19, 5, 5, 19); break;
         case Icon::check: path.startNewSubPath(4, 12); path.lineTo(9, 17); path.lineTo(20, 6); break;
         case Icon::undo:

@@ -127,9 +127,15 @@ void TransportBar::paint(juce::Graphics& g)
     g.setColour(ui::colour(ui::tokens::border));
     g.drawHorizontalLine(getHeight() - 1, 0.0f, static_cast<float>(getWidth()));
     auto brand = brandBounds_;
-    ui::drawIcon(g, ui::Icon::logo, brand.removeFromLeft(30).toFloat().reduced(3.0f), ui::colour(ui::tokens::muted));
-    brand.removeFromLeft(8);
-    text(g, "Obsidian", brand, ui::tokens::fontTitle);
+    ui::drawIcon(g, ui::Icon::logo, brand.removeFromLeft(32).toFloat().withSizeKeepingCentre(30.0f, 30.0f), ui::colour(ui::tokens::text));
+    brand.removeFromLeft(7);
+    auto wordmark = brand.withSizeKeepingCentre(brand.getWidth(), 34);
+    g.setColour(ui::colour(ui::tokens::muted));
+    g.setFont(ui::font(9.0f).withExtraKerningFactor(0.14f));
+    g.drawText("SYNTHETIC", wordmark.removeFromTop(13), juce::Justification::centredLeft);
+    g.setColour(ui::colour(ui::tokens::text));
+    g.setFont(ui::font(16.0f));
+    g.drawText("OBSIDIAN", wordmark, juce::Justification::centredLeft);
     text(g, projectTitle_, titleBounds_);
     text(g, getPositionText(), positionBounds_, 16.0f);
     const auto wholeSeconds = static_cast<int>(seconds_);

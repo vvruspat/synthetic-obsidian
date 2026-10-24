@@ -638,7 +638,7 @@ public:
         for (auto* child : std::initializer_list<juce::Component*> { &ruler_, &tempo_, &signature_, &chords_, &global_, &addTrack_, &arrangementPlayhead_, &musicalEvents_, &cycleOverlay_ }) arrangement_.addAndMakeVisible(child);
         toolbar_.setComponentID("studio.pitchToolbar");
         transport_.setComponentID("studio.transport"); ruler_.setComponentID("studio.ruler"); lowerRuler_.setComponentID("studio.pitchRuler"); pitch_.setComponentID("studio.pitch");
-        transport_.setProjectTitle("Obsidian"); transport_.setRecordingAvailable(false);
+        transport_.setProjectTitle("Untitled"); transport_.setRecordingAvailable(false);
         transport_.setProjectActions({ "New project", "Open project...", "Save project", "Import vocal audio...", "Import instrumental...", "Load annotation JSON...", "Load lyrics...", "Analyze selected track", "Analyze AI parts", "Generate backing", "Render backing audio", "Undo", "Redo", "Export all tracks...", "Export MIDI...", "Validate", "Audio and voice settings...", "Set loop start at playhead", "Set loop end at playhead", "Loop entire project", "File Import...", "Voice Lab...", "Note actions..." });
         transport_.onProjectAction = [this](int index)
         {
@@ -1252,7 +1252,7 @@ public:
             duration_ = std::max(0.0, number(project_["timelineDurationSeconds"]));
             arrangement_.tempo = number(project_["tempo"], 120.0); arrangement_.meter = project_["meter"].toString();
             auto title = project_["title"].toString(); if (title.isEmpty()) title = project_["name"].toString();
-            transport_.setProjectTitle(title.isNotEmpty() ? title : "Obsidian"); transport_.setTempo(arrangement_.tempo);
+            transport_.setProjectTitle(title.isNotEmpty() ? title : "Untitled"); transport_.setTempo(arrangement_.tempo);
             view_.signatures.clear();
             for (const auto& item : array(project_["timeSignatures"]))
             {

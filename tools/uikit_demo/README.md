@@ -17,7 +17,7 @@ ctest --test-dir build-uikit -C Release --output-on-failure
 
 Apps are in `build-uikit/tools/uikit_demo/<target>_artefacts/<configuration>/`. On macOS open the `.app`; Windows uses `.exe`; Linux uses the executable. The gallery is also accessible through **Project → Component gallery** or **G**, with a **Back to editor** action.
 
-Linux dependencies and the Windows/macOS/Linux matrix are in `.github/workflows/uikit.yml`. Linux tests use `xvfb-run` when no display is available.
+Linux dependencies and the Windows/macOS/Linux matrix are in `.github/workflows/uikit.yml`. Headless Linux tests use `xvfb-run -a bash tools/uikit_demo/run-x11.sh ctest --test-dir build-uikit --output-on-failure`. The wrapper starts Openbox and waits for its X11 atoms before JUCE creates windows; bare Xvfb is insufficient for the pinned JUCE version.
 
 ## Targets and boundaries
 

@@ -1,0 +1,54 @@
+name: Native UI kit
+on:
+  pull_request:
+    paths:
+      - 'Source/uikit/**'
+      - 'Source/editor_ui/**'
+      - 'tools/uikit_demo/**'
+      - 'CMakeLists.txt'
+      - '.github/workflows/uikit.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  native-ui:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, windows-2022, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux GUI dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libx11-dev libxext-dev libxinerama-dev libxrandr-dev libxcursor-dev libfreetype6-dev libfontconfig1-dev libgl1-mesa-dev xvfb
+      - name: Configure isolated native UI
+        run: cmake -S . -B build-uikit -DSYNTHETIC_OBSIDIAN_UIKIT_ONLY=ON -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+      - name: Build library, editor, gallery, tests
+        run: cmake --build build-uikit --config Release --target ObsidianUIKitDemo ObsidianGallery ObsidianUIKitTests --parallel 3
+      - name: Test macOS and Windows
+        if: runner.os != 'Linux'
+        run: ctest --test-dir build-uikit -C Release --output-on-failure --timeout 120
+      - name: Test Linux under Xvfb
+        if: runner.os == 'Linux'
+        run: xvfb-run -a ctest --test-dir build-uikit -C Release --output-on-failure --timeout 120
+      - name: Render native macOS demo
+        if: runner.os == 'macOS'
+        run: build-uikit/tools/uikit_demo/ObsidianUIKitDemo_artefacts/Release/ObsidianUIKitDemo.app/Contents/MacOS/ObsidianUIKitDemo --snapshot "$PWD/build-uikit/demo.png"
+      - name: Render native Linux demo
+        if: runner.os == 'Linux'
+        run: xvfb-run -a build-uikit/tools/uikit_demo/ObsidianUIKitDemo_artefacts/Release/ObsidianUIKitDemo --snapshot "$PWD/build-uikit/demo.png"
+      - name: Render native Windows demo
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $result = Start-Process -FilePath 'build-uikit/tools/uikit_demo/ObsidianUIKitDemo_artefacts/Release/ObsidianUIKitDemo.exe' -ArgumentList '--snapshot', "$PWD/build-uikit/demo.png" -Wait -PassThru
+          if ($result.ExitCode -ne 0) { exit $result.ExitCode }
+      - name: Upload rendering and test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: uikit-${{ matrix.os }}
+          path: |
+            build-uikit/demo.png
+            build-uikit/Testing/Temporary/LastTest.log

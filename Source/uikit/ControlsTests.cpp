@@ -119,7 +119,10 @@ public:
         auto selections = 0;
         select.onChange = [&](int) { ++selections; };
         select.setItems({ "Voice", "Backing", "Instrumental" });
+        select.setItemIcons({ Icon::microphone, Icon::backing, Icon::waveform }, true);
         select.setSelectedIndex(1);
+        expect(select.getIconOnly());
+        expectEquals(select.getSelectedText(), juce::String("Backing"));
         expectEquals(selections, 0);
         select.keyPressed(juce::KeyPress(juce::KeyPress::endKey));
         expectEquals(select.getSelectedIndex(), 2); expectEquals(selections, 1);

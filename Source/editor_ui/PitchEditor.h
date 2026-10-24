@@ -13,6 +13,7 @@ class PianoKeyboard final : public juce::Component
 public:
     PianoKeyboard();
     void setNoteRange(int lowestMidiNote, int highestMidiNote);
+    juce::Rectangle<float> keyBoundsForMidiNote(int midiNote) const noexcept;
     void paint(juce::Graphics&) override;
 private:
     int lowest_ = 46, highest_ = 75;

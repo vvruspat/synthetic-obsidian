@@ -33,10 +33,17 @@ bool toolbarFits(juce::Component& view)
         const auto interactive = dynamic_cast<obsidian::ui::Button*>(child) || dynamic_cast<obsidian::ui::Select*>(child) || dynamic_cast<obsidian::ui::Slider*>(child);
         if (!interactive) continue;
         if (!toolbar->getLocalBounds().contains(child->getBounds()) || child->getWidth() < 28 || child->getHeight() < 20) return false;
-        if (dynamic_cast<obsidian::ui::Select*>(child) && child->getWidth() < 100) return false;
+        if (auto* select = dynamic_cast<obsidian::ui::Select*>(child); select && child->getWidth() < (select->getIconOnly() ? 44 : 60)) return false;
+        for (auto* other : toolbar->getChildren())
+            if (other != child && other->isVisible() && child->getBounds().intersects(other->getBounds())) return false;
     }
-    for (const auto& id : { "studio.addBacking", "studio.settings", "studio.voiceLab" })
-        if (auto* button = find(view, id); !button || !button->isVisible() || button->getWidth() < 80) return false;
+    if (toolbar->getHeight() > 46) return false;
+    auto* vertical = find(view, "studio.pitchZoom");
+    auto* primary = find(view, "studio.tool.primary");
+    if (!vertical || !primary || vertical->getRight() > primary->getX()) return false;
+    for (const auto& id : { "studio.addBacking", "studio.settings", "studio.voiceLab", "studio.delete", "studio.status.dismiss" })
+        if (auto* control = find(view, id); control && control->isShowing()) return false;
+    if (!dynamic_cast<juce::ScrollBar*>(find(view, "studio.horizontalScroll"))) return false;
     return true;
 }
 juce::var fixture()
@@ -76,6 +83,10 @@ public:
             const auto image = view.createComponentSnapshot(view.getLocalBounds()); expect(image.isValid());
         }
         snapshot("editor", view);
+        if (auto* mute = dynamic_cast<obsidian::ui::Button*>(find(view, "studio.mute.Instrumental"))) mute->setSelected(true);
+        if (auto* solo = dynamic_cast<obsidian::ui::Button*>(find(view, "studio.solo.Voice Main"))) solo->setSelected(true);
+        snapshot("track-states", view);
+        view.dispatch(projectEvent(project));
         beginTest("Compact layouts retain usable pitch editor");
         view.setSize(1000, 700); snapshot("compact", view); if (pitch) { expect(pitch->getWidth() >= 800); expect(pitch->getHeight() >= 150); }
         beginTest("Snapshots interrupt local note gestures and keep source IDs");
@@ -86,6 +97,7 @@ public:
         expect(primary && secondary);
         if (primary && secondary && pitch)
         {
+            expect(primary->getIconOnly() && secondary->getIconOnly());
             expectEquals(primary->getItems().size(), 9); expectEquals(secondary->getItems().size(), 9);
             expect(pitch->getTool() == obsidian::editor::PitchTool::pointer);
             expect(pitch->getSecondaryTool() == obsidian::editor::PitchTool::scissors);
@@ -94,6 +106,8 @@ public:
             expect(pitch->getSecondaryTool() == obsidian::editor::PitchTool::scissors);
             secondary->setSelectedIndex(4, juce::sendNotificationSync);
             expect(pitch->getSecondaryTool() == obsidian::editor::PitchTool::join);
+            primary->showMenu(); snapshot("tool-menu", view);
+            if (auto* menu = juce::Component::getCurrentlyModalComponent()) menu->keyPressed(juce::KeyPress(juce::KeyPress::escapeKey));
         }
         beginTest("Vertical zoom and collapsed panel preserve pitch data, selection and scroll");
         auto* vertical = dynamic_cast<obsidian::ui::Slider*>(find(view, "studio.pitchZoom"));
@@ -123,6 +137,25 @@ public:
         beginTest("All toolbar controls retain usable bounds at compact, laptop and large widths");
         for (const auto width : {1000, 1280, 1586})
         { view.setSize(width, 800); expect(toolbarFits(view), "Toolbar control clipped at width " + juce::String(width)); }
+        beginTest("Time scrollbar thumb matches the viewport and pans notes within the project");
+        auto* timeScroll = dynamic_cast<juce::ScrollBar*>(find(view, "studio.horizontalScroll"));
+        auto* timeZoom = dynamic_cast<obsidian::ui::Slider*>(find(view, "studio.zoom"));
+        expect(timeScroll && timeZoom);
+        if (timeScroll && timeZoom && pitch && ruler)
+        {
+            timeZoom->setValue(160.0, juce::sendNotificationSync);
+            timeScroll->setCurrentRangeStart(0.0, juce::sendNotificationSync);
+            pitch->keyPressed(juce::KeyPress(juce::KeyPress::downKey));
+            const auto note = pitch->selectedNote();
+            const auto before = pitch->noteBounds(note).getX();
+            expectWithinAbsoluteError(timeScroll->getCurrentRangeSize(), static_cast<double>(ruler->getWidth()) / 160.0, 0.001);
+            timeScroll->setCurrentRangeStart(10000.0, juce::sendNotificationSync);
+            const auto start = timeScroll->getCurrentRangeStart();
+            expect(start > 0.0);
+            expectWithinAbsoluteError(start + timeScroll->getCurrentRangeSize(), timeScroll->getMaximumRangeLimit(), 0.001);
+            expectWithinAbsoluteError(pitch->noteBounds(note).getX(), before - static_cast<float>(start * 160.0), 0.01f);
+            snapshot("scrolled", view);
+        }
         view.removeFromDesktop();
     }
 };
@@ -216,8 +249,6 @@ private:
                 if (auto* clip = dynamic_cast<editor::AudioClip*>(find(*view_, "studio.clip.b")))
                 {
                     clip->keyPressed(juce::KeyPress(juce::KeyPress::returnKey));
-                    auto* remove = find(*view_, "studio.delete");
-                    check(remove && remove->isEnabled(), "clip selection must enable toolbar Delete");
                     view_->keyPressed(juce::KeyPress(juce::KeyPress::deleteKey));
                 }
                 auto disposable = std::make_unique<vocal_annotation::NativeStudioView>([](const juce::var&) {});
@@ -304,7 +335,7 @@ private:
             {
                 auto* tracks = dynamic_cast<ui::Select*>(find(*view_, "studio.trackSelect"));
                 if (tracks && tracks->onChange) tracks->onChange(1);
-                if (auto* add = dynamic_cast<ui::Button*>(find(*view_, "studio.addBacking"))) add->triggerClick();
+                if (auto* add = dynamic_cast<ui::Button*>(find(*view_, "studio.addBacking.Voice Main"))) add->triggerClick();
                 auto* generator = dynamic_cast<ui::Button*>(find(*view_, "studio.backing.generator.terra"));
                 auto* style = dynamic_cast<ui::Button*>(find(*view_, "studio.backing.type.1"));
                 check(generator && style, "Add backing must open direct generator and harmony style choices");

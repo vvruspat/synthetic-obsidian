@@ -44,6 +44,31 @@ public:
         viewport.scroll(4.0);
         expectWithinAbsoluteError(viewport.beatAtX(120.0f), anchorBeat + 4.0, 0.001);
 
+        beginTest("Piano fronts meet between natural-note centres and black keys follow semitone rows");
+        PianoKeyboard keyboard;
+        keyboard.setNoteRange(60, 72); keyboard.setSize(80, 260);
+        const auto c4 = keyboard.keyBoundsForMidiNote(60), d4 = keyboard.keyBoundsForMidiNote(62);
+        const auto e4 = keyboard.keyBoundsForMidiNote(64), f4 = keyboard.keyBoundsForMidiNote(65);
+        const auto cSharp = keyboard.keyBoundsForMidiNote(61);
+        expectWithinAbsoluteError(c4.getY(), 230.0f, 0.001f);
+        expectWithinAbsoluteError(c4.getHeight(), 30.0f, 0.001f);
+        expectWithinAbsoluteError(d4.getBottom(), c4.getY(), 0.001f);
+        expectWithinAbsoluteError(cSharp.getCentreY(), c4.getY(), 0.001f);
+        expectWithinAbsoluteError(cSharp.getWidth(), 52.8f, 0.001f);
+        expectWithinAbsoluteError(e4.getY(), f4.getBottom(), 0.001f);
+        expectWithinAbsoluteError(e4.getY(), 160.0f, 0.001f);
+        for (const auto midi : { 61, 63, 66, 68, 70 })
+            expectWithinAbsoluteError(keyboard.keyBoundsForMidiNote(midi).getCentreY(),
+                                      (static_cast<float>(72 - midi) + 0.5f) * 20.0f, 0.001f);
+        juce::Image pianoImage(juce::Image::ARGB, 80, 260, true);
+        { juce::Graphics keys(pianoImage); keyboard.paint(keys); }
+        expect(pianoImage.getPixelAt(75, 220) == juce::Colour(0xffc7cbd0));
+        expect(pianoImage.getPixelAt(75, 230) == juce::Colour(0xffa3a8b0));
+        expect(pianoImage.getPixelAt(10, 230) == juce::Colour(0xff1e2529));
+        keyboard.setNoteRange(0, 127); keyboard.setSize(80, 128 * 72);
+        expectWithinAbsoluteError(keyboard.keyBoundsForMidiNote(61).getCentreY(), 66.5f * 72.0f, 0.001f);
+        expectWithinAbsoluteError(keyboard.keyBoundsForMidiNote(60).getWidth(), 80.0f, 0.001f);
+
         beginTest("Signature changes preserve cumulative bar numbering and eighth-note divisions");
         TimeViewport metric;
         metric.signatures = { { 0, 4, 4 }, { 8, 6, 8 }, { 14, 3, 4 } };

@@ -56,6 +56,47 @@ public:
         disposable->getPlayButton().triggerClick();
         expect(disposable == nullptr);
 
+        beginTest("Compact track controls stay beside the name when rows grow");
+        TrackHeader compact;
+        compact.setTrack(2, "Voice Main", ui::colour(ui::tokens::olive), ui::Icon::none);
+        compact.setSize(262, 70); compact.setGainVisible(false);
+        expectEquals(compact.getMuteButton().getX(), 58); expectEquals(compact.getMuteButton().getY(), 33);
+        expectEquals(compact.getSoloButton().getX(), 84); expectEquals(compact.getSoloButton().getY(), 33);
+        expect(compact.getMuteButton().getBounds().getIntersection(compact.getSoloButton().getBounds()).isEmpty());
+        compact.setSize(262, 140);
+        expectEquals(compact.getMuteButton().getY(), 33); expectEquals(compact.getSoloButton().getY(), 33);
+        expect(!compact.getGainSlider().isVisible());
+        compact.setGainVisible(true); expect(compact.getGainSlider().isVisible());
+        expect(compact.getGainSlider().getX() > compact.getSoloButton().getRight());
+
+        beginTest("Active mute is blue and active solo is yellow with silent model updates");
+        auto muteCalls = 0, soloCalls = 0;
+        compact.onMute = [&](bool) { ++muteCalls; }; compact.onSolo = [&](bool) { ++soloCalls; };
+        compact.setMuted(true); compact.setSolo(true);
+        expectEquals(muteCalls, 0); expectEquals(soloCalls, 0);
+        const auto muteImage = compact.getMuteButton().createComponentSnapshot(compact.getMuteButton().getLocalBounds());
+        const auto soloImage = compact.getSoloButton().createComponentSnapshot(compact.getSoloButton().getLocalBounds());
+        const auto muteColour = muteImage.getPixelAt(5, 12), soloColour = soloImage.getPixelAt(5, 12);
+        expect(muteColour.getBlue() > muteColour.getRed());
+        expect(soloColour.getRed() > soloColour.getBlue() && soloColour.getGreen() > soloColour.getBlue());
+        expect(muteColour != soloColour);
+        compact.getMuteButton().triggerClick(); compact.getSoloButton().triggerClick();
+        expectEquals(muteCalls, 1); expectEquals(soloCalls, 1);
+
+        beginTest("Compact backing action preserves its icon, accessible name and callback");
+        TrackGroupHeader group;
+        group.setSize(262, 36); group.setAddCompact(true);
+        ui::Button* add = nullptr;
+        for (auto* child : group.getChildren()) if (child->getComponentID() == "group.add") add = dynamic_cast<ui::Button*>(child);
+        expect(add != nullptr);
+        if (add != nullptr)
+        {
+            expectEquals(add->getWidth(), 28); expect(add->getText().isEmpty());
+            expectEquals(add->getTitle(), juce::String("Add backing vocal track"));
+            auto adds = 0; group.onAdd = [&] { ++adds; }; add->triggerClick(); expectEquals(adds, 1);
+            group.setAddCompact(false); expectEquals(add->getWidth(), 116); expectEquals(add->getText(), juce::String("Add backing"));
+        }
+
         beginTest("Track callback may destroy its owning view");
         auto track = std::make_unique<TrackHeader>();
         track->onMute = [&](bool muted)

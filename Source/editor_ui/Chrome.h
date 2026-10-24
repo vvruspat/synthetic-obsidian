@@ -67,7 +67,7 @@ public:
     TrackHeader();
     void setTrack(int number, juce::String name, juce::Colour accent, ui::Icon icon);
     void setGain(double db);
-    void setGainVisible(bool visible) { gain_.setVisible(visible); repaint(); }
+    void setGainVisible(bool visible);
     void setMuted(bool);
     void setSolo(bool);
     std::function<void(bool)> onMute, onSolo;
@@ -83,6 +83,8 @@ private:
     juce::String name_ = "Audio";
     juce::Colour accent_ { ui::tokens::blue };
     ui::Icon icon_ = ui::Icon::waveform;
+    juce::Rectangle<int> numberBounds_, nameBounds_, gainValueBounds_;
+    juce::Rectangle<float> iconBounds_;
     ui::ToggleButton mute_ { "M" }, solo_ { "S" };
     ui::Slider gain_;
     ui::IconButton menu_ { ui::Icon::more, "Track actions" };
@@ -95,6 +97,7 @@ class TrackGroupHeader final : public juce::Component
 public:
     TrackGroupHeader();
     void setExpanded(bool);
+    void setAddCompact(bool);
     bool isExpanded() const noexcept { return expanded_; }
     void setTitle(juce::String);
     std::function<void(bool)> onExpanded;
@@ -102,7 +105,7 @@ public:
     void paint(juce::Graphics&) override;
     void resized() override;
 private:
-    bool expanded_ = true;
+    bool expanded_ = true, addCompact_ = false;
     ui::Button heading_ { "Backing Vocals", ui::Icon::chevronDown };
     ui::Button add_ { "Add backing", ui::Icon::plus };
 };

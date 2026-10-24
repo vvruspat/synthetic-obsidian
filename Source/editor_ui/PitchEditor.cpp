@@ -37,32 +37,55 @@ void PianoKeyboard::setNoteRange(int low, int high)
 {
     constrainRange(low, high); lowest_ = low; highest_ = high; repaint();
 }
+juce::Rectangle<float> PianoKeyboard::keyBoundsForMidiNote(int midiNote) const noexcept
+{
+    if (midiNote < 0 || midiNote > 127 || getWidth() <= 0 || getHeight() <= 0) return {};
+    const auto row = static_cast<float>(getHeight()) / static_cast<float>(highest_ - lowest_ + 1);
+    const auto centre = [this, row](int note) { return (static_cast<float>(highest_ - note) + 0.5f) * row; };
+    if (isBlackKey(midiNote))
+    {
+        const auto height = std::max(1.0f, row * 0.82f);
+        return juce::Rectangle<float>(0.0f, centre(midiNote) - height * 0.5f, static_cast<float>(getWidth()) * 0.66f, height)
+            .getIntersection(getLocalBounds().toFloat());
+    }
+    auto above = midiNote + 1, below = midiNote - 1;
+    while (isBlackKey(above)) ++above;
+    while (isBlackKey(below)) --below;
+    const auto top = (centre(above) + centre(midiNote)) * 0.5f;
+    const auto bottom = (centre(midiNote) + centre(below)) * 0.5f;
+    return juce::Rectangle<float>(0.0f, top, static_cast<float>(getWidth()), bottom - top)
+        .getIntersection(getLocalBounds().toFloat());
+}
 void PianoKeyboard::paint(juce::Graphics& g)
 {
     using namespace obsidian::ui;
     g.fillAll(juce::Colour(0xffc7cbd0));
+    const auto clip = g.getClipBounds().toFloat();
+    // White fronts meet halfway between natural-note centres. The black keys
+    // overlay those boundaries while retaining the editor's semitone positions.
+    for (int note = 127; note >= 0; --note)
+    {
+        if (isBlackKey(note)) continue;
+        const auto bounds = keyBoundsForMidiNote(note);
+        if (bounds.isEmpty() || !bounds.intersects(clip)) continue;
+        g.setColour(juce::Colour(0xffa3a8b0));
+        g.drawHorizontalLine(juce::roundToInt(bounds.getBottom()), 0.0f, bounds.getRight());
+    }
+    for (int note = highest_; note >= lowest_; --note)
+    {
+        if (!isBlackKey(note)) continue;
+        const auto bounds = keyBoundsForMidiNote(note);
+        if (!bounds.intersects(clip)) continue;
+        g.setColour(juce::Colour(0xff1e2529));
+        g.fillRoundedRectangle(bounds, std::min(2.0f, bounds.getHeight() * 0.12f));
+    }
     const auto row = static_cast<float>(getHeight()) / static_cast<float>(highest_ - lowest_ + 1);
-    const auto width = static_cast<float>(getWidth());
-    g.setFont(font(10.0f));
-    for (auto note = highest_; note >= lowest_; --note)
+    g.setFont(font(10.0f)); g.setColour(juce::Colour(0xff252b30));
+    for (int note = highest_; note >= lowest_; --note) if (note % 12 == 0)
     {
         const auto y = static_cast<float>(highest_ - note) * row;
-        const juce::Rectangle<float> bounds(0.0f, y, width, row);
-        if (isBlackKey(note))
-        {
-            g.setColour(juce::Colour(0xff1e2529));
-            g.fillRoundedRectangle(bounds.withWidth(width * 0.59f).reduced(0.0f, std::min(1.0f, row * 0.12f)), 1.2f);
-        }
-        else
-        {
-            g.setColour(juce::Colour(0xffa3a8b0));
-            g.drawHorizontalLine(juce::roundToInt(y + row), 0.0f, width);
-        }
-        if (note % 12 == 0)
-        {
-            g.setColour(juce::Colour(0xff252b30));
-            g.drawText("C" + juce::String(note / 12 - 1), bounds.reduced(4.0f, 0.0f), juce::Justification::centredRight);
-        }
+        const juce::Rectangle<float> label(static_cast<float>(getWidth()) * 0.69f, y, static_cast<float>(getWidth()) * 0.31f - 4.0f, row);
+        g.drawText("C" + juce::String(note / 12 - 1), label, juce::Justification::centredRight);
     }
     g.setColour(colour(tokens::border));
     g.drawVerticalLine(getWidth() - 1, 0.0f, static_cast<float>(getHeight()));

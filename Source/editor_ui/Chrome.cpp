@@ -176,6 +176,8 @@ TrackHeader::TrackHeader()
     gain_.setComponentID("track.gain");
     menu_.setComponentID("track.menu");
     mute_.setTitle("Mute track");
+    mute_.setAccent(ui::colour(ui::tokens::blue));
+    solo_.setAccent(ui::colour(ui::tokens::yellow));
     solo_.setTitle("Solo track");
     gain_.setTitle("Track gain");
     gain_.setRange(-60.0, 6.0, 0.1);
@@ -195,6 +197,7 @@ void TrackHeader::setTrack(int number, juce::String name, juce::Colour accent, u
     gain_.setAccent(accent_);
     repaint();
 }
+void TrackHeader::setGainVisible(bool visible) { gain_.setVisible(visible); resized(); repaint(); }
 void TrackHeader::setGain(double db) { gain_.setValue(db, juce::dontSendNotification); repaint(); }
 void TrackHeader::setMuted(bool muted) { mute_.setToggleState(muted, juce::dontSendNotification); }
 void TrackHeader::setSolo(bool solo) { solo_.setToggleState(solo, juce::dontSendNotification); }
@@ -206,19 +209,29 @@ void TrackHeader::paint(juce::Graphics& g)
     g.fillRoundedRectangle(0.0f, 0.0f, 7.0f, static_cast<float>(getHeight()), 2.0f);
     g.setColour(ui::colour(ui::tokens::border));
     g.drawRect(getLocalBounds(), 1);
-    text(g, juce::String(number_), { 8, 0, 20, getHeight() }, 11.0f, ui::colour(ui::tokens::muted), juce::Justification::centred);
-    ui::drawIcon(g, icon_, juce::Rectangle<float>(37.0f, static_cast<float>(getHeight()) * 0.5f - 13.0f, 26.0f, 26.0f), accent_);
-    text(g, name_, { 80, 5, juce::jmax(0, getWidth() - 112), 26 });
-    if (gain_.isVisible()) text(g, gain_.getValueText(), { getWidth() - 62, getHeight() - 32, 55, 24 }, 10.0f, ui::colour(ui::tokens::muted), juce::Justification::centredRight);
+    text(g, juce::String(number_), numberBounds_, 11.0f, ui::colour(ui::tokens::muted), juce::Justification::centred);
+    ui::drawIcon(g, icon_, iconBounds_, accent_);
+    text(g, name_, nameBounds_);
+    if (gain_.isVisible()) text(g, gain_.getValueText(), gainValueBounds_, 10.0f, ui::colour(ui::tokens::muted), juce::Justification::centredRight);
 }
 
 void TrackHeader::resized()
 {
-    const int y = getHeight() - 34;
-    mute_.setBounds(80, y, 23, kTrackControlHeight);
-    solo_.setBounds(106, y, 23, kTrackControlHeight);
-    gain_.setBounds(142, y, juce::jmax(0, getWidth() - 209), kTrackControlHeight);
-    menu_.setBounds(getWidth() - 29, 5, 22, 24);
+    constexpr int nameX = 58, buttonWidth = 23, menuWidth = 22;
+    const auto blockHeight = std::min(64, getHeight());
+    const auto controlsY = std::max(0, std::min(33, blockHeight - kTrackControlHeight - 4));
+    const auto menuX = std::max(0, getWidth() - menuWidth - 7);
+    numberBounds_ = { 8, 0, 16, blockHeight };
+    iconBounds_ = { 29.0f, static_cast<float>(std::max(0, blockHeight / 2 - 12)), 24.0f, 24.0f };
+    nameBounds_ = { nameX, 5, std::max(0, menuX - nameX - 5), 24 };
+    mute_.setBounds(nameX, controlsY, buttonWidth, kTrackControlHeight);
+    solo_.setBounds(nameX + buttonWidth + 3, controlsY, buttonWidth, kTrackControlHeight);
+    const auto gainX = nameX + 60;
+    const auto gainValueWidth = 51;
+    const auto valueX = std::max(gainX, getWidth() - gainValueWidth - 7);
+    gain_.setBounds(gainX, controlsY, std::max(0, valueX - gainX - 5), kTrackControlHeight);
+    gainValueBounds_ = { valueX, controlsY, gainValueWidth, kTrackControlHeight };
+    menu_.setBounds(menuX, 5, menuWidth, 24);
 }
 
 TrackGroupHeader::TrackGroupHeader()
@@ -233,6 +246,13 @@ TrackGroupHeader::TrackGroupHeader()
     add_.setSize(ui::Button::Size::small);
     heading_.onClick = [this] { auto callback = onExpanded; if (callback) callback(!expanded_); };
     add_.onClick = [this] { auto callback = onAdd; if (callback) callback(); };
+}
+void TrackGroupHeader::setAddCompact(bool compact)
+{
+    addCompact_ = compact;
+    add_.setText(compact ? juce::String() : juce::String("Add backing"));
+    add_.setTitle("Add backing vocal track");
+    resized();
 }
 void TrackGroupHeader::setExpanded(bool expanded)
 {
@@ -250,7 +270,7 @@ void TrackGroupHeader::paint(juce::Graphics& g)
 void TrackGroupHeader::resized()
 {
     auto row = getLocalBounds().reduced(kHeaderPadding, 5);
-    add_.setBounds(row.removeFromRight(116));
+    add_.setBounds(row.removeFromRight(addCompact_ ? 28 : 116));
     row.removeFromRight(8);
     heading_.setBounds(row);
 }

@@ -10,19 +10,23 @@ backend operations.
 | Play/pause, stop, rewind, cycle toggle, master gain/meters | Transport |
 | Create/move/resize/toggle cycle | Dedicated cycle band above the seek ruler; Escape cancels |
 | Global lane visibility | Global Tracks disclosure |
-| Add/import/delete audio track, Mute/Solo | Track list and direct row controls |
-| Independent Audio/Notes layers | Row toggles |
+| Add/import/delete audio track, Mute/Solo | Track menus; direct Mute/Solo buttons |
+| Independent Audio/Notes layers | Compact waveform/notes icon toggles |
 | Shift-select tracks | Combined read-only pitch overlay; single selection enables editing |
-| Add backing type + generator | Direct Add backing popup on source/group/toolbar; Local/Luna/Terra followed by harmony style |
-| Voice profile, render/re-render, regenerate | Backing row and selected-backing piano toolbar |
+| Add backing type + generator | Direct Add backing popup on source/group; Local/Luna/Terra followed by harmony style |
+| Voice profile, render/re-render, regenerate | Backing row profile selector and track menu |
 | Backing hierarchy collapse | Source group disclosure, available before the first child |
-| Voice lab and active training progress | Voice Lab button; native training/settings panel |
+| Voice lab and active training progress | Project menu; native training/settings panel |
 | Device input/output, refresh/test/apply | Settings, Audio / Voice / Backing tab |
 | Voice sources, profiles, training/cancel/reveal/delete | Settings and Voice Lab |
 | Editable keys, clear/duplicate transfer/reset | Settings, Key commands tab; persisted in native Settings/shortcuts.json |
 | Export result directory / dismiss | Completion notification |
 
 ## Piano roll
+
+The single-row toolbar has vertical zoom on the left, Undo/Redo, compact tool
+icons, Chord Snap, and horizontal zoom/collapse on the right. Tool names stay
+inside the dropdown menus. Time panning uses a standard JUCE scrollbar.
 
 Both Click and Command-click (Ctrl-click on Windows/Linux) menus expose Pointer,
 Pencil, Eraser, Scissors, Join, Flex, Vibrato, Gain and Zoom. Right-click also uses

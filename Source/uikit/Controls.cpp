@@ -320,6 +320,10 @@ void Select::setItems(juce::StringArray items)
     repaint(); valueChanged(*this);
 }
 juce::String Select::getSelectedText() const { return juce::isPositiveAndBelow(selectedIndex_, items_.size()) ? items_[selectedIndex_] : juce::String{}; }
+void Select::setItemIcons(std::vector<Icon> icons, bool iconOnly)
+{
+    itemIcons_ = std::move(icons); iconOnly_ = iconOnly; repaint();
+}
 void Select::setSelectedIndex(int index, juce::NotificationType type)
 {
     index = items_.isEmpty() ? -1 : juce::jlimit(-1, items_.size() - 1, index);
@@ -336,9 +340,17 @@ void Select::paint(juce::Graphics& g)
     g.drawRoundedRectangle(getLocalBounds().toFloat().reduced(1.0f), tokens::radius, tokens::line);
     auto bounds = getLocalBounds().reduced(tokens::gap, 0);
     drawIcon(g, Icon::chevronDown, bounds.removeFromRight(12).toFloat().withSizeKeepingCentre(10.0f, 10.0f), colour(tokens::muted).withMultipliedAlpha(alpha));
-    bounds.removeFromRight(tokens::gap);
+    bounds.removeFromRight(iconOnly_ ? 2 : tokens::gap);
+    const auto selectedIcon = juce::isPositiveAndBelow(selectedIndex_, static_cast<int>(itemIcons_.size()))
+        ? itemIcons_[static_cast<size_t>(selectedIndex_)] : Icon::none;
+    if (selectedIcon != Icon::none)
+    {
+        const auto iconBounds = iconOnly_ ? bounds : bounds.removeFromLeft(22);
+        drawIcon(g, selectedIcon, iconBounds.toFloat().withSizeKeepingCentre(18.0f, 18.0f), colour(tokens::text).withMultipliedAlpha(alpha));
+    }
     g.setColour(colour(tokens::text).withMultipliedAlpha(alpha)); g.setFont(font());
-    g.drawFittedText(getSelectedText(), bounds, juce::Justification::centredLeft, 1);
+    if (!iconOnly_ || selectedIcon == Icon::none)
+        g.drawFittedText(getSelectedText(), bounds, juce::Justification::centredLeft, 1);
     drawFocus(g, *this);
 }
 void Select::showMenu()

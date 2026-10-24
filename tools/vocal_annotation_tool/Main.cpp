@@ -1183,7 +1183,7 @@ public:
             sendWebProjectState();
         };
         updatePlaybackNotes();
-        startTimerHz(30);
+        startTimerHz(60);
         const auto savedAudioSettings = loadAudioDeviceSettings();
         setAudioChannels(0, 2, savedAudioSettings.get());
         startBackingVocalWorker();

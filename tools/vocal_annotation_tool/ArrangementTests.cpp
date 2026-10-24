@@ -304,9 +304,20 @@ void testBackingPitchTransitions()
     }
     auto gentle = pair();
     for (auto& note : gentle)
+    {
+        note.pitch = 61; note.pitchExact = 61.0;
         for (auto& point : note.curve)
             point.midi = note.pitchExact + 0.99 * std::sin(2.0 * juce::MathConstants<double>::pi * 5.0 * point.time);
-    require(repairBackingPitchTransitions(gentle) == 0, "preserve small attacks and normal vibrato exactly");
+    }
+    require(repairBackingPitchTransitions(gentle) == 0, "preserve an already continuous pitch curve and normal vibrato exactly");
+    auto cleanStep = pair();
+    for (auto& note : cleanStep)
+        for (auto& point : note.curve)
+            point.midi = note.pitchExact + 0.3 * std::sin(2.0 * juce::MathConstants<double>::pi * 5.0 * point.time);
+    require(repairBackingPitchTransitions(cleanStep) == 2, "join adjacent notes even without an excessive excursion");
+    require(std::abs(cleanStep[0].curve.back().midi - cleanStep[1].curve.front().midi) < 1e-9,
+            "ordinary note steps also have a shared continuous F0 curve");
+    require(repairBackingPitchTransitions(cleanStep) == 0, "ordinary smooth joins remain stable on render retries");
 
     auto disconnected = pair();
     disconnected[1].start += 0.2;

@@ -94,9 +94,10 @@ edge excursions beyond the generated interval plus a one-semitone (100-cent)
 margin. An offending excursion is reduced proportionally, preserving its shape
 instead of clipping individual samples to a flat ceiling. The first/last 80 ms
 are guarded, with a smooth recovery to the original contour
-within 220 ms. Repaired boundaries share a smooth pitch transition on both
-sides to avoid an instantaneous F0 jump. Windows shrink for short notes. Valid attacks and sustained
-vibrato remain unchanged. Pauses over 80 ms, overlapping voices and separate
+within 220 ms. Touching notes with a pitch discontinuity always share a smooth
+transition on both sides, including boundaries without an excessive excursion.
+Already continuous boundaries and sustained vibrato remain unchanged. Windows
+shrink for short notes. Pauses over 80 ms, overlapping voices and separate
 clips are not connected. This idempotent offline repair runs at generation and
 before audio rendering, so saved backing parts can be repaired by rendering
 again, with pitch undo available and the displayed/rendered curves in agreement.

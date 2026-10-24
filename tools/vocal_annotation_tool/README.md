@@ -98,7 +98,8 @@ saved curves; regenerate their notes to inherit the source contour.
 Large counter-direction excursions at connected note edges are reduced
 proportionally when they exceed a one-semitone margin around the generated
 interval, preserving their shape and smoothly recovering into
-the original contour. Small attacks and sustained vibrato are preserved.
+the original contour. All touching notes with a pitch discontinuity share a
+smooth transition; already continuous boundaries and sustained vibrato are preserved.
 This repair also runs before rendering existing backing notes and supports
 pitch undo; it does not require regenerating their melody.
 

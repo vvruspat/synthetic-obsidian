@@ -100,6 +100,7 @@ bool connectRepairedEdges(NoteBlock& previous, NoteBlock& current)
         std::stable_sort(note->curve.begin(), note->curve.end(), [](const auto& left, const auto& right) { return left.time < right.time; });
     const auto from = curvePointAt(previous.curve, start).midi;
     const auto to = curvePointAt(current.curve, end).midi;
+    bool changed = false;
     for (auto* note : {&previous, &current})
     {
         const auto source = note->curve;
@@ -116,9 +117,18 @@ bool connectRepairedEdges(NoteBlock& previous, NoteBlock& current)
         std::stable_sort(note->curve.begin(), note->curve.end(), [](const auto& left, const auto& right) { return left.time < right.time; });
         note->curve.erase(std::unique(note->curve.begin(), note->curve.end(), [](const auto& left, const auto& right)
         { return std::abs(left.time - right.time) < 1e-9; }), note->curve.end());
-        note->flags.addIfNotAlreadyThere("explicit_pitch_curve");
+        const auto curveChanged = source.size() != note->curve.size() || !std::equal(source.begin(), source.end(), note->curve.begin(), [](const auto& left, const auto& right)
+        {
+            return std::abs(left.time - right.time) < 1e-8 && std::abs(left.midi - right.midi) < 1e-8
+                && std::abs(left.confidence - right.confidence) < 1e-8;
+        });
+        if (curveChanged)
+        {
+            note->flags.addIfNotAlreadyThere("explicit_pitch_curve");
+            changed = true;
+        }
     }
-    return true;
+    return changed;
 }
 
 std::vector<PitchCurvePoint> expressionCurveForBacking(const NoteBlock& note)
@@ -321,7 +331,9 @@ int repairBackingPitchTransitions(std::vector<NoteBlock>& notes)
         const auto upper = juce::jmax(previous.pitchExact, current.pitchExact) + kBoundaryMarginSemitones;
         const auto previousChanged = repairCurveEdge(previous, false, lower, upper);
         const auto currentChanged = repairCurveEdge(current, true, lower, upper);
-        if (previousChanged || currentChanged)
+        const auto needsJoin = std::abs(gap) <= 0.001 && !previous.curve.empty() && !current.curve.empty()
+            && std::abs(previous.curve.back().midi - current.curve.front().midi) > 1e-6;
+        if (previousChanged || currentChanged || needsJoin)
         {
             // Limiting the overshoot alone still leaves an instantaneous jump
             // between notes. Use the same smooth transition on both sides.

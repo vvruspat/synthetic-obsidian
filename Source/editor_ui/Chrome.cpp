@@ -68,6 +68,12 @@ void TransportBar::setSignature(int numerator, int denominator)
 
 juce::String TransportBar::getPositionText() const
 {
+    if (!timing_.signatures.empty())
+    {
+        const auto p = timing_.positionAt(beat_);
+        return juce::String(static_cast<juce::int64>(p.bar)).paddedLeft('0', 3) + " | " + juce::String(p.beat)
+            + " | " + juce::String(p.ticks).paddedLeft('0', 3);
+    }
     const double quarterNotesPerBeat = 4.0 / static_cast<double>(denominator_);
     const double quarterNotesPerBar = static_cast<double>(numerator_) * quarterNotesPerBeat;
     const auto bar = static_cast<juce::int64>(beat_ / quarterNotesPerBar) + 1;

@@ -25,15 +25,14 @@ void beatLines(juce::Path& minor, juce::Path& major, const TimeViewport& viewpor
     major.clear();
     if (width <= 0 || height <= 0) return;
     const double step = viewport.pixelsPerBeat >= 32.0 ? 0.25 : 1.0;
-    const auto first = std::floor(viewport.firstBeat / step) * step;
     const auto last = viewport.beatAtX(static_cast<float>(width));
-    for (auto beat = first; beat <= last + step; beat += step)
+    viewport.forEachGridLine(viewport.firstBeat, last, step, [&](double beat, bool bar)
     {
         const auto x = std::floor(viewport.xForBeat(beat)) + 0.5f;
-        auto& path = std::abs(std::remainder(beat, 4.0)) < 0.001 ? major : minor;
+        auto& path = bar ? major : minor;
         path.startNewSubPath(x, 0.0f);
         path.lineTo(x, static_cast<float>(height));
-    }
+    });
 }
 }
 
@@ -100,19 +99,19 @@ void TimelineRuler::paint(juce::Graphics& g)
     g.setFont(font(tokens::fontSmall));
     const auto end = viewport_.beatAtX(static_cast<float>(getWidth()));
     const auto step = viewport_.pixelsPerBeat >= 12.0 ? 0.5 : 1.0;
-    for (auto beat = std::floor(viewport_.firstBeat / step) * step; beat <= end; beat += step)
+    viewport_.forEachGridLine(viewport_.firstBeat, end, step, [&](double beat, bool bar)
     {
         const auto x = viewport_.xForBeat(beat);
-        const auto bar = std::abs(std::remainder(beat, 4.0)) < 0.001;
-        const auto label = bar && (viewport_.pixelsPerBeat >= 24.0 || std::abs(std::remainder(beat, 8.0)) < 0.001);
+        const auto position = viewport_.positionAt(beat);
+        const auto label = bar && (viewport_.pixelsPerBeat >= 24.0 || position.bar % 2 == 1);
         g.setColour(colour(bar ? tokens::faint : tokens::border));
         g.drawVerticalLine(juce::roundToInt(x), static_cast<float>(getHeight() - (bar ? 15 : 7)), static_cast<float>(getHeight()));
         if (label)
         {
             g.setColour(colour(tokens::muted));
-            g.drawText(juce::String(static_cast<int>(std::floor(beat / 4.0)) + 1), juce::roundToInt(x) + 3, 1, 42, 15, juce::Justification::left);
+            g.drawText(juce::String(static_cast<juce::int64>(position.bar)), juce::roundToInt(x) + 3, 1, 42, 15, juce::Justification::left);
         }
-    }
+    });
     drawFocus(g, *this);
 }
 TimelineGrid::TimelineGrid(const TimeViewport& viewport) : EditorSurface(viewport) { setTitle("Timeline grid"); }
@@ -187,10 +186,14 @@ void SignatureLane::paint(juce::Graphics& g)
     using namespace obsidian::ui;
     laneBackground(g, getLocalBounds());
     g.setColour(colour(tokens::muted).withAlpha(0.6f)); g.setFont(font(tokens::fontSmall));
-    // A signature event is shown only at project start, like an editor event lane.
-    const auto x = viewport_.xForBeat(0.0);
-    if (x > -35.0f && x < static_cast<float>(getWidth()))
-        g.drawText(juce::String(numerator_) + "/" + juce::String(denominator_), juce::roundToInt(x) + 4, 0, 36, getHeight(), juce::Justification::centredLeft);
+    const auto draw = [&](double beat, int numerator, int denominator)
+    {
+        const auto x = viewport_.xForBeat(beat);
+        if (x > -35.0f && x < static_cast<float>(getWidth()))
+            g.drawText(juce::String(numerator) + "/" + juce::String(denominator), juce::roundToInt(x) + 4, 0, 36, getHeight(), juce::Justification::centredLeft);
+    };
+    if (viewport_.signatures.empty()) draw(0.0, numerator_, denominator_);
+    else for (const auto& signature : viewport_.signatures) draw(signature.beat, signature.numerator, signature.denominator);
     drawFocus(g, *this);
 }
 ChordLane::ChordLane(const TimeViewport& viewport) : EditorSurface(viewport) { setTitle("Chord sequence"); }

@@ -16,6 +16,12 @@ bool moveClip(AnnotationDocument&, const juce::String& trackId, const juce::Stri
 bool removeClip(AnnotationDocument&, const juce::String& trackId, const juce::String& clipId);
 bool removeTrack(AnnotationDocument&, const juce::String& trackId);
 void shiftNote(NoteBlock&, double delta);
+// Message-thread edit: preserve curve, voiced bounds and linked regions.
+struct NoteDelta { juce::String id; double startDelta = 0, endDelta = 0, pitch = 60; };
+void transformNotes(std::vector<NoteBlock>&, const std::vector<NoteDelta>&, double duration,
+                    std::vector<AnnotationRegion>* regions = nullptr);
+void transformNote(NoteBlock&, double start, double end, double pitch,
+                   std::vector<AnnotationRegion>* regions = nullptr);
 juce::var toJson(const AnnotationDocument&, const juce::File& baseDirectory);
 juce::Result fromJson(const juce::var&, AnnotationDocument&, const juce::File& baseDirectory);
 }

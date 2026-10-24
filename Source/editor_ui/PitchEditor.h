@@ -38,6 +38,11 @@ public:
     void setNoteRange(int lowestMidiNote, int highestMidiNote);
     void setSelectedNote(int id);
     int selectedNote() const noexcept { return selectedNote_; }
+    void setSelectedNotes(std::vector<int> ids);
+    const std::vector<int>& selectedNotes() const noexcept { return selectedNotes_; }
+    std::function<void(const std::vector<int>&)> onNotesSelected;
+    struct NoteMovement { int id; double startBeat, lengthBeats; int midiNote; };
+    std::function<void(const std::vector<NoteMovement>&)> onNotesMoved;
     void setTool(PitchTool);
     // Zero disables snapping; positive values are quarter-note beat divisions.
     void setSnapBeats(double);
@@ -52,6 +57,12 @@ public:
     void paint(juce::Graphics&) override;
     void mouseDown(const juce::MouseEvent&) override;
     void mouseDrag(const juce::MouseEvent&) override;
+    void mouseUp(const juce::MouseEvent&) override;
+    void focusLost(FocusChangeType) override;
+    void visibilityChanged() override;
+    void enablementChanged() override;
+    // One committed move/edge resize per pointer gesture; model setters are silent.
+    std::function<void(int, double, double, int)> onNoteMoved;
     bool keyPressed(const juce::KeyPress&) override;
 private:
     struct CachedNote
@@ -63,8 +74,9 @@ private:
         bool ghost = false;
     };
     void rebuildGeometry();
+    void cancelNoteDrag();
     int midiNoteAt(float y) const noexcept;
-    void selectFromUser(int id);
+    void selectFromUser(int id, bool extend = false);
     std::vector<NoteSegment> notes_;
     std::vector<CachedNote> visibleNotes_;
     juce::Path minorGrid_, majorGrid_, rowGrid_;
@@ -72,5 +84,16 @@ private:
     double snapBeats_ = 0.25;
     PitchTool tool_ = PitchTool::pointer;
     std::size_t geometryRevision_ = 0;
+    struct NoteDrag
+    {
+        int id = -1, edge = 0;
+        double start = 0.0, length = 1.0;
+        int midi = 60;
+        juce::Point<float> origin;
+        bool moved = false;
+    };
+    NoteDrag drag_;
+    std::vector<int> selectedNotes_;
+    std::vector<NoteMovement> dragNotes_;
 };
 }

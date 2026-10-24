@@ -3,6 +3,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <functional>
 #include "../uikit/Controls.h"
+#include "TimeViewport.h"
 #include "../uikit/Menu.h"
 
 namespace obsidian::editor
@@ -14,10 +15,12 @@ public:
     TransportBar();
     void setPlaying(bool);
     void setRecording(bool);
+    void setRecordingAvailable(bool available) { record_.setEnabled(available); record_.setDescription(available ? "Record" : "Recording is not available in this editor"); }
     void setLooping(bool);
     // Position is zero-based quarter notes; display beats use the signature's
     // denominator and ticks remain 960 per quarter note. A 6/8 bar is 3 quarters.
     void setPosition(double beat, double seconds);
+    void setTimeSignatures(std::vector<TimeViewport::TimeSignature> changes) { timing_.signatures = std::move(changes); repaint(); }
     void setProjectTitle(juce::String);
     const juce::String& getProjectTitle() const noexcept { return projectTitle_; }
     // Invalid signatures are ignored. Numerator: 1..32; denominator: powers of 2, 1..64.
@@ -55,6 +58,7 @@ private:
     double beat_ = 0.0, seconds_ = 0.0, tempo_ = 94.0;
     juce::String projectTitle_;
     int numerator_ = 4, denominator_ = 4;
+    TimeViewport timing_;
 };
 
 class TrackHeader final : public juce::Component

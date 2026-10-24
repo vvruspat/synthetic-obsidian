@@ -122,6 +122,35 @@ void testInstrumentalTrack(const juce::File& directory, const juce::File& audio)
     require(document.tracks.size() == 3 && document.tracks.front().clips.empty(),
             "restoring instrumental never resurrects a deleted clip");
 }
+void testNativeNoteTransform()
+{
+    NoteBlock note;
+    note.id = "precise-id"; note.clipId = "audio-clip";
+    note.start = 1; note.end = 2; note.voicedStart = 1.1; note.voicedEnd = 1.9;
+    note.pitchExact = 60.25; note.pitch = 60; note.sourcePitchExact = 59.8;
+    note.curve = { {1, 60.1, 0.8}, {1.5, 60.4, 0.9}, {2, 60.2, 1} };
+    std::vector<AnnotationRegion> regions { {1.2, 1.4, "voiced", note.id}, {5, 6, "noise", "other"} };
+    arrangement::transformNote(note, 3, 5, 61.25, &regions);
+    require(note.id == "precise-id" && note.clipId == "audio-clip", "native drag preserves source identity");
+    require(std::abs(note.pitchExact - 61.25) < 0.00001 && std::abs(note.sourcePitchExact - 59.8) < 0.00001, "native drag preserves fractional/source pitch");
+    require(std::abs(note.curve[1].time - 4) < 0.00001 && std::abs(note.curve[1].midi - 61.4) < 0.00001, "stretch remaps curve and pitch together");
+    require(std::abs(note.voicedStart - 3.2) < 0.00001 && std::abs(note.voicedEnd - 4.8) < 0.00001, "stretch retains voiced bounds");
+    require(std::abs(regions[0].start - 3.4) < 0.00001 && std::abs(regions[0].end - 3.8) < 0.00001 && std::abs(regions[1].start - 5) < 0.00001, "stretch remaps only matching regions");
+    std::vector<NoteBlock> source { note };
+    const auto originalStart = source[0].start, originalEnd = source[0].end;
+    const std::vector<arrangement::NoteDelta> fragments {
+        { note.id, 0, 0, 62.25 }, { note.id, 0, 0, 62.25 }
+    };
+    arrangement::transformNotes(source, fragments, 12, &regions);
+    require(std::abs(source[0].start - originalStart) < 0.00001 && std::abs(source[0].end - originalEnd) < 0.00001, "pitch drag of voiced fragments keeps full source bounds");
+    const std::vector<arrangement::NoteDelta> movedFragments {
+        { note.id, 1, 1, 63.25 }, { note.id, 1, 1, 63.25 }
+    };
+    arrangement::transformNotes(source, movedFragments, 12, &regions);
+    require(std::abs(source[0].start - originalStart - 1) < 0.00001 && std::abs(source[0].end - originalEnd - 1) < 0.00001,
+            "multiple displayed fragments transform one source only once");
+
+}
 void testNoteGainPlayback(const juce::File& audio)
 {
     auto document = fixture(audio);
@@ -190,6 +219,7 @@ int main()
     directory.createDirectory();
     try
     {
+        testNativeNoteTransform();
         testAudioFileTransfer(directory);
         const auto audio = makeAudio(directory);
         testInstrumentalTrack(directory, audio);

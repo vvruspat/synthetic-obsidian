@@ -74,16 +74,27 @@ PitchEditor::PitchEditor(const TimeViewport& viewport) : EditorSurface(viewport)
 }
 void PitchEditor::setNotes(std::vector<NoteSegment> notes)
 {
+    drag_ = {}; dragNotes_.clear();
     notes_ = std::move(notes);
     if (std::none_of(notes_.begin(), notes_.end(), [this](const auto& note) { return note.id == selectedNote_; })) selectedNote_ = -1;
+    std::erase_if(selectedNotes_, [this](int id) { return std::none_of(notes_.begin(), notes_.end(), [id](const auto& n) { return n.id == id; }); });
     rebuildGeometry(); repaint();
 }
 void PitchEditor::setNoteRange(int low, int high)
 {
     constrainRange(low, high); lowest_ = low; highest_ = high; rebuildGeometry(); repaint();
 }
+void PitchEditor::setSelectedNotes(std::vector<int> ids)
+{
+    selectedNotes_ = std::move(ids);
+    selectedNote_ = selectedNotes_.empty() ? -1 : selectedNotes_.back();
+    setDescription(selectedNotes_.empty() ? "Pitch editor. No note selected." : "Pitch editor. " + juce::String(static_cast<int>(selectedNotes_.size())) + " note(s) selected.");
+    repaint();
+    if (auto* handler = getAccessibilityHandler()) handler->notifyAccessibilityEvent(juce::AccessibilityEvent::valueChanged);
+}
 void PitchEditor::setSelectedNote(int id)
 {
+    selectedNotes_ = id < 0 ? std::vector<int>{} : std::vector<int>{ id };
     if (selectedNote_ != id)
     {
         selectedNote_ = id;
@@ -132,12 +143,12 @@ void PitchEditor::rebuildGeometry()
     { const auto y = static_cast<float>(i) * row; rowGrid_.startNewSubPath(0.0f, y); rowGrid_.lineTo(static_cast<float>(getWidth()), y); }
     const auto step = viewport_.pixelsPerBeat >= 32.0 ? 0.25 : 1.0;
     const auto end = viewport_.beatAtX(static_cast<float>(getWidth()));
-    for (auto beat = std::floor(viewport_.firstBeat / step) * step; beat <= end + step; beat += step)
+    viewport_.forEachGridLine(viewport_.firstBeat, end, step, [&](double beat, bool bar)
     {
-        auto& path = std::abs(std::remainder(beat, 4.0)) < 0.001 ? majorGrid_ : minorGrid_;
+        auto& path = bar ? majorGrid_ : minorGrid_;
         const auto x = std::floor(viewport_.xForBeat(beat)) + 0.5f;
         path.startNewSubPath(x, 0.0f); path.lineTo(x, static_cast<float>(getHeight()));
-    }
+    });
     visibleNotes_.reserve(notes_.size());
     const auto screen = getLocalBounds().toFloat();
     for (const auto& note : notes_)
@@ -187,7 +198,7 @@ void PitchEditor::paint(juce::Graphics& g)
     {
         if (!note.bounds.expanded(0.0f, row * 2.0f).intersects(clip)) continue;
         const auto colourValue = note.ghost ? colour(tokens::muted) : note.colour;
-        const auto selected = note.id == selectedNote_;
+        const auto selected = std::find(selectedNotes_.begin(), selectedNotes_.end(), note.id) != selectedNotes_.end();
         g.setColour(colourValue.darker(0.3f).withAlpha(note.ghost ? 0.23f : selected ? 0.72f : 0.6f));
         g.fillRoundedRectangle(note.bounds, 1.5f);
         g.setColour(colourValue.withAlpha(note.ghost ? 0.4f : 0.75f));
@@ -202,13 +213,20 @@ void PitchEditor::paint(juce::Graphics& g)
     }
     drawFocus(g, *this);
 }
-void PitchEditor::selectFromUser(int id)
+void PitchEditor::selectFromUser(int id, bool extend)
 {
-    // The owner is notified once; programmatic setters never echo the callback.
     const auto callback = onNoteSelected;
+    const auto multiCallback = onNotesSelected;
     const juce::Component::SafePointer<PitchEditor> safeThis(this);
-    setSelectedNote(id);
-    if (safeThis != nullptr && callback) callback(id);
+    auto ids = extend ? selectedNotes_ : std::vector<int>{};
+    const auto found = std::find(ids.begin(), ids.end(), id);
+    if (extend && found != ids.end()) ids.erase(found);
+    else if (id >= 0) ids.push_back(id);
+    setSelectedNotes(std::move(ids));
+    const auto selectedIds = selectedNotes_;
+    const auto primary = selectedNote_;
+    if (callback) callback(primary);
+    if (safeThis != nullptr && multiCallback) multiCallback(selectedIds);
 }
 void PitchEditor::mouseDown(const juce::MouseEvent& e)
 {
@@ -219,8 +237,21 @@ void PitchEditor::mouseDown(const juce::MouseEvent& e)
     const auto id = hitTestNote(position);
     if (tool_ == PitchTool::pointer)
     {
-        selectFromUser(id);
-        if (safeThis != nullptr && id < 0) safeThis->seekAt(position.x);
+        const auto alreadySelected = std::find(selectedNotes_.begin(), selectedNotes_.end(), id) != selectedNotes_.end();
+        if (e.mods.isShiftDown() || !alreadySelected) selectFromUser(id, e.mods.isShiftDown());
+        if (safeThis == nullptr) return;
+        if (id < 0) { seekAt(position.x); return; }
+        const auto note = std::find_if(notes_.begin(), notes_.end(), [id](const auto& value) { return value.id == id; });
+        if (note != notes_.end())
+        {
+            const auto bounds = noteBounds(id);
+            const auto edge = position.x < bounds.getX() + 5.0f ? -1 : position.x > bounds.getRight() - 5.0f ? 1 : 0;
+            drag_ = { id, edge, note->startBeat, note->lengthBeats, note->midiNote, position, false };
+            dragNotes_.clear();
+            for (const auto& value : notes_)
+                if (value.id == id || (edge == 0 && std::find(selectedNotes_.begin(), selectedNotes_.end(), value.id) != selectedNotes_.end()))
+                    dragNotes_.push_back({ value.id, value.startBeat, value.lengthBeats, value.midiNote });
+        }
     }
     else
     {
@@ -232,19 +263,96 @@ void PitchEditor::mouseDown(const juce::MouseEvent& e)
         if (callback) callback(tool, id, beat, midiNote);
     }
 }
-void PitchEditor::mouseDrag(const juce::MouseEvent&) {}
+void PitchEditor::mouseDrag(const juce::MouseEvent& e)
+{
+    if (drag_.id < 0 || !isEnabled()) return;
+    auto note = std::find_if(notes_.begin(), notes_.end(), [this](const auto& value) { return value.id == drag_.id; });
+    if (note == notes_.end()) { drag_ = {}; return; }
+    const auto delta = e.position - drag_.origin;
+    if (!drag_.moved && delta.getDistanceFromOrigin() < 3.0f) return;
+    drag_.moved = true;
+    const auto step = snapBeats_ > 0.0 ? snapBeats_ : 0.0;
+    const auto snap = [step](double beat) { return step > 0.0 ? std::round(beat / step) * step : beat; };
+    const auto shift = static_cast<double>(delta.x) / viewport_.pixelsPerBeat;
+    const auto minimum = step > 0.0 ? step : 0.01;
+    if (drag_.edge < 0)
+    {
+        note->startBeat = std::clamp(snap(drag_.start + shift), 0.0, drag_.start + drag_.length - std::min(minimum, drag_.length));
+        note->lengthBeats = drag_.start + drag_.length - note->startBeat;
+    }
+    else if (drag_.edge > 0)
+        note->lengthBeats = std::max(minimum, snap(drag_.start + drag_.length + shift) - drag_.start);
+    else
+    {
+        note->startBeat = std::max(0.0, snap(drag_.start + shift));
+        const auto row = static_cast<float>(getHeight()) / static_cast<float>(highest_ - lowest_ + 1);
+        note->midiNote = std::clamp(drag_.midi - juce::roundToInt(delta.y / std::max(1.0f, row)), lowest_, highest_);
+    }
+    if (drag_.edge == 0)
+    {
+        auto timeDelta = note->startBeat - drag_.start;
+        auto pitchDelta = note->midiNote - drag_.midi;
+        for (const auto& original : dragNotes_)
+        { timeDelta = std::max(timeDelta, -original.startBeat); pitchDelta = std::clamp(pitchDelta, lowest_ - original.midiNote, highest_ - original.midiNote); }
+        for (const auto& original : dragNotes_)
+            if (auto moved = std::find_if(notes_.begin(), notes_.end(), [&original](const auto& value) { return value.id == original.id; }); moved != notes_.end())
+            { moved->startBeat = original.startBeat + timeDelta; moved->midiNote = original.midiNote + pitchDelta; }
+    }
+    rebuildGeometry(); repaint();
+}
+void PitchEditor::mouseUp(const juce::MouseEvent&)
+{
+    const auto gesture = drag_;
+    drag_ = {};
+    const auto originals = std::move(dragNotes_);
+    dragNotes_.clear();
+    if (gesture.id < 0 || !gesture.moved) return;
+    std::vector<NoteMovement> results;
+    for (const auto& original : originals)
+        if (auto note = std::find_if(notes_.begin(), notes_.end(), [&original](const auto& value) { return value.id == original.id; }); note != notes_.end())
+            results.push_back({ note->id, note->startBeat, note->lengthBeats, note->midiNote });
+    const auto batch = onNotesMoved;
+    const auto single = onNoteMoved;
+    if (batch) { batch(results); return; }
+    const juce::Component::SafePointer<PitchEditor> safeThis(this);
+    for (const auto& result : results)
+    { if (safeThis == nullptr) break; if (single) single(result.id, result.startBeat, result.lengthBeats, result.midiNote); }
+}
+
+void PitchEditor::cancelNoteDrag()
+{
+    if (drag_.id < 0) return;
+    for (const auto& original : dragNotes_)
+        if (auto note = std::find_if(notes_.begin(), notes_.end(), [&original](const auto& value) { return value.id == original.id; }); note != notes_.end())
+        { note->startBeat = original.startBeat; note->lengthBeats = original.lengthBeats; note->midiNote = original.midiNote; }
+    drag_ = {}; dragNotes_.clear();
+    rebuildGeometry(); repaint();
+}
+void PitchEditor::focusLost(FocusChangeType type) { cancelNoteDrag(); EditorSurface::focusLost(type); }
+void PitchEditor::visibilityChanged() { if (!isShowing()) cancelNoteDrag(); }
+void PitchEditor::enablementChanged() { if (!isEnabled()) cancelNoteDrag(); }
 bool PitchEditor::keyPressed(const juce::KeyPress& key)
 {
-    if (key == juce::KeyPress::escapeKey) { selectFromUser(-1); return true; }
-    if (key == juce::KeyPress::upKey || key == juce::KeyPress::downKey)
+    if (key == juce::KeyPress::escapeKey) { cancelNoteDrag(); selectFromUser(-1); return true; }
+    if ((key.getModifiers().isCommandDown() || key.getModifiers().isCtrlDown()) && key.getKeyCode() == 'A')
+    {
+        std::vector<int> ids;
+        for (const auto& note : notes_) ids.push_back(note.id);
+        setSelectedNotes(std::move(ids));
+        const auto callback = onNotesSelected;
+        const auto selected = selectedNotes_;
+        if (callback) callback(selected);
+        return true;
+    }
+    if (key.getKeyCode() == juce::KeyPress::upKey || key.getKeyCode() == juce::KeyPress::downKey)
     {
         if (notes_.empty()) return true;
         const auto found = std::find_if(notes_.begin(), notes_.end(), [this](const auto& note) { return note.id == selectedNote_; });
         auto index = found == notes_.end() ? -1 : static_cast<int>(std::distance(notes_.begin(), found));
         const auto count = static_cast<int>(notes_.size());
-        index = index < 0 ? (key == juce::KeyPress::upKey ? count - 1 : 0)
-                          : (index + (key == juce::KeyPress::upKey ? count - 1 : 1)) % count;
-        selectFromUser(notes_[static_cast<std::size_t>(index)].id);
+        index = index < 0 ? (key.getKeyCode() == juce::KeyPress::upKey ? count - 1 : 0)
+                          : (index + (key.getKeyCode() == juce::KeyPress::upKey ? count - 1 : 1)) % count;
+        selectFromUser(notes_[static_cast<std::size_t>(index)].id, key.getModifiers().isShiftDown());
         return true;
     }
     return EditorSurface::keyPressed(key);

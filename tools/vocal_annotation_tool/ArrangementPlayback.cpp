@@ -35,6 +35,11 @@ void ArrangementPlayback::setLoop(bool enabled, double start, double end) noexce
     loopEnd_.store(end);
     looping_.store(enabled && end > start && std::isfinite(start) && std::isfinite(end));
 }
+double ArrangementPlayback::waveformDuration(const juce::File& file) const
+{
+    const auto found = waveformDurations_.find(file.getFullPathName());
+    return found == waveformDurations_.end() ? 0.0 : found->second;
+}
 juce::var ArrangementPlayback::waveform(const juce::File& file) const
 {
     const auto found = waveforms_.find(file.getFullPathName());
@@ -145,9 +150,15 @@ void ArrangementPlayback::run()
             std::lock_guard lock(requestMutex_);
             if (revision != revision_ || threadShouldExit()) continue;
             readyWaveforms_.clear();
+            readyWaveformDurations_.clear();
             for (const auto& track : plan->tracks)
                 for (const auto& clip : track.clips)
-                    if (clip.audio) readyWaveforms_[clip.placement.audioFile.getFullPathName()] = clip.audio->waveform;
+                    if (clip.audio)
+                    {
+                        const auto path = clip.placement.audioFile.getFullPathName();
+                        readyWaveforms_[path] = clip.audio->waveform;
+                        readyWaveformDurations_[path] = clip.audio->samples.getNumSamples() / clip.audio->sampleRate;
+                    }
             readyError_ = error;
             delete pending_.exchange(plan.release());
             std::erase_if(cache_, [](const auto& entry) { return entry.second.expired(); });
@@ -164,7 +175,7 @@ void ArrangementPlayback::run()
 void ArrangementPlayback::handleAsyncUpdate()
 {
     juce::String error;
-    { std::lock_guard lock(requestMutex_); for (const auto& [path, waveform] : readyWaveforms_) waveforms_[path] = waveform; error = readyError_; }
+    { std::lock_guard lock(requestMutex_); for (const auto& [path, waveform] : readyWaveforms_) waveforms_[path] = waveform; waveformDurations_ = readyWaveformDurations_; error = readyError_; }
     if (onReady) onReady(error);
 }
 void ArrangementPlayback::mix(Plan& plan, juce::AudioBuffer<float>& buffer,

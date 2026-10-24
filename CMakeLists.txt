@@ -32,10 +32,10 @@ FetchContent_MakeAvailable(JUCE)
 
 # Standalone native UI kit can be built without frontend assets, audio, or ML.
 option(SYNTHETIC_OBSIDIAN_BUILD_UIKIT "Build the native UI kit and demonstration apps" ON)
+include(CTest)
+add_subdirectory(Source/uikit)
+add_subdirectory(Source/editor_ui)
 if(SYNTHETIC_OBSIDIAN_BUILD_UIKIT OR SYNTHETIC_OBSIDIAN_UIKIT_ONLY)
-    include(CTest)
-    add_subdirectory(Source/uikit)
-    add_subdirectory(Source/editor_ui)
     add_subdirectory(tools/uikit_demo)
 endif()
 if(SYNTHETIC_OBSIDIAN_UIKIT_ONLY)
@@ -44,36 +44,6 @@ endif()
 
 option(SYNTHETIC_OBSIDIAN_BUILD_TOOLS "Build offline Synthetic Obsidian tools" ON)
 option(SYNTHETIC_OBSIDIAN_BUILD_NATIVE_ANNOTATOR "Build the native JUCE note annotator" ${SYNTHETIC_OBSIDIAN_BUILD_TOOLS})
-
-# ── Embedded React frontend ──────────────────────────────────────────────────
-# The checked-in dist bundle keeps C++ builds independent from Node.js. Rebuild
-# it explicitly with `npm ci && npm run build` from frontend/ after UI changes.
-set(SYNTHETIC_OBSIDIAN_FRONTEND_DIST "${CMAKE_SOURCE_DIR}/frontend/dist")
-set(SYNTHETIC_OBSIDIAN_FRONTEND_ASSETS
-    "${SYNTHETIC_OBSIDIAN_FRONTEND_DIST}/index.html"
-    "${SYNTHETIC_OBSIDIAN_FRONTEND_DIST}/assets/app.js"
-    "${SYNTHETIC_OBSIDIAN_FRONTEND_DIST}/assets/app.css"
-    "${SYNTHETIC_OBSIDIAN_FRONTEND_DIST}/favicon.svg"
-)
-
-foreach(frontend_asset IN LISTS SYNTHETIC_OBSIDIAN_FRONTEND_ASSETS)
-    if(NOT EXISTS "${frontend_asset}")
-        message(FATAL_ERROR
-            "Missing embedded frontend asset: ${frontend_asset}. "
-            "Run `npm ci && npm run build` in ${CMAKE_SOURCE_DIR}/frontend.")
-    endif()
-endforeach()
-
-juce_add_binary_data(SyntheticObsidianFrontendData
-    HEADER_NAME SyntheticObsidianFrontendData.h
-    NAMESPACE SyntheticObsidianFrontendData
-    SOURCES ${SYNTHETIC_OBSIDIAN_FRONTEND_ASSETS}
-)
-if(APPLE)
-    set_target_properties(SyntheticObsidianFrontendData PROPERTIES
-        OSX_ARCHITECTURES "arm64"
-    )
-endif()
 
 # ── Plugin target ─────────────────────────────────────────────────────────────
 juce_add_plugin(SyntheticObsidian

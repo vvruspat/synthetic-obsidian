@@ -9,7 +9,8 @@
 #if JUCE_MAC
 #include "MacApplicationIcon.h"
 #endif
-#include "web/SyntheticObsidianWebView.h"
+#include "NativeStudioView.h"
+#include "NativeStudioSettings.h"
 
 #include <JuceHeader.h>
 
@@ -31,8 +32,6 @@ namespace vocal_annotation
 
 namespace
 {
-constexpr int kToolbarHeight = 42;
-constexpr int kInspectorWidth = 260;
 constexpr size_t kMaxUndoSnapshots = 64;
 constexpr double kAutosaveDelayMs = 5000.0;
 constexpr double kTwoPi = juce::MathConstants<double>::twoPi;
@@ -1065,7 +1064,8 @@ class MainComponent final : public juce::AudioAppComponent,
 public:
     MainComponent()
         : editor_(formatManager_, document_),
-          webView_([this](const juce::var& command) { handleWebCommand(command); })
+          studio_([this](const juce::var& command) { handleWebCommand(command); }),
+          studioSettings_([this](const juce::var& command) { handleWebCommand(command); })
     {
         formatManager_.registerBasicFormats();
         loadActiveVoiceProfile();
@@ -1157,7 +1157,23 @@ public:
         addAndMakeVisible(infoLabel_);
 
         addAndMakeVisible(editor_);
-        addAndMakeVisible(webView_);
+        // Legacy annotation widgets still service analysis/selection callbacks;
+        // only the native studio is presented as the application workspace.
+        for (auto* child : getChildren()) child->setVisible(false);
+        addAndMakeVisible(studio_);
+        addChildComponent(studioSettings_);
+        studio_.onShowSettings = [this]
+        {
+            studioSettings_.setBackingParent(studio_.state().selectedTrack);
+            studioSettings_.setVisible(true);
+            studioSettings_.toFront(true);
+            studioSettings_.grabKeyboardFocus();
+        };
+        studioSettings_.onClose = [this]
+        {
+            studioSettings_.setVisible(false);
+            studio_.grabKeyboardFocus();
+        };
         setWantsKeyboardFocus(true);
         setSize(1280, 720);
         resetHistory();
@@ -1172,6 +1188,29 @@ public:
         setAudioChannels(0, 2, savedAudioSettings.get());
         startBackingVocalWorker();
         startBackingAudioWorker();
+        // Deliver state after all controls, device setup and backend fields exist.
+        juce::Component::SafePointer<MainComponent> safeThis(this);
+        juce::MessageManager::callAsync([safeThis]
+        {
+            if (safeThis == nullptr) return;
+            auto* command = new juce::DynamicObject();
+            command->setProperty("type", "frontend-ready");
+            safeThis->handleWebCommand(command);
+        });
+    }
+
+    void openProjectFile(const juce::File& selected)
+    {
+        if (selected == juce::File()) return;
+        const auto manifest = selected.isDirectory() ? findProjectManifest(selected) : selected;
+        if (!manifest.existsAsFile()) { setStatus("The selected folder does not contain a project manifest."); return; }
+        if (loadJson(manifest))
+        {
+            projectDirectory_ = manifest.getParentDirectory();
+            currentJsonFile_ = manifest;
+            setStatus("Opened project: " + projectDirectory_.getFileName() + ".");
+            sendWebProjectState();
+        }
     }
 
     ~MainComponent() override
@@ -1620,41 +1659,8 @@ public:
 
     void resized() override
     {
-        auto bounds = getLocalBounds();
-        auto toolbar = bounds.removeFromTop(kToolbarHeight).reduced(6, 5);
-        constexpr int kToolbarControlsWidth = 352;
-        const auto buttonWidth = juce::jlimit(
-            64,
-            82,
-            (toolbar.getWidth() - kToolbarControlsWidth)
-                / juce::jmax(1, static_cast<int>(toolbarButtons_.size())));
-
-        for (auto* button : toolbarButtons_)
-            button->setBounds(toolbar.removeFromLeft(buttonWidth).reduced(2, 0));
-
-        toolbar.removeFromLeft(10);
-        horizontalZoomSlider_.setBounds(toolbar.removeFromLeft(110).reduced(4, 0));
-        pitchZoomSlider_.setBounds(toolbar.removeFromLeft(110).reduced(4, 0));
-        playbackModeBox_.setBounds(toolbar.removeFromLeft(122).reduced(4, 0));
-
-        auto inspector = bounds.removeFromRight(kInspectorWidth).reduced(8);
-        infoLabel_.setBounds(inspector.removeFromTop(96));
-        inspector.removeFromTop(8);
-        bpmEditor_.setBounds(inspector.removeFromTop(28));
-        inspector.removeFromTop(8);
-        keyEditor_.setBounds(inspector.removeFromTop(28));
-        inspector.removeFromTop(8);
-        backingStyleBox_.setBounds(inspector.removeFromTop(28));
-        inspector.removeFromTop(8);
-        boundaryKindBox_.setBounds(inspector.removeFromTop(28));
-        inspector.removeFromTop(8);
-        selectionTextEditor_.setBounds(inspector.removeFromTop(58));
-        inspector.removeFromTop(12);
-        statusLabel_.setBounds(inspector);
-
-        editor_.setBounds(bounds);
-        webView_.setBounds(getLocalBounds());
-        webView_.toFront(false);
+        studio_.setBounds(getLocalBounds());
+        studioSettings_.setBounds(getLocalBounds());
     }
 
     bool keyPressed(const juce::KeyPress& key) override
@@ -1702,13 +1708,16 @@ public:
             return true;
         }
 
-        if (editor_.keyPressed(key))
-            return true;
-
         return false;
     }
 
 private:
+    void dispatchUiEvent(const juce::var& event)
+    {
+        studio_.dispatch(event);
+        studioSettings_.dispatch(event);
+    }
+
     void addToolbarButton(juce::TextButton& button, const juce::String& text, std::function<void()> onClick)
     {
         button.setButtonText(text);
@@ -1985,7 +1994,7 @@ private:
         event->setProperty("backingAudioRenderRunning", backingAudioRenderRunning_);
         event->setProperty("backingGenerationTrack", backingGenerationTrackName_);
         event->setProperty("backingAudioRenderTrack", backingAudioRenderTrackName_);
-        webView_.dispatch(event);
+        dispatchUiEvent(event);
     }
 
     double voiceTrainingUsableDuration() const
@@ -2419,7 +2428,7 @@ private:
         auto* event = new juce::DynamicObject();
         event->setProperty("type", "voice-training-state");
         event->setProperty("state", state);
-        webView_.dispatch(event);
+        dispatchUiEvent(event);
     }
 
     void chooseVoiceTrainingFiles()
@@ -2990,7 +2999,7 @@ private:
             event->setProperty("type", "export-complete");
             event->setProperty("message", summary + ".");
             event->setProperty("directory", directory.getFullPathName());
-            webView_.dispatch(event);
+            dispatchUiEvent(event);
         }
 
         if (! directory.startAsProcess())
@@ -3006,7 +3015,7 @@ private:
         event->setProperty("type", "transport-state");
         event->setProperty("playing", isPlaybackRunning());
         event->setProperty("playhead", normalisedTimelinePosition(currentTransportPosition()));
-        webView_.dispatch(event);
+        dispatchUiEvent(event);
     }
 
     void sendWebLoopState()
@@ -3026,7 +3035,7 @@ private:
         event->setProperty("type", "loop-state");
         event->setProperty("active", cycleLoopActive_);
         event->setProperty("range", range);
-        webView_.dispatch(event);
+        dispatchUiEvent(event);
     }
 
     void sendWebVolumeState()
@@ -3037,7 +3046,7 @@ private:
         auto* event = new juce::DynamicObject();
         event->setProperty("type", "volume-state");
         event->setProperty("value", masterVolume_.load() * 100.0f);
-        webView_.dispatch(event);
+        dispatchUiEvent(event);
     }
 
     void sendWebInstrumentalVolumeState()
@@ -3050,7 +3059,7 @@ private:
         event->setProperty(
             "value",
             instrumentalVolume_.load(std::memory_order_relaxed) * 100.0f);
-        webView_.dispatch(event);
+        dispatchUiEvent(event);
     }
 
     juce::File audioDeviceSettingsFile() const
@@ -3114,7 +3123,7 @@ private:
         auto* event = new juce::DynamicObject();
         event->setProperty("type", "audio-settings-state");
         event->setProperty("state", state);
-        webView_.dispatch(event);
+        dispatchUiEvent(event);
     }
 
     void handleAudioSettingsCommand(juce::DynamicObject& root)
@@ -3195,7 +3204,7 @@ private:
         event->setProperty("type", "output-meter-state");
         event->setProperty("left", outputMeterLevels_[0]);
         event->setProperty("right", outputMeterLevels_[1]);
-        webView_.dispatch(event);
+        dispatchUiEvent(event);
     }
 
     void sendWebTrackState(const juce::String& track, bool muted, bool soloed)
@@ -3207,7 +3216,7 @@ private:
         event->setProperty("type", "track-state");
         event->setProperty("track", track);
         event->setProperty("state", makeTrackState(muted, soloed));
-        webView_.dispatch(event);
+        dispatchUiEvent(event);
     }
 
     void sendWebTrackLayerState(const juce::String& track, bool audioMuted, bool notesMuted)
@@ -3223,7 +3232,7 @@ private:
         event->setProperty("type", "track-layer-state");
         event->setProperty("track", track);
         event->setProperty("state", state);
-        webView_.dispatch(event);
+        dispatchUiEvent(event);
     }
 
     void sendWebBackingTrackCreated(const BackingVocalTrack& track)
@@ -3239,7 +3248,7 @@ private:
         auto* event = new juce::DynamicObject();
         event->setProperty("type", "backing-track-created");
         event->setProperty("track", trackValue);
-        webView_.dispatch(event);
+        dispatchUiEvent(event);
     }
 
     BackingVocalTrack* findBackingTrack(const juce::String& styleId,
@@ -4306,6 +4315,7 @@ private:
                     {
                         auto* clip = clipsValue->getReference(i).getDynamicObject();
                         clip->setProperty("waveform", arrangementPlayback_.waveform(track->clips[static_cast<size_t>(i)].audioFile));
+                        clip->setProperty("waveformDurationSeconds", arrangementPlayback_.waveformDuration(track->clips[static_cast<size_t>(i)].audioFile));
                         clip->removeProperty("audio");
                     }
             }
@@ -4315,6 +4325,7 @@ private:
             if (const auto* track = arrangement::findTrack(document_, value["id"].toString()))
                 value.getDynamicObject()->setProperty("hasAudio", std::any_of(track->clips.begin(), track->clips.end(),
                     [](const auto& clip) { return clip.audioFile.existsAsFile(); }));
+        project->setProperty("title", projectDirectory_.getFileName());
         project->setProperty("tempo", document_.bpm);
         project->setProperty("meter", meter);
         project->setProperty("hasInstrumental", document_.instrumentalFile.existsAsFile());
@@ -4370,7 +4381,7 @@ private:
         auto* event = new juce::DynamicObject();
         event->setProperty("type", "project-state");
         event->setProperty("project", project);
-        webView_.dispatch(event);
+        dispatchUiEvent(event);
     }
 
     void handleProjectAction(const juce::String& action)
@@ -4446,6 +4457,7 @@ private:
         const auto isPitchEdit = type == "add-clip"
             || type == "delete-clips"
             || type == "move-clips"
+            || type == "move-note-group"
             || type == "set-clip-time"
             || type == "split-clip"
             || type == "join-clips"
@@ -4626,6 +4638,29 @@ private:
             return true;
         }
 
+        if (type == "move-note-group")
+        {
+            std::vector<arrangement::NoteDelta> edits;
+            if (const auto* values = root.getProperty("notes").getArray())
+                for (const auto& value : *values)
+                {
+                    const auto id = normaliseId(value["clipId"].toString());
+                    const auto index = findNoteIndex(id);
+                    const auto startDelta = static_cast<double>(value["startDeltaSeconds"]);
+                    const auto endDelta = static_cast<double>(value["endDeltaSeconds"]);
+                    const auto pitch = static_cast<double>(value["pitch"]);
+                    if (!index || !std::isfinite(startDelta) || !std::isfinite(endDelta) || !std::isfinite(pitch)) continue;
+                    edits.push_back({ id, startDelta, endDelta, snappedPitch(pitch, (*targetNotes)[*index].start + startDelta) });
+                }
+            if (edits.empty()) return true;
+            beginPitchTrackEdit(trackName);
+            arrangement::transformNotes(*targetNotes, edits, document_.duration,
+                trackName == "Voice Main" ? &document_.regions : nullptr);
+            sortNotes();
+            finishPitchTrackEdit(trackName);
+            return true;
+        }
+
         if (type == "set-clip-time")
         {
             const auto id = normaliseId(root.getProperty("clipId").toString());
@@ -4648,39 +4683,20 @@ private:
                 return true;
 
             auto& note = (*targetNotes)[*index];
+            const auto nextPitch = root.hasProperty("pitch")
+                ? snappedPitch(juce::jlimit(0.0, 127.0, static_cast<double>(root.getProperty("pitch"))), nextStart)
+                : snappedPitch(note.pitchExact, nextStart);
             if (std::abs(note.start - nextStart) < 0.0001
-                && std::abs(note.end - nextEnd) < 0.0001)
+                && std::abs(note.end - nextEnd) < 0.0001
+                && std::abs(note.pitchExact - nextPitch) < 0.0001)
             {
                 return true;
             }
 
             beginPitchTrackEdit(trackName);
-            const auto previousStart = note.start;
-            const auto previousLength = juce::jmax(
-                kMinimumWebNoteLengthSeconds,
-                note.end - note.start);
-            const auto nextLength = nextEnd - nextStart;
-            const auto mapTime = [previousStart, previousLength, nextStart, nextLength](double time)
-            {
-                return nextStart + (time - previousStart) * nextLength / previousLength;
-            };
-            note.start = nextStart;
-            note.end = nextEnd;
-            note.voicedStart = juce::jlimit(note.start, note.end, mapTime(note.voicedStart));
-            note.voicedEnd = juce::jlimit(note.voicedStart, note.end, mapTime(note.voicedEnd));
-            for (auto& point : note.curve)
-                point.time = juce::jlimit(note.start, note.end, mapTime(point.time));
-            if (snapToChord)
-                moveNoteToPitch(
-                    note,
-                    snappedPitch(note.pitchExact, note.start));
-            if (trackName == "Voice Main")
-                for (auto& region : document_.regions)
-                    if (region.noteId == note.id)
-                    {
-                        region.start = juce::jlimit(note.start, note.end, mapTime(region.start));
-                        region.end = juce::jlimit(region.start, note.end, mapTime(region.end));
-                    }
+            arrangement::transformNote(note, nextStart, nextEnd,
+                root.hasProperty("pitch") || snapToChord ? nextPitch : note.pitchExact,
+                trackName == "Voice Main" ? &document_.regions : nullptr);
             sortNotes();
             finishPitchTrackEdit(trackName);
             return true;
@@ -4997,7 +5013,7 @@ private:
         auto* event = new juce::DynamicObject();
         event->setProperty("type", "track-selected");
         event->setProperty("track", id);
-        webView_.dispatch(event);
+        dispatchUiEvent(event);
     }
 
     void importArrangementAudio(const juce::String& trackId)
@@ -5646,7 +5662,7 @@ private:
             event->setProperty("track", trackName);
             event->setProperty("clipId", webClipId);
             event->setProperty("pitch", pitch);
-            webView_.dispatch(event);
+            dispatchUiEvent(event);
         }
     }
 
@@ -6440,23 +6456,7 @@ private:
             projectChooserFlags,
             [this](const juce::FileChooser& chooser)
             {
-                const auto selected = chooser.getResult();
-                const auto manifest = selected.isDirectory()
-                    ? findProjectManifest(selected)
-                    : selected;
-                if (! manifest.existsAsFile())
-                {
-                    if (selected != juce::File())
-                        setStatus("The selected folder does not contain a project manifest.");
-                    return;
-                }
-
-                if (loadJson(manifest))
-                {
-                    projectDirectory_ = manifest.getParentDirectory();
-                    currentJsonFile_ = manifest;
-                    setStatus("Opened project: " + projectDirectory_.getFileName() + ".");
-                }
+                openProjectFile(chooser.getResult());
             });
     }
 
@@ -10678,7 +10678,8 @@ private:
     juce::ComboBox boundaryKindBox_;
     juce::Label infoLabel_;
     juce::Label statusLabel_;
-    synthetic_obsidian::SyntheticObsidianWebView webView_;
+    NativeStudioView studio_;
+    NativeStudioSettings studioSettings_;
 
     JUCE_DECLARE_WEAK_REFERENCEABLE(MainComponent)
 };
@@ -10686,13 +10687,15 @@ private:
 class MainWindow final : public juce::DocumentWindow
 {
 public:
-    MainWindow()
+    MainWindow(const juce::File& project = {})
         : DocumentWindow("Synthetic Obsidian",
                          juce::Desktop::getInstance().getDefaultLookAndFeel().findColour(juce::ResizableWindow::backgroundColourId),
                          DocumentWindow::allButtons)
     {
         setUsingNativeTitleBar(true);
-        setContentOwned(new MainComponent(), true);
+        auto* studio = new MainComponent();
+        setContentOwned(studio, true);
+        if (project != juce::File()) studio->openProjectFile(project);
         centreWithSize(getWidth(), getHeight());
         setResizable(true, true);
         setVisible(true);
@@ -10712,12 +10715,16 @@ public:
     const juce::String getApplicationVersion() override { return ProjectInfo::versionString; }
     bool moreThanOneInstanceAllowed() override { return true; }
 
-    void initialise(const juce::String&) override
+    void initialise(const juce::String& commandLine) override
     {
 #if JUCE_MAC
         refreshMacApplicationIcon();
 #endif
-        mainWindow_ = std::make_unique<MainWindow>();
+        const auto arguments = juce::StringArray::fromTokens(commandLine, true);
+        const auto index = arguments.indexOf("--project");
+        const auto project = index >= 0 && index + 1 < arguments.size()
+            ? juce::File::getCurrentWorkingDirectory().getChildFile(arguments[index + 1].unquoted()) : juce::File();
+        mainWindow_ = std::make_unique<MainWindow>(project);
     }
 
     void shutdown() override

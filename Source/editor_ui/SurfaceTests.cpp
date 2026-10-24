@@ -32,6 +32,18 @@ public:
         viewport.scroll(4.0);
         expectWithinAbsoluteError(viewport.beatAtX(120.0f), anchorBeat + 4.0, 0.001);
 
+        beginTest("Signature changes preserve cumulative bar numbering and eighth-note divisions");
+        TimeViewport metric;
+        metric.signatures = { { 0, 4, 4 }, { 8, 6, 8 }, { 14, 3, 4 } };
+        expectEquals(static_cast<int>(metric.positionAt(8).bar), 3);
+        expectEquals(metric.positionAt(8.5).beat, 2);
+        expectEquals(static_cast<int>(metric.positionAt(11).bar), 4);
+        expectEquals(static_cast<int>(metric.positionAt(14).bar), 5);
+        expectEquals(metric.positionAt(15).beat, 2);
+        std::vector<double> bars;
+        metric.forEachGridLine(7, 17, 1, [&](double beat, bool bar) { if (bar) bars.push_back(beat); });
+        expect(bars == std::vector<double>({ 8, 11, 14, 17 }));
+
         beginTest("Waveform cache rebuilds only when source or geometry changes");
         viewport = {};
         AudioClip clip(viewport);
@@ -91,6 +103,68 @@ public:
         pitch.viewportChanged();
         expectWithinAbsoluteError(pitch.noteBounds(7).getX(), 120.0f, 0.001f);
         expectEquals(pitch.hitTestNote(pitch.noteBounds(7).getCentre()), 8);
+
+        beginTest("Pointer gestures commit once and cancellation restores note geometry");
+        viewport = {};
+        PitchEditor draggable(viewport);
+        draggable.setSize(600, 300);
+        draggable.setNotes({ note });
+        testRoot.addAndMakeVisible(draggable);
+        int commits = 0;
+        double committedStart = 0, committedLength = 0;
+        int committedPitch = 0;
+        draggable.onNoteMoved = [&](int id, double start, double length, int midi)
+        { expectEquals(id, 7); ++commits; committedStart = start; committedLength = length; committedPitch = midi; };
+        const auto original = draggable.noteBounds(7);
+        const auto down = mouseDownAt(draggable, original.getCentre());
+        draggable.mouseDown(down);
+        draggable.mouseDrag(mouseDownAt(draggable, original.getCentre() + juce::Point<float>(15, -10)));
+        expectEquals(commits, 0);
+        draggable.mouseUp(down);
+        expectEquals(commits, 1);
+        expectWithinAbsoluteError(committedStart, 197.0, 0.001);
+        expectWithinAbsoluteError(committedLength, 2.0, 0.001);
+        expectEquals(committedPitch, 61);
+        const auto beforeCancel = draggable.noteBounds(7);
+        draggable.mouseDown(mouseDownAt(draggable, beforeCancel.getCentre()));
+        draggable.mouseDrag(mouseDownAt(draggable, beforeCancel.getCentre() + juce::Point<float>(30, 20)));
+        draggable.keyPressed(juce::KeyPress(juce::KeyPress::escapeKey));
+        draggable.mouseUp(down);
+        expectEquals(commits, 1);
+        expect(draggable.noteBounds(7) == beforeCancel);
+        const auto edge = beforeCancel.getCentre().withX(beforeCancel.getRight() - 1.0f);
+        draggable.mouseDown(mouseDownAt(draggable, edge));
+        draggable.mouseDrag(mouseDownAt(draggable, edge + juce::Point<float>(15, 0)));
+        draggable.mouseUp(down);
+        expectEquals(commits, 2);
+        expectWithinAbsoluteError(committedLength, 3.0, 0.001);
+        const auto beforeHide = draggable.noteBounds(7);
+        draggable.mouseDown(mouseDownAt(draggable, beforeHide.getCentre()));
+        draggable.mouseDrag(mouseDownAt(draggable, beforeHide.getCentre() + juce::Point<float>(15, 0)));
+        draggable.setVisible(false);
+        expect(draggable.noteBounds(7) == beforeHide);
+        draggable.mouseUp(down);
+        expectEquals(commits, 2);
+
+        beginTest("Multiple selected notes move together in one committed callback");
+        NoteSegment second = note; second.id = 11; second.startBeat += 3; second.midiNote = 64;
+        draggable.setVisible(true);
+        draggable.setNotes({ note, second });
+        draggable.setSelectedNotes({ 7, 11 });
+        int batches = 0;
+        std::vector<PitchEditor::NoteMovement> movements;
+        draggable.onNotesMoved = [&](const auto& values) { ++batches; movements = values; };
+        const auto centre = draggable.noteBounds(7).getCentre();
+        draggable.mouseDown(mouseDownAt(draggable, centre));
+        draggable.mouseDrag(mouseDownAt(draggable, centre + juce::Point<float>(15, -10)));
+        draggable.mouseUp(down);
+        expectEquals(batches, 1); expectEquals(static_cast<int>(movements.size()), 2);
+        if (movements.size() == 2)
+        {
+            expectWithinAbsoluteError(movements[0].startBeat, 197.0, 0.001);
+            expectWithinAbsoluteError(movements[1].startBeat, 200.0, 0.001);
+            expectEquals(movements[0].midiNote, 61); expectEquals(movements[1].midiNote, 65);
+        }
 
         beginTest("Keyboard seeking follows the owner position across surfaces");
         TimelineRuler firstRuler(viewport), secondRuler(viewport);

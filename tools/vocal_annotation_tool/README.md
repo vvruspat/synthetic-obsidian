@@ -32,9 +32,7 @@ clip media, and stem export includes clip positions and silent gaps. Older app
 versions do not understand the new arrangement field; use this version to edit
 and save projects containing multiple clips.
 
-Dropped files cross the WebView bridge in bounded chunks and are written on a
-dedicated background worker. Completed imports are stored in the application
-data directory until project consolidation; unfinished transfers are removed.
+Dropped native files are passed directly to the existing background import worker; no browser transfer or temporary base64 upload is needed.
 
 Playback plans and source buffers are prepared on a background worker. The audio
 callback only reads prepared buffers and returns retired plans for worker-side
@@ -47,21 +45,46 @@ Configure `-DSYNTHETIC_OBSIDIAN_ARRANGEMENT_TESTS=ON`, build `ArrangementTests`,
 and run CTest in `vocal_annotation_tool_build` for placement, hierarchy, legacy
 migration, save/load, export, and playback checks at 44.1/48/96 kHz with 64–1024
 sample blocks. The arrangement CI workflow builds the app and runs these checks
-on macOS and Windows; frontend checks cover hierarchy, collapse and drag timing.
+on macOS and Windows, including native command binding and settings checks.
 
 The tool is intentionally isolated from the realtime plugin target. Audio loading,
 JSON import/export, pYIN subprocess analysis, and manual editing all live under
 `tools/vocal_annotation_tool`.
 
-Its visible interface is the React application in `frontend/`. JUCE embeds the
-checked-in `frontend/dist` files, owns audio and document state, and exchanges
-typed JSON commands/events with the WebView. The native annotation component is
-kept as an internal editing/compatibility helper; it is not the visible app UI.
-The bridge supplies real decimated vocal/instrumental waveforms and analyzed
-tempo segments; the React canvas and tempo SVG do not synthesize production data.
-It also supplies complete time-signature segments. React integrates tempo across
-signature regions to place bar and beat lines, including denominator-aware beat
-spacing such as eighth-note beats in 6/8.
+Its visible interface is now `NativeStudioView`, built from `Obsidian::UIKit` and
+`Obsidian::EditorUI`. `NativeStudioSettings` presents audio devices, voice profiles,
+training jobs and backing generation. JUCE owns both presentation and document
+state. The existing command/event contract is delivered as in-process values;
+no browser, embedded frontend bundle or WebView2 SDK is loaded. The annotation
+component remains an internal analysis/selection helper.
+
+All note IDs, source clip IDs and track IDs stay attached to real document data.
+Native surfaces integrate tempo changes into one shared quarter-note viewport;
+signature changes determine bar/beat lines and the transport display. Waveforms
+come from the decoded playback worker cache, are cropped by source offset and
+prepared outside paint. Transport and meters display backend state.
+
+Project actions are in **Project**; per-track import, audio/note layers and backing
+actions are in each track menu. **Audio and voice settings** contains device
+selection/test output, source recordings, voice profiles and persistent training
+jobs. Record is disabled because the current editor has no recording command.
+Only Instrumental has independent track gain in the current playback model;
+other gain sliders are disabled. Individual note gain is available in **Note actions**.
+
+In the pitch editor, Shift-click toggles notes, Cmd/Ctrl+A selects all, pointer
+drag moves the selection, and edge drags resize notes. A group gesture commits
+one undo action. Escape, losing focus, hiding/disabling the editor and incoming
+project data cancel uncommitted local geometry. Pencil/scissors, Delete,
+join/vibrato/gain/chord-snap actions, pitch history, snap, zoom and pan use the
+existing document edit path. Moving a displayed vocal fragment applies deltas
+to its full source note, preserving unvoiced regions and fractional MIDI pitch.
+
+Run `Synthetic Obsidian --project /absolute/path/to/project-folder` to open an
+existing project directly. For checks configure
+`-DSYNTHETIC_OBSIDIAN_ARRANGEMENT_TESTS=ON`, build `ArrangementTests`,
+`NativeStudioTests` and `ObsidianUIKitTests`, then run CTest. The native studio
+suite exercises real command/event binding, duplicate display names, silent
+snapshots, async command feedback, multi-note moves and settings lifecycles.
 
 The bundled offline analyzer currently infers one global 3/4 or 4/4 signature
 from detected beat accents and falls back to low-confidence 4/4 when evidence is

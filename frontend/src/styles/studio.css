@@ -1965,7 +1965,7 @@ button {
 .workspace {
   --timeline-ruler-row: 46px;
   --piano-toolbar-row: 38px;
-  --piano-row: minmax(180px, 1fr);
+  --piano-row: minmax(calc(180px + var(--piano-toolbar-row)), 1fr);
   --track-row: 79px;
   --backing-add-row: 40px;
   --tempo-row: 58px;
@@ -1974,7 +1974,7 @@ button {
   --piano-keyboard-width: 108px;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  grid-template-rows: minmax(0, 1.3fr) var(--piano-toolbar-row) var(--piano-row);
+  grid-template-rows: minmax(0, 1.3fr) var(--piano-row);
   width: 100%;
   min-width: 0;
   min-height: 0;
@@ -2695,9 +2695,12 @@ button {
 
 .arrangement {
   position: relative;
+  isolation: isolate;
+  height: 100%;
   min-width: 0;
   min-height: 0;
   overflow: auto;
+  overscroll-behavior: contain;
   scrollbar-gutter: stable;
   scrollbar-width: thin;
   scrollbar-color: rgba(38, 168, 218, 0.72) #020e1d;
@@ -3420,11 +3423,13 @@ button {
   position: absolute;
   top: 0;
   bottom: 0;
+  left: var(--playhead-position);
   z-index: 9;
   width: 11px;
   cursor: ew-resize;
   touch-action: none;
   background: transparent;
+  pointer-events: auto;
   transform: translateX(-50%);
 }
 
@@ -3880,19 +3885,12 @@ button {
 }
 
 .workspace.is-piano-collapsed {
-  --piano-row: 0px;
+  --piano-row: var(--piano-toolbar-row);
 }
 
 .workspace.is-piano-unavailable {
   --piano-toolbar-row: 0px;
   --piano-row: 0px;
-}
-
-.workspace.is-piano-unavailable .piano-toolbar-side,
-.workspace.is-piano-unavailable .piano-labels,
-.workspace.is-piano-unavailable .piano-toolbar,
-.workspace.is-piano-unavailable .piano-roll {
-  display: none;
 }
 
 .workspace.is-piano-collapsed .tool-menu {
@@ -4062,6 +4060,8 @@ button {
 
 .piano-roll {
   display: block;
+  grid-row: 2;
+  height: 100%;
   overflow: clip;
   border-bottom: 0;
 }
@@ -4438,7 +4438,7 @@ button {
   .workspace {
     --timeline-ruler-row: 40px;
     --piano-toolbar-row: 36px;
-    --piano-row: minmax(145px, 1fr);
+    --piano-row: minmax(calc(145px + var(--piano-toolbar-row)), 1fr);
     --track-row: 68px;
     --backing-add-row: 36px;
     --tempo-row: 50px;
@@ -4629,7 +4629,7 @@ button {
   .workspace {
     --timeline-ruler-row: 40px;
     --piano-toolbar-row: 36px;
-    --piano-row: minmax(145px, 1fr);
+    --piano-row: minmax(calc(145px + var(--piano-toolbar-row)), 1fr);
     --track-row: 68px;
     --backing-add-row: 36px;
     --tempo-row: 50px;
@@ -4672,13 +4672,13 @@ button {
   align-items: center;
   gap: 10px;
   padding: 4px 10px;
-  position: sticky;
-  left: 0;
+  position: relative;
   z-index: 6;
   height: var(--backing-add-row);
   background: #071222;
   border-bottom: 1px solid #193957;
   font-size: 11px;
+  overflow: clip;
 }
 .arrangement-clip {
   position: absolute;
@@ -4854,6 +4854,9 @@ button {
   background: color-mix(in srgb, var(--track-color) 9%, #0e1825);
   border-bottom: 1px solid #263140;
 }
+.backing-group-lane {
+  overflow: clip;
+}
 .backing-group-header {
   display: flex;
   align-items: center;
@@ -4898,6 +4901,7 @@ button {
 .backing-group-actions {
   position: sticky;
   left: var(--sidebar-width);
+  z-index: 10;
   width: calc(100cqw - var(--sidebar-width));
   max-width: 100%;
   height: 100%;
@@ -4905,6 +4909,7 @@ button {
   align-items: center;
   justify-content: center;
   padding: 0 12px;
+  pointer-events: none;
 }
 .backing-group-actions > span {
   position: absolute;
@@ -4919,10 +4924,12 @@ button {
 .backing-group-actions .backing-track-select {
   width: 200px;
   max-width: 45%;
+  pointer-events: auto;
 }
 .backing-group-actions .backing-track-select summary {
   color: var(--track-color);
   border-color: color-mix(in srgb, var(--track-color) 45%, #243448);
+  background: linear-gradient(180deg, #0b2940, #03111e);
 }
 .audio-lane.harmony-lane {
   background: color-mix(in srgb, var(--track-color) 5%, transparent);
@@ -4973,9 +4980,6 @@ button {
   right: 0;
   pointer-events: none;
 }
-.timeline-guide .playhead-line {
-  pointer-events: auto;
-}
 .service-row {
   position: sticky;
   z-index: 24;
@@ -5012,9 +5016,19 @@ button {
   display: grid;
   grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
   min-width: 0;
+  min-height: 0;
 }
-.workspace.is-piano-collapsed .piano-roll,
-.workspace.is-piano-unavailable .piano-toolbar-row {
+.piano-dock {
+  display: grid;
+  grid-template-rows: var(--piano-toolbar-row) minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+  isolation: isolate;
+}
+.workspace.is-piano-unavailable .piano-dock {
+  display: none;
+}
+.workspace.is-piano-collapsed .piano-roll {
   display: none;
 }
 .piano-key {

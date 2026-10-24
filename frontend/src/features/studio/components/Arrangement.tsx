@@ -108,10 +108,14 @@ export function Arrangement({
     instrumentalAnalysisRunning ||
     backingGenerationRunning ||
     backingAudioRenderRunning;
+  const playheadLine = (
+    <i className="playhead-line" onPointerDown={actions.startPlayheadDrag} aria-hidden="true" />
+  );
   const renderLane = ({ kind, track, depth, key }: ArrangementRow) => {
     if (kind === "backing-group")
       return (
         <div className="backing-group-lane">
+          {playheadLine}
           <div className="backing-group-actions">
             <span>{track.name}</span>
             <BackingTrackSelect
@@ -137,6 +141,7 @@ export function Arrangement({
         data-track-id={track.id}
         key={key}
       >
+        {playheadLine}
         <button
           type="button"
           className="track-lane-selection-target"
@@ -191,22 +196,22 @@ export function Arrangement({
     <>
       <section
         className="arrangement"
+        aria-label="Track arrangement"
         ref={refs.arrangementScrollRef}
         onWheel={actions.handleTimelineWheel}
         onScroll={() => actions.syncHorizontalScroll("arrangement")}
       >
         <div
           className="timeline-content"
-          style={{ "--horizontal-zoom": horizontalZoom } as CSSProperties}
+          style={
+            {
+              "--horizontal-zoom": horizontalZoom,
+              "--playhead-position": `${playhead}%`,
+            } as CSSProperties
+          }
         >
           <div className="timeline-guide" ref={refs.timelineContentRef}>
             <WebGLSurface />
-            <div
-              className="playhead-line"
-              style={{ left: `${playhead}%` }}
-              onPointerDown={actions.startPlayheadDrag}
-              aria-hidden="true"
-            />
             <div className="metric-grid" aria-hidden="true">
               {musicalTimeline.grid.map((line) => (
                 <i
@@ -259,6 +264,7 @@ export function Arrangement({
               Tempo
             </div>
             <div className="tempo-lane">
+              {playheadLine}
               <svg viewBox="0 0 1000 54" preserveAspectRatio="none" aria-hidden="true">
                 <path d={tempoPath} />
               </svg>
@@ -278,6 +284,7 @@ export function Arrangement({
               Signature
             </div>
             <div className="signature-lane">
+              {playheadLine}
               {musicalTimeline.signatureRegions.map((signature) => (
                 <div
                   style={{
@@ -297,6 +304,7 @@ export function Arrangement({
               Chord
             </div>
             <div className="chord-lane">
+              {playheadLine}
               {project.chords.map((chord) => (
                 <div style={{ width: `${chord.width}%` }} key={chord.label}>
                   {chord.label}
@@ -313,7 +321,7 @@ export function Arrangement({
                 onClick={actions.addTrack}
               />
             </div>
-            <div className="arrangement-add-toolbar" />
+            <div className="arrangement-add-toolbar">{playheadLine}</div>
           </div>
           {displayRows.map((row) => (
             <div
@@ -327,41 +335,43 @@ export function Arrangement({
           ))}
         </div>
       </section>
-      <div className="piano-toolbar-row">
-        <div className="piano-toolbar-side">
-          <label
-            className="piano-horizontal-zoom-control"
-            htmlFor="horizontal-piano-zoom"
-            title={`Horizontal zoom ${horizontalZoom.toFixed(2)}×`}
-          >
-            <ArrowsRightLeftIcon aria-hidden="true" />
-            <span className="sr-only">Horizontal Piano Roll zoom</span>
-            <RangeInput
-              id="horizontal-piano-zoom"
-              min={1}
-              max={32}
-              step={0.25}
-              value={horizontalZoom}
-              aria-label="Horizontal Piano Roll zoom"
-              aria-valuetext={`${horizontalZoom.toFixed(2)} times`}
-              onValueChange={actions.setHorizontalZoomFromInput}
-            />
-          </label>
+      <section className="piano-dock" aria-label="Pitch editor">
+        <div className="piano-toolbar-row">
+          <div className="piano-toolbar-side">
+            <label
+              className="piano-horizontal-zoom-control"
+              htmlFor="horizontal-piano-zoom"
+              title={`Horizontal zoom ${horizontalZoom.toFixed(2)}×`}
+            >
+              <ArrowsRightLeftIcon aria-hidden="true" />
+              <span className="sr-only">Horizontal Piano Roll zoom</span>
+              <RangeInput
+                id="horizontal-piano-zoom"
+                min={1}
+                max={32}
+                step={0.25}
+                value={horizontalZoom}
+                aria-label="Horizontal Piano Roll zoom"
+                aria-valuetext={`${horizontalZoom.toFixed(2)} times`}
+                onValueChange={actions.setHorizontalZoomFromInput}
+              />
+            </label>
+          </div>
+          <PianoToolbar
+            controller={controller}
+            backingRenderBusy={busy}
+            backingRenderTrack={
+              backingAudioRenderRunning ? backingAudioRenderTrack : backingGenerationTrack
+            }
+            onOpenVoiceTraining={onOpenVoiceTraining}
+          />
         </div>
-        <PianoToolbar
+        <PianoRoll
           controller={controller}
-          backingRenderBusy={busy}
-          backingRenderTrack={
-            backingAudioRenderRunning ? backingAudioRenderTrack : backingGenerationTrack
-          }
-          onOpenVoiceTraining={onOpenVoiceTraining}
+          waveform={controller.editorWaveform}
+          waveformDurationRatio={controller.editorWaveformDurationRatio}
         />
-      </div>
-      <PianoRoll
-        controller={controller}
-        waveform={controller.editorWaveform}
-        waveformDurationRatio={controller.editorWaveformDurationRatio}
-      />
+      </section>
     </>
   );
 }

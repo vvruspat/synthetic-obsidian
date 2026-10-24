@@ -54,6 +54,12 @@ juce::var projectEvent(const juce::var& project)
 {
     auto* event = new juce::DynamicObject(); event->setProperty("type", "project-state"); event->setProperty("project", project); return event;
 }
+juce::MouseEvent mouseEvent(juce::Component& target, juce::Point<float> point, int modifiers = juce::ModifierKeys::leftButtonModifier)
+{
+    const auto time = juce::Time::getCurrentTime();
+    return { juce::Desktop::getInstance().getMainMouseSource(), point, juce::ModifierKeys(modifiers),
+             1.0f, 0.0f, 0.0f, 0.0f, 0.0f, &target, &target, time, point, time, 1, false };
+}
 class StudioChecks final : public juce::UnitTest
 {
 public:
@@ -161,13 +167,135 @@ public:
 };
 StudioChecks studioChecks;
 
-// Exercise queued UI -> backend -> UI feedback through the real message loop.
-juce::MouseEvent mouseEvent(juce::Component& target, juce::Point<float> point, int modifiers = juce::ModifierKeys::leftButtonModifier)
+class StudioPresentationChecks final : public juce::UnitTest
 {
-    const auto time = juce::Time::getCurrentTime();
-    return { juce::Desktop::getInstance().getMainMouseSource(), point, juce::ModifierKeys(modifiers),
-             1.0f, 0.0f, 0.0f, 0.0f, 0.0f, &target, &target, time, point, time, 1, false };
-}
+public:
+    StudioPresentationChecks() : UnitTest("Studio audio backdrop and gestures", "NativeStudio") {}
+    void runTest() override
+    {
+        using namespace obsidian;
+        vocal_annotation::NativeStudioView view([](const juce::var&) {});
+        view.setBounds(-2000, -2000, 1280, 900); view.addToDesktop(0); view.setVisible(true);
+        auto project = fixture();
+        auto& vocalClip = (*project["tracks"].getArray())[1]["clips"].getArray()->getReference(0);
+        vocalClip.getDynamicObject()->setProperty("offset", 1.0);
+        vocalClip.getDynamicObject()->setProperty("duration", 5.0);
+        vocalClip.getDynamicObject()->setProperty("waveformDurationSeconds", 8.0);
+        juce::Array<juce::var> peaks;
+        for (int i = 0; i < 512; ++i)
+        {
+            const auto amplitude = 0.05 + 0.8 * std::pow(std::sin(static_cast<double>(i) * 0.07), 2.0);
+            peaks.add(juce::var(juce::Array<juce::var>{ -amplitude, amplitude }));
+        }
+        vocalClip.getDynamicObject()->setProperty("waveform", juce::var(peaks));
+        auto& secondClip = (*project["tracks"].getArray())[1]["clips"].getArray()->getReference(1);
+        secondClip.getDynamicObject()->setProperty("start", 8.0);
+        secondClip.getDynamicObject()->setProperty("waveformDurationSeconds", 2.0);
+        secondClip.getDynamicObject()->setProperty("waveform", juce::var(peaks));
+        view.dispatch(projectEvent(project));
+        auto* pitch = dynamic_cast<editor::PitchEditor*>(find(view, "studio.pitch"));
+        auto* ruler = find(view, "studio.ruler");
+        auto* pianoViewport = dynamic_cast<juce::Viewport*>(find(view, "studio.pitchViewport"));
+        auto* zoom = dynamic_cast<ui::Slider*>(find(view, "studio.zoom"));
+        auto* vertical = dynamic_cast<ui::Slider*>(find(view, "studio.pitchZoom"));
+        auto* scroll = dynamic_cast<juce::ScrollBar*>(find(view, "studio.horizontalScroll"));
+        auto* trackSelect = dynamic_cast<ui::Select*>(find(view, "studio.trackSelect"));
+        beginTest("Native presentation controls are available");
+        expect(pitch && ruler && pianoViewport && zoom && vertical && scroll && trackSelect);
+        if (!pitch || !ruler || !pianoViewport || !zoom || !vertical || !scroll || !trackSelect) return;
+
+        beginTest("Backing groups share exact header bounds");
+        auto* row = find(view, "studio.track.Voice Main");
+        auto* group = find(view, "studio.group.Voice Main");
+        editor::TrackHeader* header = nullptr;
+        if (row) for (auto* child : row->getChildren()) if (auto* candidate = dynamic_cast<editor::TrackHeader*>(child)) header = candidate;
+        expect(header && group);
+        if (header && group)
+        {
+            expectEquals(group->getX(), row->getX() + header->getX());
+            expectEquals(group->getWidth(), header->getWidth());
+        }
+
+        beginTest("Selected audio backdrop follows trimmed placement across tempo changes");
+        expectEquals(static_cast<int>(pitch->waveformRegionCount()), 2);
+        if (!pitch->waveformRegions().empty())
+        {
+            const auto& region = pitch->waveformRegions().front();
+            expectWithinAbsoluteError(region.startBeat, 2.0, 0.001);
+            expectWithinAbsoluteError(region.lengthBeats, 8.0, 0.001);
+            expect(!region.peaks.empty());
+            if (!region.peaks.empty()) expectWithinAbsoluteError(static_cast<double>(region.peaks.front()),
+                0.05 + 0.8 * std::pow(std::sin(64.0 * 0.07), 2.0), 0.0001);
+        }
+        if (pitch->waveformRegionCount() == 2)
+        {
+            const auto& second = pitch->waveformRegions()[1];
+            expectWithinAbsoluteError(second.startBeat, 12.0, 0.001);
+            expectWithinAbsoluteError(second.lengthBeats, 2.0, 0.001);
+        }
+        expect(!pitch->waveformBounds().isEmpty());
+        const auto revision = pitch->waveformGeometryRevision();
+        snapshot("waveform-background", view);
+        view.createComponentSnapshot(view.getLocalBounds());
+        expectEquals(pitch->waveformGeometryRevision(), revision);
+        pianoViewport->setViewPosition(0, pianoViewport->getViewPositionY() + 90);
+        expectWithinAbsoluteError(pitch->waveformBounds().getCentreY(),
+            static_cast<float>(pianoViewport->getViewPositionY()) + static_cast<float>(pianoViewport->getHeight()) * 0.5f, 1.0f);
+        trackSelect->setSelectedIndex(2, juce::sendNotificationSync);
+        expectEquals(static_cast<int>(pitch->waveformRegionCount()), 0);
+        expect(pitch->waveformBounds().isEmpty());
+        trackSelect->setSelectedIndex(1, juce::sendNotificationSync);
+        expectEquals(static_cast<int>(pitch->waveformRegionCount()), 2);
+        if (auto* backing = find(view, "studio.track.backing-id"))
+            backing->mouseDown(mouseEvent(*backing, {40, 20}, juce::ModifierKeys::leftButtonModifier | juce::ModifierKeys::shiftModifier));
+        expectEquals(static_cast<int>(pitch->waveformRegionCount()), 0);
+        if (trackSelect->onChange) trackSelect->onChange(1);
+
+        beginTest("Clips beyond the source duration remain silent instead of repeating the final sample");
+        vocalClip.getDynamicObject()->setProperty("offset", 10.0);
+        secondClip.getDynamicObject()->setProperty("offset", 10.0);
+        view.dispatch(projectEvent(project));
+        for (const auto& region : pitch->waveformRegions())
+            expect(std::all_of(region.peaks.begin(), region.peaks.end(), [](float peak) { return peak == 0.0f; }));
+        expect(pitch->waveformBounds().isEmpty());
+        vocalClip.getDynamicObject()->setProperty("offset", 1.0);
+        secondClip.getDynamicObject()->setProperty("offset", 0.0);
+
+        beginTest("Trackpad pinch keeps its time anchor and Option pinch keeps its pitch anchor");
+        project.getDynamicObject()->setProperty("timelineDurationSeconds", 120.0);
+        view.dispatch(projectEvent(project));
+        zoom->setValue(80.0, juce::sendNotificationSync);
+        vertical->setValue(2.0, juce::sendNotificationSync);
+        scroll->setCurrentRangeStart(20.0, juce::sendNotificationSync);
+        auto point = pitch->getLocalPoint(pianoViewport, juce::Point<float>(500, 100));
+        const auto anchorX = ruler->getLocalPoint(pitch, point).x;
+        const auto beatBefore = scroll->getCurrentRangeStart() + static_cast<double>(anchorX) / view.state().pixelsPerBeat;
+        pitch->mouseMagnify(mouseEvent(*pitch, point, 0), 1.5f);
+        expectWithinAbsoluteError(view.state().pixelsPerBeat, 120.0, 0.001);
+        expectWithinAbsoluteError(scroll->getCurrentRangeStart() + static_cast<double>(anchorX) / view.state().pixelsPerBeat, beatBefore, 0.001);
+        const auto pitchBefore = (pianoViewport->getViewPositionY() + 100.0) / view.state().verticalZoom;
+        point = pitch->getLocalPoint(pianoViewport, juce::Point<float>(500, 100));
+        pitch->mouseMagnify(mouseEvent(*pitch, point, juce::ModifierKeys::altModifier), 1.25f);
+        expectWithinAbsoluteError(view.state().verticalZoom, 2.5, 0.001);
+        expectWithinAbsoluteError((pianoViewport->getViewPositionY() + 100.0) / view.state().verticalZoom, pitchBefore, 1.0);
+        const auto state = view.state();
+        pitch->mouseMagnify(mouseEvent(*pitch, point), std::numeric_limits<float>::quiet_NaN());
+        expectWithinAbsoluteError(view.state().pixelsPerBeat, state.pixelsPerBeat, 0.001);
+        expectWithinAbsoluteError(view.state().verticalZoom, state.verticalZoom, 0.001);
+        pianoViewport->mouseMagnify(mouseEvent(*pianoViewport, {30, 100}, juce::ModifierKeys::altModifier), 1.1f);
+        expectWithinAbsoluteError(view.state().verticalZoom, 2.75, 0.001);
+
+        beginTest("Diagonal trackpad noise does not suppress modifier zoom");
+        juce::MouseWheelDetails wheel; wheel.deltaX = 0.001f; wheel.deltaY = 0.1f; wheel.isSmooth = true;
+        vertical->setValue(2.0, juce::sendNotificationSync);
+        pitch->mouseWheelMove(mouseEvent(*pitch, point, juce::ModifierKeys::altModifier), wheel);
+        expect(view.state().verticalZoom > 2.1);
+        view.removeFromDesktop();
+    }
+};
+StudioPresentationChecks studioPresentationChecks;
+
+// Exercise queued UI -> backend -> UI feedback through the real message loop.
 class QueuedChecks final : private juce::Timer
 {
 public:

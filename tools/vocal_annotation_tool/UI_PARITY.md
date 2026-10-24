@@ -36,9 +36,17 @@ direction and a half-second default. Gain/vibrato preview locally and commit onc
 Chord Snap transforms preview, audition and commit consistently.
 
 The keyboard and pitch editor scroll vertically together. Zoom spans 1–4×;
-Alt+wheel changes vertical zoom, Command/Ctrl+wheel horizontal zoom and Shift+wheel
-pans time. The collapse button retains the toolbar, selection, zoom and scroll.
+Pinch changes horizontal zoom; Option/Alt + pinch changes vertical zoom around
+the pointer. Alt+wheel changes vertical zoom, Command/Ctrl+wheel horizontal zoom
+and Shift+wheel pans time. These gestures also work over the ruler and keyboard. The collapse button retains the toolbar, selection, zoom and scroll.
 Tool defaults and shortcuts follow the previous editor.
+
+A subtle audio waveform sits behind the selected track's notes. It uses the
+actual arrangement clip positions, source offsets and durations, converted through
+the tempo map. Silent gaps stay empty; multiple selected tracks hide the waveform
+to avoid implying that one track's audio belongs to another. The waveform stays
+centered in the visible piano viewport while pitches scroll, with geometry cached
+outside paint. Backing-group headers share the track-header column width.
 
 Vocal-fragment edits retain source note bounds/regions and exact pitch; a group
 edit transforms each source once and creates one history action. Incoming data,

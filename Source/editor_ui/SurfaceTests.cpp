@@ -104,6 +104,103 @@ public:
         expect(clip.geometryRevision() > cacheRevision);
         expectWithinAbsoluteError(clip.clipBounds().getX(), -60.0f, 0.001f);
 
+        beginTest("Pitch background waveform follows clip beats and stays in the visible vertical viewport");
+        TimeViewport waveformTime;
+        PitchEditor waveformPitch(waveformTime); waveformPitch.setSize(600, 300);
+        waveformPitch.setWaveformViewport(100.0f, 100.0f);
+        const auto emptyUnderlay = waveformPitch.createComponentSnapshot(waveformPitch.getLocalBounds());
+        PitchWaveformRegion waveformRegion;
+        waveformRegion.startBeat = 196.0; waveformRegion.lengthBeats = 4.0; waveformRegion.peaks = { 0.0f, 0.25f, 1.0f, 0.5f };
+        PitchWaveformRegion laterRegion = waveformRegion;
+        laterRegion.startBeat = 202.0; laterRegion.lengthBeats = 2.0; laterRegion.peaks = { 0.5f, 0.5f };
+        waveformPitch.setWaveformRegions({ waveformRegion, laterRegion });
+        expectEquals(static_cast<int>(waveformPitch.waveformRegionCount()), 2);
+        expectWithinAbsoluteError(waveformPitch.waveformRegions().front().startBeat, 196.0, 0.0001);
+        expectWithinAbsoluteError(waveformPitch.waveformBounds().getX(), 60.0f, 0.001f);
+        expectWithinAbsoluteError(waveformPitch.waveformBounds().getRight(), 180.0f, 0.001f);
+        expectWithinAbsoluteError(waveformPitch.waveformBounds().getY(), 120.0f, 0.001f);
+        expectWithinAbsoluteError(waveformPitch.waveformBounds().getHeight(), 60.0f, 0.001f);
+        const auto withUnderlay = waveformPitch.createComponentSnapshot(waveformPitch.getLocalBounds());
+        expect(emptyUnderlay.getPixelAt(100, 125) != withUnderlay.getPixelAt(100, 125));
+        expect(emptyUnderlay.getPixelAt(135, 150) == withUnderlay.getPixelAt(135, 150), "Separate clips leave a real waveform gap");
+        waveformPitch.setWaveformRegions({ waveformRegion, waveformRegion, laterRegion });
+        const auto overlappedUnderlay = waveformPitch.createComponentSnapshot(waveformPitch.getLocalBounds());
+        expect(withUnderlay.getPixelAt(100, 125) == overlappedUnderlay.getPixelAt(100, 125), "Overlapping same-track clips keep their waveform opacity");
+        waveformPitch.setWaveformRegions({ waveformRegion, laterRegion });
+        const auto waveformRevision = waveformPitch.waveformGeometryRevision();
+        waveformPitch.paint(graphics); waveformPitch.paint(graphics);
+        waveformPitch.setSelectedNote(42); waveformPitch.setNotes({});
+        waveformPitch.setWaveformRegions({ waveformRegion, laterRegion });
+        waveformPitch.setWaveformViewport(100.0f, 100.0f);
+        expectEquals(waveformPitch.waveformGeometryRevision(), waveformRevision);
+        waveformPitch.setWaveformViewport(180.0f, 80.0f);
+        expectWithinAbsoluteError(waveformPitch.waveformBounds().getCentreY(), 220.0f, 0.001f);
+        expectWithinAbsoluteError(waveformPitch.waveformBounds().getHeight(), 48.0f, 0.001f);
+        waveformPitch.setSize(600, 600);
+        expectWithinAbsoluteError(waveformPitch.waveformBounds().getCentreY(), 220.0f, 0.001f);
+        waveformPitch.setWaveformViewport(300.0f, 80.0f);
+        expectWithinAbsoluteError(waveformPitch.waveformBounds().getCentreY(), 340.0f, 0.001f);
+        waveformTime.zoomAt(2.0, 0.0f); waveformPitch.viewportChanged();
+        expectWithinAbsoluteError(waveformPitch.waveformBounds().getX(), 120.0f, 0.001f);
+        waveformTime.scroll(2.0); waveformPitch.viewportChanged();
+        expectWithinAbsoluteError(waveformPitch.waveformBounds().getX(), 60.0f, 0.001f);
+        waveformRegion.peaks = { std::numeric_limits<float>::quiet_NaN(), -0.5f, 2.0f };
+        waveformPitch.setWaveformRegions({ waveformRegion });
+        expectEquals(waveformPitch.waveformRegions().front().peaks.front(), 0.0f);
+        expectEquals(waveformPitch.waveformRegions().front().peaks[1], 0.5f);
+        expectEquals(waveformPitch.waveformRegions().front().peaks[2], 1.0f);
+        waveformRegion.lengthBeats = -1.0; waveformPitch.setWaveformRegions({ waveformRegion });
+        expect(waveformPitch.waveformBounds().isEmpty());
+        waveformPitch.setWaveformRegions({}); expectEquals(static_cast<int>(waveformPitch.waveformRegionCount()), 0);
+
+        beginTest("Trackpad magnify defaults to anchored horizontal zoom and forwards owner gesture modifiers");
+        TimelineRuler magnifyRuler(waveformTime);
+        auto defaultMagnifies = 0; double magnifyFactor = 0.0; float magnifyAnchor = 0.0f;
+        const auto magnifyBeat = waveformTime.beatAtX(123.0f);
+        magnifyRuler.onViewportGesture = [&](double pan, double factor, float anchor)
+        {
+            ++defaultMagnifies; expectWithinAbsoluteError(pan, 0.0, 0.0001);
+            magnifyFactor = factor; magnifyAnchor = anchor; waveformTime.zoomAt(factor, anchor);
+        };
+        magnifyRuler.mouseMagnify(mouseDownAt(magnifyRuler, { 123, 40 }, 0), 1.25f);
+        expectEquals(defaultMagnifies, 1); expectWithinAbsoluteError(magnifyFactor, 1.25, 0.0001);
+        expectWithinAbsoluteError(magnifyAnchor, 123.0f, 0.0001f);
+        expectWithinAbsoluteError(waveformTime.beatAtX(123.0f), magnifyBeat, 0.0001);
+        auto ownerMagnifies = 0;
+        waveformPitch.onMagnifyGesture = [&](const juce::MouseEvent& event, float factor)
+        {
+            ++ownerMagnifies; expect(event.mods.isAltDown()); expect(event.eventComponent == &waveformPitch);
+            expectWithinAbsoluteError(event.position.y, 240.0f, 0.0001f); expectWithinAbsoluteError(factor, 0.75f, 0.0001f);
+        };
+        waveformPitch.mouseMagnify(mouseDownAt(waveformPitch, { 55, 240 }, juce::ModifierKeys::altModifier), 0.75f);
+        expectEquals(ownerMagnifies, 1); expectEquals(defaultMagnifies, 1);
+        for (const auto invalid : { 0.0f, -1.0f, std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity() })
+            waveformPitch.mouseMagnify(mouseDownAt(waveformPitch, { 55, 240 }), invalid);
+        expectEquals(ownerMagnifies, 1);
+        auto deletingMagnify = std::make_unique<TimelineRuler>(waveformTime);
+        deletingMagnify->onMagnifyGesture = [&](const juce::MouseEvent&, float) { deletingMagnify.reset(); };
+        deletingMagnify->mouseMagnify(mouseDownAt(*deletingMagnify, { 10, 10 }, 0), 1.1f);
+        expect(deletingMagnify == nullptr);
+
+        beginTest("Shared wheel routing chooses the dominant axis and lets ruler owners handle modifiers");
+        TimelineRuler wheelRuler(waveformTime);
+        auto wheelViewportCalls = 0, wheelOwnerCalls = 0; double sharedPan = 0.0, sharedZoom = 0.0;
+        wheelRuler.onViewportGesture = [&](double pan, double factor, float)
+        { ++wheelViewportCalls; sharedPan = pan; sharedZoom = factor; };
+        juce::MouseWheelDetails noisyWheel; noisyWheel.deltaX = 0.001f; noisyWheel.deltaY = 0.5f;
+        wheelRuler.mouseWheelMove(mouseDownAt(wheelRuler, { 25, 15 }, 0), noisyWheel);
+        expectEquals(wheelViewportCalls, 1);
+        expectWithinAbsoluteError(sharedPan, -80.0 / waveformTime.pixelsPerBeat, 0.0001);
+        wheelRuler.mouseWheelMove(mouseDownAt(wheelRuler, { 25, 15 }, juce::ModifierKeys::commandModifier), noisyWheel);
+        expectWithinAbsoluteError(sharedZoom, std::exp(0.85), 0.0001);
+        wheelRuler.onWheelGesture = [&](const juce::MouseEvent& event, const juce::MouseWheelDetails& wheel)
+        { ++wheelOwnerCalls; expect(event.mods.isAltDown()); expectWithinAbsoluteError(wheel.deltaY, 0.5f, 0.0001f); };
+        wheelRuler.mouseWheelMove(mouseDownAt(wheelRuler, { 25, 15 }, juce::ModifierKeys::altModifier), noisyWheel);
+        expectEquals(wheelOwnerCalls, 1); expectEquals(wheelViewportCalls, 2);
+        noisyWheel.deltaX = std::numeric_limits<float>::quiet_NaN();
+        wheelRuler.mouseWheelMove(mouseDownAt(wheelRuler, { 25, 15 }, juce::ModifierKeys::altModifier), noisyWheel);
+        expectEquals(wheelOwnerCalls, 1);
+
         beginTest("Note hit-testing, overlapping selection and silent programmatic updates");
         viewport = {};
         PitchEditor pitch(viewport);

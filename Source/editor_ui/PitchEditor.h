@@ -35,12 +35,28 @@ struct NoteSegment
 
 enum class PitchTool { pointer, pencil, eraser, scissors, join, flex, vibrato, gain, zoom };
 
+struct PitchWaveformRegion
+{
+    double startBeat = 0.0, lengthBeats = 0.0;
+    // Absolute peaks, uniformly spaced across the trimmed region in beats.
+    std::vector<float> peaks;
+    juce::Colour colour { 0xffb5c89b };
+};
+
 class PitchEditor final : public EditorSurface, private juce::Timer
 {
 public:
     explicit PitchEditor(const TimeViewport&);
     ~PitchEditor() override;
     void setNotes(std::vector<NoteSegment>);
+    void setWaveformRegions(std::vector<PitchWaveformRegion>);
+    // Surface-local visible Y range. It keeps the underlay fixed on screen as
+    // the full-height MIDI canvas scrolls vertically. Default: entire component.
+    void setWaveformViewport(float top, float visibleHeight);
+    const std::vector<PitchWaveformRegion>& waveformRegions() const noexcept { return waveformRegions_; }
+    std::size_t waveformRegionCount() const noexcept { return waveformRegions_.size(); }
+    std::size_t waveformGeometryRevision() const noexcept { return waveformGeometryRevision_; }
+    juce::Rectangle<float> waveformBounds() const noexcept { return waveformBounds_; }
     void setNoteRange(int lowestMidiNote, int highestMidiNote);
     void setSelectedNote(int id);
     int selectedNote() const noexcept { return selectedNote_; }
@@ -70,7 +86,6 @@ public:
     std::function<void(PitchTool, int, double)> onNoteExpressionEdited;
     std::function<void(double pitch, bool restart)> onPitchPreview;
     std::function<void()> onPitchPreviewEnd;
-    std::function<void(const juce::MouseEvent&, const juce::MouseWheelDetails&)> onWheelGesture;
     // Zero disables snapping; positive values are quarter-note beat divisions.
     void setSnapBeats(double);
     int hitTestNote(juce::Point<float>) const noexcept;
@@ -86,6 +101,7 @@ public:
     void mouseDrag(const juce::MouseEvent&) override;
     void mouseUp(const juce::MouseEvent&) override;
     void mouseWheelMove(const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
+    void mouseMagnify(const juce::MouseEvent&, float scaleFactor) override;
     void focusLost(FocusChangeType) override;
     void visibilityChanged() override;
     void enablementChanged() override;
@@ -103,6 +119,14 @@ private:
         double gainDb = 0.0;
     };
     void rebuildGeometry();
+    void rebuildWaveform();
+    struct CachedWaveform { juce::Path path; juce::Colour colour; juce::Rectangle<float> bounds; };
+    std::vector<PitchWaveformRegion> waveformRegions_;
+    std::vector<CachedWaveform> waveforms_;
+    juce::Rectangle<float> waveformBounds_;
+    std::size_t waveformGeometryRevision_ = 0;
+    float waveformTop_ = 0.0f, waveformHeight_ = 0.0f, waveformPeak_ = 0.0f;
+    bool waveformViewportSet_ = false;
     void cancelNoteDrag();
     int midiNoteAt(float y) const noexcept;
     double pitchAt(float y) const noexcept;

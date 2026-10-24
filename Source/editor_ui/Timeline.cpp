@@ -61,15 +61,27 @@ void EditorSurface::mouseDown(const juce::MouseEvent& e)
     if (safeThis != nullptr) safeThis->seekAt(position.x);
 }
 void EditorSurface::mouseDrag(const juce::MouseEvent& e) { seekAt(e.position.x); }
-void EditorSurface::mouseWheelMove(const juce::MouseEvent& e, const juce::MouseWheelDetails& wheel)
+void EditorSurface::mouseWheelMove(const juce::MouseEvent& event, const juce::MouseWheelDetails& wheel)
 {
+    if (!std::isfinite(wheel.deltaX) || !std::isfinite(wheel.deltaY)) return;
+    if (wheel.deltaX == 0.0f && wheel.deltaY == 0.0f) return;
+    const auto wheelCallback = onWheelGesture;
+    if (wheelCallback) { wheelCallback(event, wheel); return; }
     const auto callback = onViewportGesture;
     if (!callback) return;
-    const auto delta = wheel.deltaX != 0.0f ? wheel.deltaX : wheel.deltaY;
-    if (e.mods.isCommandDown() || e.mods.isCtrlDown())
-        callback(0.0, std::exp(static_cast<double>(delta) * 1.7), e.position.x);
-    else
-        callback(-static_cast<double>(delta) * 160.0 / viewport_.pixelsPerBeat, 1.0, e.position.x);
+    const auto delta = std::abs(wheel.deltaX) > std::abs(wheel.deltaY) ? wheel.deltaX : wheel.deltaY;
+    if (event.mods.isCommandDown() || event.mods.isCtrlDown())
+        callback(0.0, std::exp(std::clamp(static_cast<double>(delta) * 1.7, -6.0, 6.0)), event.position.x);
+    else if (std::isfinite(viewport_.pixelsPerBeat) && viewport_.pixelsPerBeat > 0.0)
+        callback(-static_cast<double>(delta) * 160.0 / viewport_.pixelsPerBeat, 1.0, event.position.x);
+}
+void EditorSurface::mouseMagnify(const juce::MouseEvent& event, float scaleFactor)
+{
+    if (!std::isfinite(scaleFactor) || scaleFactor <= 0.0f) return;
+    const auto magnify = onMagnifyGesture;
+    if (magnify) { magnify(event, scaleFactor); return; }
+    const auto viewport = onViewportGesture;
+    if (viewport) viewport(0.0, static_cast<double>(scaleFactor), event.position.x);
 }
 bool EditorSurface::keyPressed(const juce::KeyPress& key)
 {

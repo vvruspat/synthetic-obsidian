@@ -60,7 +60,7 @@ std::vector<float> decodePeaks(const juce::var& waveform)
     {
         juce::MemoryOutputStream decoded;
         if (!juce::Base64::convertFromBase64(decoded, waveform["data"].toString())) return peaks;
-        const auto count = std::min(static_cast<std::size_t>(std::max(0.0, number(waveform["pointCount"]))), decoded.getDataSize() / 4);
+        const auto count = static_cast<std::size_t>(std::clamp(number(waveform["pointCount"]), 0.0, static_cast<double>(decoded.getDataSize() / 4)));
         peaks.reserve(count);
         const auto* bytes = static_cast<const juce::uint8*>(decoded.getData());
         for (std::size_t i = 0; i < count; ++i)
@@ -128,6 +128,38 @@ private:
     double fallback_ = 120.0;
     std::vector<TempoChange> changes_;
 };
+AudioClipData prepareClipWaveform(const juce::var& clip, const TempoMap& tempoMap, juce::Colour tint)
+{
+    const auto start = std::max(0.0, number(clip["start"]));
+    const auto duration = std::max(0.0, number(clip["duration"]));
+    const auto offset = std::max(0.0, number(clip["offset"]));
+    const auto sourceDuration = number(clip["waveformDurationSeconds"], number(clip["sourceDurationSeconds"], offset + duration));
+    AudioClipData data;
+    data.name = clip["name"].toString(); data.colour = tint;
+    data.startBeat = tempoMap.beatAt(start);
+    data.lengthBeats = tempoMap.beatAt(start + duration) - data.startBeat;
+    const auto sourcePeaks = decodePeaks(clip["waveform"]);
+    if (sourcePeaks.empty() || sourceDuration <= 0.0 || data.lengthBeats <= 0.0) return data;
+    // Source peaks are uniform in seconds. Each output beat bin covers its
+    // complete source interval, preserving transients across tempo changes.
+    const auto count = sourcePeaks.size();
+    const auto targetCount = std::clamp(static_cast<std::size_t>(std::ceil(static_cast<double>(count) * std::min(1.0, duration / sourceDuration))), std::size_t{2}, std::max(std::size_t{2}, count));
+    data.peaks.reserve(targetCount);
+    for (std::size_t i = 0; i < targetCount; ++i)
+    {
+        const auto fromBeat = data.startBeat + data.lengthBeats * static_cast<double>(i) / static_cast<double>(targetCount);
+        const auto toBeat = data.startBeat + data.lengthBeats * static_cast<double>(i + 1) / static_cast<double>(targetCount);
+        const auto sourceFrom = offset + tempoMap.secondsAt(fromBeat) - start;
+        const auto sourceTo = offset + tempoMap.secondsAt(toBeat) - start;
+        if (sourceFrom >= sourceDuration || sourceTo <= 0.0) { data.peaks.push_back(0.0f); continue; }
+        const auto first = std::min(count - 1, static_cast<std::size_t>(std::floor(std::clamp(sourceFrom / sourceDuration, 0.0, 1.0) * static_cast<double>(count))));
+        const auto last = std::clamp(static_cast<std::size_t>(std::ceil(std::clamp(sourceTo / sourceDuration, 0.0, 1.0) * static_cast<double>(count))), first + 1, count);
+        float peak = 0.0f;
+        for (auto sourceIndex = first; sourceIndex < last; ++sourceIndex) peak = std::max(peak, sourcePeaks[sourceIndex]);
+        data.peaks.push_back(peak);
+    }
+    return data;
+}
 class ArrangementPanel final : public juce::Component
 {
 public:
@@ -312,6 +344,10 @@ class PianoViewport final : public juce::Viewport
 {
 public:
     std::function<void(const juce::MouseEvent&, const juce::MouseWheelDetails&)> onWheel;
+    std::function<void(const juce::MouseEvent&, float)> onMagnify;
+    std::function<void(const juce::Rectangle<int>&)> onVisibleAreaChange;
+    void mouseMagnify(const juce::MouseEvent& event, float factor) override { const auto callback = onMagnify; if (callback) callback(event, factor); }
+    void visibleAreaChanged(const juce::Rectangle<int>& area) override { const auto callback = onVisibleAreaChange; if (callback) callback(area); }
     void mouseWheelMove(const juce::MouseEvent& event, const juce::MouseWheelDetails& wheel) override
     { const auto callback = onWheel; if (callback) callback(event, wheel); }
 };
@@ -395,45 +431,19 @@ public:
     class ClipItem final : public juce::Component, private juce::KeyListener
     {
     public:
-        ClipItem(Content& content, const juce::String& track, const juce::var& clip, juce::Colour tint)
+        ClipItem(Content& content, const juce::String& track, const juce::var& clip)
             : content_(content), track_(track), id_(clip["id"].toString()), start_(std::max(0.0, number(clip["start"]))),
               duration_(std::max(0.0, number(clip["duration"]))), audio_(localView_)
         {
             setComponentID(id_);
             addAndMakeVisible(audio_);
             audio_.setComponentID("studio.clip." + id_);
-            const auto sourcePeaks = decodePeaks(clip["waveform"]);
-            const auto offset = std::max(0.0, number(clip["offset"]));
-            const auto sourceDuration = number(clip["waveformDurationSeconds"], number(clip["sourceDurationSeconds"], offset + duration_));
-            AudioClipData data;
-            data.name = clip["name"].toString(); data.colour = tint;
-            data.startBeat = content_.tempoMap_.beatAt(start_);
-            data.lengthBeats = content_.tempoMap_.beatAt(start_ + duration_) - data.startBeat;
-            if (!sourcePeaks.empty() && sourceDuration > 0.0 && data.lengthBeats > 0.0)
-            {
-                // Audio peaks are uniform in source seconds, whereas AudioClip
-                // renders uniform beats. Reduce each beat bin over its source
-                // time interval so tempo changes preserve transient positions.
-                const auto count = sourcePeaks.size();
-                const auto targetCount = std::clamp(static_cast<std::size_t>(std::ceil(static_cast<double>(count) * std::min(1.0, duration_ / sourceDuration))), std::size_t{2}, std::max(std::size_t{2}, count));
-                data.peaks.reserve(targetCount);
-                for (std::size_t i = 0; i < targetCount; ++i)
-                {
-                    const auto fromBeat = data.startBeat + data.lengthBeats * static_cast<double>(i) / static_cast<double>(targetCount);
-                    const auto toBeat = data.startBeat + data.lengthBeats * static_cast<double>(i + 1) / static_cast<double>(targetCount);
-                    const auto sourceFrom = offset + content_.tempoMap_.secondsAt(fromBeat) - start_;
-                    const auto sourceTo = offset + content_.tempoMap_.secondsAt(toBeat) - start_;
-                    const auto first = std::min(count - 1, static_cast<std::size_t>(std::floor(std::clamp(sourceFrom / sourceDuration, 0.0, 1.0) * static_cast<double>(count))));
-                    const auto last = std::clamp(static_cast<std::size_t>(std::ceil(std::clamp(sourceTo / sourceDuration, 0.0, 1.0) * static_cast<double>(count))), first + 1, count);
-                    float peak = 0.0f;
-                    for (auto sourceIndex = first; sourceIndex < last; ++sourceIndex) peak = std::max(peak, sourcePeaks[sourceIndex]);
-                    data.peaks.push_back(peak);
-                }
-            }
+            auto data = content_.preparedClip(track, clip);
             localView_.firstBeat = data.startBeat; localView_.pixelsPerBeat = content_.view_.pixelsPerBeat;
             audio_.setData(std::move(data));
             audio_.onSelect = [this] { content_.selectClip(track_, id_); };
             audio_.onSeek = [this](double beat) { content_.seek(beat); };
+            audio_.onMagnifyGesture = [this](const juce::MouseEvent& event, float factor) { content_.magnify(event, factor); };
             audio_.addMouseListener(this, false);
             audio_.addKeyListener(this);
         }
@@ -455,6 +465,8 @@ public:
         bool keyPressed(const juce::KeyPress& key, juce::Component*) override { return content_.arrangementKey(key); }
         void mouseWheelMove(const juce::MouseEvent& event, const juce::MouseWheelDetails& wheel) override
         { content_.arrangementWheel(event, wheel, static_cast<float>(getX()) + event.position.x); }
+        void mouseMagnify(const juce::MouseEvent& event, float factor) override
+        { if (event.eventComponent == this) content_.magnify(event, factor); }
         void mouseDown(const juce::MouseEvent& event) override
         {
             dragOrigin_ = event.getScreenPosition(); moved_ = false;
@@ -526,10 +538,11 @@ public:
             regenerate_.onClick = [this] { content_.send(command("regenerate-backing-track", { { "track", track_.id }, { "generator", content_.backingPicker_.generator() } })); };
             updateControls();
             grid_.onSeek = [this](double beat) { content_.seek(beat); };
+            grid_.onMagnifyGesture = [this](const juce::MouseEvent& event, float factor) { content_.magnify(event, factor); };
             grid_.addMouseListener(this, false);
             for (const auto& value : array(track.source["clips"]))
             {
-                auto clip = std::make_unique<ClipItem>(content, track.id, value, trackColour(track.id, track.parent.isNotEmpty()));
+                auto clip = std::make_unique<ClipItem>(content, track.id, value);
                 body_.addAndMakeVisible(*clip); clips_.push_back(std::move(clip));
             }
         }
@@ -596,6 +609,8 @@ public:
         }
         void mouseWheelMove(const juce::MouseEvent& event, const juce::MouseWheelDetails& wheel) override
         { if (event.eventComponent == &grid_) content_.arrangementWheel(event, wheel, event.position.x); }
+        void mouseMagnify(const juce::MouseEvent& event, float factor) override
+        { if (event.eventComponent == this) content_.magnify(event, factor); }
         Content& content_; Track track_; TrackHeader header_; juce::Component body_; TimelineGrid grid_;
         ToggleButton audioLayer_, noteLayer_;
         Tooltip audioLayerTip_ { audioLayer_, "Toggle audio layer" }, noteLayerTip_ { noteLayer_, "Toggle note layer" };
@@ -617,6 +632,9 @@ public:
         pianoScroll_.setComponentID("studio.pitchViewport");
         scroll_.setComponentID("studio.arrangementViewport");
         pianoScroll_.onWheel = [this](const juce::MouseEvent& event, const juce::MouseWheelDetails& wheel) { pitchWheel(event, wheel); };
+        pianoScroll_.onMagnify = [this](const juce::MouseEvent& event, float factor) { magnify(event, factor); };
+        pianoScroll_.onVisibleAreaChange = [this](const juce::Rectangle<int>& area) { pitch_.setWaveformViewport(static_cast<float>(area.getY()), static_cast<float>(area.getHeight())); };
+        keyboard_.setComponentID("studio.keyboard");
         for (auto* child : std::initializer_list<juce::Component*> { &ruler_, &tempo_, &signature_, &chords_, &global_, &addTrack_, &arrangementPlayhead_, &musicalEvents_, &cycleOverlay_ }) arrangement_.addAndMakeVisible(child);
         toolbar_.setComponentID("studio.pitchToolbar");
         transport_.setComponentID("studio.transport"); ruler_.setComponentID("studio.ruler"); lowerRuler_.setComponentID("studio.pitchRuler"); pitch_.setComponentID("studio.pitch");
@@ -682,7 +700,13 @@ public:
         for (auto* surface : std::initializer_list<EditorSurface*> { &ruler_, &tempo_, &signature_, &chords_, &lowerRuler_, &pitch_ })
         {
             surface->onSeek = [this](double beat) { seek(beat); };
+            surface->onMagnifyGesture = [this](const juce::MouseEvent& event, float factor) { magnify(event, factor); };
             const auto lower = surface == &lowerRuler_ || surface == &pitch_;
+            surface->onWheelGesture = [this, lower](const juce::MouseEvent& event, const juce::MouseWheelDetails& wheel)
+            {
+                if (lower) pitchWheel(event, wheel);
+                else arrangementWheel(event, wheel, getLocalPoint(event.eventComponent, event.position).x - static_cast<float>(kHeaderWidth));
+            };
             surface->onViewportGesture = [this, lower](double scroll, double factor, float anchor) { gesture(scroll, factor, anchor - (lower ? static_cast<float>(kHeaderWidth - kKeyboardWidth) : 0.0f)); };
         }
         pitch_.onNoteSelected = [this](int id) { selectNote(id); };
@@ -763,6 +787,7 @@ public:
         if (shortcutRoot_ != nullptr) shortcutRoot_->removeComponentListener(this);
         for (auto target : shortcutTargets_) if (target != nullptr) target->removeKeyListener(this);
         horizontal_.removeListener(this);
+        pianoScroll_.onVisibleAreaChange = {}; pianoScroll_.onMagnify = {}; pianoScroll_.onWheel = {};
         scroll_.setViewedComponent(nullptr, false); pianoScroll_.setViewedComponent(nullptr, false);
     }
 
@@ -789,6 +814,7 @@ public:
     }
     void gesture(double scroll, double factor, float anchor)
     {
+        if (!std::isfinite(scroll) || !std::isfinite(factor) || factor <= 0.0 || !std::isfinite(anchor)) return;
         if (factor != 1.0) view_.zoomAt(factor, anchor);
         if (scroll != 0.0) view_.scroll(scroll);
         refreshViewport();
@@ -867,7 +893,7 @@ public:
         else if (const auto found = std::find(selectedTracks_.begin(), selectedTracks_.end(), id); found != selectedTracks_.end()) selectedTracks_.erase(found);
         else selectedTracks_.push_back(id);
         selectedTrack_ = selectedTracks_.size() == 1 ? selectedTracks_.front() : juce::String();
-        if (selectedTracks_ != previous) { selectedClip_.clear(); selectedNote_.clear(); selectedNotes_.clear(); rebuildPitch(); }
+        if (selectedTracks_ != previous) { selectedClip_.clear(); selectedNote_.clear(); selectedNotes_.clear(); rebuildPitch(); rebuildPitchWaveforms(); }
         trackSelect_.setSelectedIndex(-1);
         for (std::size_t i = 0; i < tracks_.size(); ++i) if (tracks_[i].id == selectedTrack_) trackSelect_.setSelectedIndex(static_cast<int>(i));
         for (auto& row : rows_) row->updateSelection();
@@ -1075,7 +1101,8 @@ public:
             {
                 auto group = std::make_unique<TrackGroupHeader>();
                 group->setComponentID("studio.group." + track.id); group->setAddCompact(true);
-                group->setTitle(track.name + " - Backing Vocals"); group->setExpanded(!track.collapsed);
+                group->setTitle("Backing Vocals"); static_cast<juce::Component&>(*group).setTitle("Backing vocals for " + track.name); group->setDescription("Backing vocals for " + track.name); group->setExpanded(!track.collapsed);
+                for (auto* child : group->getChildren()) if (child->getComponentID() == "group.toggle") child->setTitle("Backing vocals for " + track.name);
                 for (auto* child : group->getChildren()) if (child->getComponentID() == "group.add") { child->setComponentID("studio.addBacking." + track.id); child->setTitle("Add backing to " + track.name); }
                 group->onExpanded = [this, id = track.id](bool expanded) { send(command("set-track-collapsed", { { "track", id }, { "collapsed", !expanded } })); };
                 group->onAdd = [this, id = track.id] { selectTrack(id); if (const auto found = groups_.find(id); found != groups_.end()) showBackingPicker(id, *found->second); };
@@ -1095,6 +1122,44 @@ public:
             };
             restore(restore, arrangement_);
         }
+    }
+    const AudioClipData& preparedClip(const juce::String& trackId, const juce::var& clip)
+    {
+        const auto key = trackId + "\n" + clip["id"].toString();
+        const auto existing = preparedClips_.find(key);
+        if (existing != preparedClips_.end()) return existing->second;
+        const auto* track = findTrack(trackId);
+        return preparedClips_.emplace(key, prepareClipWaveform(clip, tempoMap_, trackColour(trackId, track != nullptr && track->parent.isNotEmpty()))).first->second;
+    }
+    void rebuildPitchWaveforms()
+    {
+        std::vector<PitchWaveformRegion> regions;
+        if (selectedTracks_.size() == 1)
+        {
+            const auto& id = selectedTracks_.front(); const auto* track = findTrack(id);
+            const auto* source = track != nullptr ? track->source.getDynamicObject() : nullptr;
+            if (source != nullptr && source->hasProperty("clips"))
+            {
+                // An empty arrangement is authoritative: never substitute a
+                // parent track's audio or an obsolete legacy waveform.
+                for (const auto& clip : array(track->source["clips"]))
+                {
+                    const auto& data = preparedClip(id, clip);
+                    if (!data.peaks.empty() && data.lengthBeats > 0.0) regions.push_back({ data.startBeat, data.lengthBeats, data.peaks, data.colour });
+                }
+            }
+            else
+            {
+                const auto content = backingContent(id);
+                const auto waveform = id == "Instrumental" ? project_["instrumentalWaveform"] : id == "Voice Main" ? project_["vocalWaveform"] : content["waveform"];
+                const auto duration = id == "Instrumental" ? number(project_["instrumentalDurationSeconds"]) : id == "Voice Main" ? number(project_["vocalDurationSeconds"]) : number(content["audioDurationSeconds"]);
+                const auto clip = object({ { "id", "legacy-waveform" }, { "start", 0.0 }, { "duration", duration }, { "offset", 0.0 }, { "waveformDurationSeconds", duration }, { "waveform", waveform } });
+                const auto& data = preparedClip(id, clip);
+                if (!data.peaks.empty() && data.lengthBeats > 0.0) regions.push_back({ data.startBeat, data.lengthBeats, data.peaks, data.colour });
+            }
+        }
+        pitch_.setWaveformRegions(std::move(regions));
+        pitch_.setWaveformViewport(static_cast<float>(pianoScroll_.getViewPositionY()), static_cast<float>(pianoScroll_.getHeight()));
     }
     void rebuildPitch()
     {
@@ -1183,7 +1248,7 @@ public:
         const auto type = event["type"].toString();
         if (type == "project-state")
         {
-            project_ = event["project"]; tempoMap_.set(project_);
+            project_ = event["project"]; tempoMap_.set(project_); preparedClips_.clear();
             duration_ = std::max(0.0, number(project_["timelineDurationSeconds"]));
             arrangement_.tempo = number(project_["tempo"], 120.0); arrangement_.meter = project_["meter"].toString();
             auto title = project_["title"].toString(); if (title.isEmpty()) title = project_["name"].toString();
@@ -1244,7 +1309,7 @@ public:
             loopActive_ = static_cast<bool>(project_["initialLoopActive"]); transport_.setLooping(loopActive_); loopRange_ = project_["initialCycleRange"];
             if (!loopRange_.isObject()) loopRange_ = object({ { "start", 0.0 }, { "end", 25.0 } });
             cycleOverlay_.setRange(number(loopRange_["start"]), number(loopRange_["end"]), loopActive_, duration_);
-            rebuildRows(); rebuildPitch();
+            rebuildRows(); rebuildPitch(); rebuildPitchWaveforms();
             if (!fitted_ && duration_ > 0.0 && std::any_of(tracks_.begin(), tracks_.end(), [](const auto& track) { return !array(track.source["clips"]).isEmpty(); }))
             { view_.firstBeat = 0.0; view_.pixelsPerBeat = std::clamp(static_cast<double>(std::max(300, ruler_.getWidth())) / std::max(1.0, tempoMap_.beatAt(duration_)), 5.0, 80.0); fitted_ = true; }
             refreshViewport(); updatePosition(number(project_["initialPlayhead"])); arrangement_.repaint();
@@ -1328,6 +1393,7 @@ public:
         pianoCanvas_.setSize(pianoScroll_.getWidth(), canvasHeight);
         keyboard_.setBounds(2, 0, kKeyboardWidth - 4, canvasHeight);
         pitch_.setBounds(kKeyboardWidth, 0, std::max(0, pianoCanvas_.getWidth() - kKeyboardWidth), canvasHeight);
+        pitch_.setWaveformViewport(static_cast<float>(pianoScroll_.getViewPositionY()), static_cast<float>(pianoScroll_.getHeight()));
         if (!pianoViewportInitialised_ && pianoScroll_.getHeight() > 0)
         {
             const auto centreC4 = (static_cast<double>(kPitchMaximum - 60) + 0.5) * kPitchRowHeight * verticalZoom_;
@@ -1337,6 +1403,8 @@ public:
     }
     void setVerticalZoom(double zoom, float requestedAnchor = -1.0f)
     {
+        if (!std::isfinite(zoom)) return;
+        if (!std::isfinite(requestedAnchor)) requestedAnchor = -1.0f;
         zoom = std::clamp(zoom, 1.0, 4.0);
         if (std::abs(zoom - verticalZoom_) < 0.000001) return;
         auto anchor = requestedAnchor;
@@ -1354,18 +1422,38 @@ public:
         pianoScroll_.setViewPosition(0, juce::roundToInt(unscaledY * verticalZoom_ - static_cast<double>(anchor)));
         pitchZoom_.setValue(verticalZoom_);
     }
+    static double dominantWheelDelta(const juce::MouseWheelDetails& wheel)
+    { return std::abs(wheel.deltaX) > std::abs(wheel.deltaY) ? static_cast<double>(wheel.deltaX) : static_cast<double>(wheel.deltaY); }
+    static double wheelZoomFactor(double delta) { return std::exp(std::clamp(delta * 1.7, -1.4, 1.4)); }
+    void magnify(const juce::MouseEvent& event, float requestedFactor)
+    {
+        if (!std::isfinite(requestedFactor) || requestedFactor <= 0.0f || !std::isfinite(event.position.x) || !std::isfinite(event.position.y)) return;
+        const auto factor = static_cast<double>(std::clamp(requestedFactor, 0.25f, 4.0f));
+        const auto local = getLocalPoint(event.eventComponent, event.position);
+        if (event.mods.isAltDown())
+        {
+            const auto inPiano = pianoScroll_.getBounds().contains(local.toInt());
+            const auto anchorY = inPiano ? pianoScroll_.getLocalPoint(event.eventComponent, event.position).y : -1.0f;
+            setVerticalZoom(verticalZoom_ * factor, anchorY);
+        }
+        else gesture(0.0, factor, local.x - static_cast<float>(kHeaderWidth));
+    }
+    void mouseMagnify(const juce::MouseEvent& event, float factor) override { magnify(event, factor); }
     void pitchWheel(const juce::MouseEvent& event, const juce::MouseWheelDetails& wheel)
     {
-        const auto delta = wheel.deltaX != 0.0f ? wheel.deltaX : wheel.deltaY;
+        if (!std::isfinite(wheel.deltaX) || !std::isfinite(wheel.deltaY) || !std::isfinite(event.position.x) || !std::isfinite(event.position.y)) return;
+        const auto delta = dominantWheelDelta(wheel);
+        if (delta == 0.0) return;
         const auto local = getLocalPoint(event.eventComponent, event.position);
         const auto anchorX = local.x - static_cast<float>(kHeaderWidth);
         if (event.mods.isAltDown())
         {
-            const auto anchor = pianoScroll_.getLocalPoint(event.eventComponent, event.position).y;
-            setVerticalZoom(verticalZoom_ * std::exp(static_cast<double>(delta) * 1.7), anchor);
+            const auto inPiano = pianoScroll_.getBounds().contains(local.toInt());
+            const auto anchor = inPiano ? pianoScroll_.getLocalPoint(event.eventComponent, event.position).y : -1.0f;
+            setVerticalZoom(verticalZoom_ * wheelZoomFactor(delta), anchor);
         }
-        else if (event.mods.isCommandDown() || event.mods.isCtrlDown()) gesture(0.0, std::exp(static_cast<double>(delta) * 1.7), anchorX);
-        else if (event.mods.isShiftDown() || std::abs(wheel.deltaX) > std::abs(wheel.deltaY)) gesture(-static_cast<double>(delta) * 160.0 / view_.pixelsPerBeat, 1.0, anchorX);
+        else if (event.mods.isCommandDown() || event.mods.isCtrlDown()) gesture(0.0, wheelZoomFactor(delta), anchorX);
+        else if (event.mods.isShiftDown() || std::abs(wheel.deltaX) > std::abs(wheel.deltaY)) gesture(-delta * 160.0 / view_.pixelsPerBeat, 1.0, anchorX);
         else pianoScroll_.setViewPosition(0, pianoScroll_.getViewPositionY() - juce::roundToInt(wheel.deltaY * 220.0f));
     }
     void resized() override
@@ -1420,7 +1508,7 @@ public:
             if (group != groups_.end())
             {
                 group->second->setVisible(visible);
-                if (visible) { group->second->setBounds(16, y, std::min(scroll_.getWidth() - 24, 420), 38); y += 40; }
+                if (visible) { group->second->setBounds(8, y, kHeaderWidth - 10, 38); y += 40; }
             }
             const auto childrenVisible = visible && track != nullptr && !track->collapsed;
             for (const auto& child : tracks_) if (child.parent == id) self(self, child.id, childrenVisible);
@@ -1444,9 +1532,12 @@ public:
     }
     void arrangementWheel(const juce::MouseEvent& event, const juce::MouseWheelDetails& wheel, float anchor)
     {
-        const auto delta = wheel.deltaX != 0.0f ? wheel.deltaX : wheel.deltaY;
-        if (event.mods.isCommandDown() || event.mods.isCtrlDown()) gesture(0.0, std::exp(static_cast<double>(delta) * 1.7), anchor);
-        else if (event.mods.isShiftDown() || std::abs(wheel.deltaX) > std::abs(wheel.deltaY)) gesture(-static_cast<double>(delta) * 160.0 / view_.pixelsPerBeat, 1.0, anchor);
+        if (!std::isfinite(wheel.deltaX) || !std::isfinite(wheel.deltaY) || !std::isfinite(event.position.x) || !std::isfinite(event.position.y)) return;
+        const auto delta = dominantWheelDelta(wheel);
+        if (delta == 0.0) return;
+        if (event.mods.isAltDown()) setVerticalZoom(verticalZoom_ * wheelZoomFactor(delta));
+        else if (event.mods.isCommandDown() || event.mods.isCtrlDown()) gesture(0.0, wheelZoomFactor(delta), anchor);
+        else if (event.mods.isShiftDown() || std::abs(wheel.deltaX) > std::abs(wheel.deltaY)) gesture(-delta * 160.0 / view_.pixelsPerBeat, 1.0, anchor);
         else scroll_.setViewPosition(0, scroll_.getViewPositionY() - juce::roundToInt(wheel.deltaY * 220.0f));
     }
     bool arrangementKey(const juce::KeyPress& key)
@@ -1587,6 +1678,7 @@ private:
     Menu menu_;
     BackingPicker backingPicker_;
     std::vector<Note> notes_;
+    std::map<juce::String, AudioClipData> preparedClips_;
     std::map<juce::String, int> noteIds_;
     std::set<juce::String> selectedNotes_, activatedBackingTracks_;
     int nextNoteId_ = 1;

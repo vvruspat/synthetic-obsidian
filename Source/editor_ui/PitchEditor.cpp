@@ -113,6 +113,87 @@ void PitchEditor::setNotes(std::vector<NoteSegment> notes)
     std::erase_if(selectedNotes_, [this](int id) { return std::none_of(notes_.begin(), notes_.end(), [id](const auto& note) { return note.id == id; }); });
     rebuildGeometry(); repaint(); endPitchPreview();
 }
+void PitchEditor::setWaveformRegions(std::vector<PitchWaveformRegion> regions)
+{
+    auto peak = 0.0f;
+    for (auto& region : regions)
+    {
+        if (!std::isfinite(region.startBeat) || !std::isfinite(region.lengthBeats) || region.lengthBeats <= 0.0)
+        { region.startBeat = 0.0; region.lengthBeats = 0.0; region.peaks.clear(); continue; }
+        for (auto& value : region.peaks)
+        { value = std::isfinite(value) ? std::clamp(std::abs(value), 0.0f, 1.0f) : 0.0f; peak = std::max(peak, value); }
+    }
+    const auto unchanged = regions.size() == waveformRegions_.size()
+        && std::equal(regions.begin(), regions.end(), waveformRegions_.begin(), [](const auto& left, const auto& right)
+        {
+            return juce::approximatelyEqual(left.startBeat, right.startBeat) && juce::approximatelyEqual(left.lengthBeats, right.lengthBeats)
+                && left.colour == right.colour && left.peaks == right.peaks;
+        });
+    if (unchanged) return;
+    waveformRegions_ = std::move(regions); waveformPeak_ = peak;
+    rebuildWaveform(); repaint();
+}
+void PitchEditor::setWaveformViewport(float top, float visibleHeight)
+{
+    if (!std::isfinite(top) || !std::isfinite(visibleHeight)) return;
+    top = std::max(0.0f, top); visibleHeight = std::max(0.0f, visibleHeight);
+    if (waveformViewportSet_ && juce::approximatelyEqual(top, waveformTop_) && juce::approximatelyEqual(visibleHeight, waveformHeight_)) return;
+    waveformViewportSet_ = true; waveformTop_ = top; waveformHeight_ = visibleHeight;
+    rebuildWaveform(); repaint();
+}
+void PitchEditor::rebuildWaveform()
+{
+    ++waveformGeometryRevision_; waveforms_.clear(); waveformBounds_ = {};
+    if (getWidth() <= 0 || getHeight() <= 0 || waveformPeak_ <= 0.0f) return;
+    const auto area = juce::Rectangle<float>(0.0f, waveformViewportSet_ ? waveformTop_ : 0.0f, static_cast<float>(getWidth()),
+                                            waveformViewportSet_ ? waveformHeight_ : static_cast<float>(getHeight())).getIntersection(getLocalBounds().toFloat());
+    if (area.isEmpty()) return;
+    const auto centre = area.getCentreY(), amplitude = area.getHeight() * 0.3f;
+    waveforms_.reserve(waveformRegions_.size());
+    for (const auto& region : waveformRegions_)
+    {
+        if (region.peaks.empty() || region.lengthBeats <= 0.0) continue;
+        const auto x = viewport_.xForBeat(region.startBeat);
+        const auto width = static_cast<float>(region.lengthBeats * viewport_.pixelsPerBeat);
+        if (!std::isfinite(x) || !std::isfinite(width) || width <= 0.0f) continue;
+        const auto bounds = juce::Rectangle<float>(x, area.getY(), width, area.getHeight());
+        const auto visible = bounds.getIntersection(area);
+        if (visible.isEmpty()) continue;
+        const auto count = region.peaks.size();
+        const auto samplesPerPixel = static_cast<double>(count) / static_cast<double>(width);
+        const auto left = std::max(0, static_cast<int>(std::floor(visible.getX())));
+        const auto right = std::min(getWidth(), static_cast<int>(std::ceil(visible.getRight())));
+        std::vector<float> peaks;
+        peaks.reserve(static_cast<std::size_t>(std::max(0, right - left)));
+        juce::Path path;
+        path.startNewSubPath(visible.getX(), centre);
+        for (auto pixel = left; pixel < right; ++pixel)
+        {
+            const auto from = std::clamp(static_cast<std::size_t>(std::max(0.0, (static_cast<double>(pixel) - x) * samplesPerPixel)), std::size_t{0}, count - 1);
+            const auto to = std::clamp(static_cast<std::size_t>(std::ceil(std::max(0.0, (static_cast<double>(pixel + 1) - x) * samplesPerPixel))), from + 1, count);
+            auto peak = 0.0f;
+            for (auto index = from; index < to; ++index) peak = std::max(peak, region.peaks[index]);
+            peaks.push_back(peak);
+            const auto pointX = std::clamp(static_cast<float>(pixel) + 0.5f, visible.getX(), visible.getRight());
+            path.lineTo(pointX, centre - peak / waveformPeak_ * amplitude);
+        }
+        path.lineTo(visible.getRight(), centre);
+        for (auto pixel = right - 1; pixel >= left; --pixel)
+        {
+            const auto pointX = std::clamp(static_cast<float>(pixel) + 0.5f, visible.getX(), visible.getRight());
+            path.lineTo(pointX, centre + peaks[static_cast<std::size_t>(pixel - left)] / waveformPeak_ * amplitude);
+        }
+        path.closeSubPath();
+        const auto pathBounds = path.getBounds();
+        if (pathBounds.isEmpty()) continue;
+        waveformBounds_ = waveformBounds_.isEmpty() ? pathBounds : waveformBounds_.getUnion(pathBounds);
+        // Merge same-track colours into one non-zero-winding fill so overlapping
+        // clips retain the same underlay opacity without an offscreen paint layer.
+        auto sameColour = std::find_if(waveforms_.begin(), waveforms_.end(), [&region](const auto& cached) { return cached.colour == region.colour; });
+        if (sameColour == waveforms_.end()) waveforms_.push_back({ std::move(path), region.colour, pathBounds });
+        else { sameColour->path.addPath(path); sameColour->bounds = sameColour->bounds.getUnion(pathBounds); }
+    }
+}
 void PitchEditor::setNoteRange(int low, int high)
 {
     const juce::Component::SafePointer<PitchEditor> safe(this);
@@ -145,12 +226,12 @@ void PitchEditor::setMinimumNoteLengthBeats(double beats) { if (std::isfinite(be
 void PitchEditor::resized()
 {
     const juce::Component::SafePointer<PitchEditor> safe(this);
-    cancelNoteDrag(); if (safe != nullptr) rebuildGeometry();
+    cancelNoteDrag(); if (safe != nullptr) { rebuildGeometry(); rebuildWaveform(); }
 }
 void PitchEditor::viewportChanged()
 {
     const juce::Component::SafePointer<PitchEditor> safe(this);
-    cancelNoteDrag(); if (safe != nullptr) { rebuildGeometry(); repaint(); }
+    cancelNoteDrag(); if (safe != nullptr) { rebuildGeometry(); rebuildWaveform(); repaint(); }
 }
 int PitchEditor::midiNoteAt(float y) const noexcept { return juce::roundToInt(pitchAt(y)); }
 double PitchEditor::pitchAt(float y) const noexcept
@@ -237,6 +318,11 @@ void PitchEditor::paint(juce::Graphics& g)
     const auto row = static_cast<float>(getHeight()) / static_cast<float>(highest_ - lowest_ + 1);
     for (auto note = highest_; note >= lowest_; --note) if (isBlackKey(note))
     { g.setColour(colour(tokens::surface).withAlpha(0.65f)); g.fillRect(0.0f, static_cast<float>(highest_ - note) * row, static_cast<float>(getWidth()), row); }
+    for (const auto& waveform : waveforms_)
+    {
+        if (!waveform.bounds.intersects(g.getClipBounds().toFloat())) continue;
+        g.setColour(waveform.colour.withMultipliedAlpha(0.2f)); g.fillPath(waveform.path);
+    }
     g.setColour(colour(tokens::border).withAlpha(0.33f));
     g.strokePath(minorGrid_, juce::PathStrokeType(1.0f)); g.strokePath(rowGrid_, juce::PathStrokeType(0.6f));
     g.setColour(colour(tokens::faint).withAlpha(0.32f)); g.strokePath(majorGrid_, juce::PathStrokeType(1.0f));
@@ -513,9 +599,10 @@ void PitchEditor::timerCallback()
 }
 void PitchEditor::mouseWheelMove(const juce::MouseEvent& event, const juce::MouseWheelDetails& wheel)
 {
-    const auto callback = onWheelGesture;
-    if (callback) callback(event, wheel); else EditorSurface::mouseWheelMove(event, wheel);
+    EditorSurface::mouseWheelMove(event, wheel);
 }
+void PitchEditor::mouseMagnify(const juce::MouseEvent& event, float scaleFactor)
+{ EditorSurface::mouseMagnify(event, scaleFactor); }
 void PitchEditor::focusLost(FocusChangeType type)
 {
     const juce::Component::SafePointer<PitchEditor> safe(this);

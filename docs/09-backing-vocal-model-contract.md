@@ -89,6 +89,17 @@ from their original note centre are replaced by interpolation between reliable
 neighbours (nearest reliable value at an edge). This excludes harmonic jumps
 and dropouts without smoothing valid drift/vibrato or modifying source analysis.
 Explicitly edited source curves bypass this detector cleanup.
+After transposition, adjacent backing notes also detect counter-direction
+edge excursions beyond the generated interval plus a one-semitone (100-cent)
+margin. An offending excursion is reduced proportionally, preserving its shape
+instead of clipping individual samples to a flat ceiling. The first/last 80 ms
+are guarded, with a smooth recovery to the original contour
+within 220 ms. Repaired boundaries share a smooth pitch transition on both
+sides to avoid an instantaneous F0 jump. Windows shrink for short notes. Valid attacks and sustained
+vibrato remain unchanged. Pauses over 80 ms, overlapping voices and separate
+clips are not connected. This idempotent offline repair runs at generation and
+before audio rendering, so saved backing parts can be repaired by rendering
+again, with pitch undo available and the displayed/rendered curves in agreement.
 The curve is displayed and saved on the backing note; it is not sent to the
 note-generation model. Notes with inherited or manually scaled contours carry
 the additive `explicit_pitch_curve` flag. Audio requests map this to the optional

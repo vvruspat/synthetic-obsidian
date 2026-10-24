@@ -8484,6 +8484,17 @@ private:
         const auto* arrangementTrack = arrangement::findTrack(document_, activeBackingTrackId_);
         if (arrangementTrack == nullptr) return;
         const auto parentId = arrangementTrack->parentId;
+        if (auto* backingTrack = findBackingTrackById(activeBackingTrackId_))
+        {
+            auto repaired = backingTrack->notes;
+            if (repairBackingPitchTransitions(repaired) > 0)
+            {
+                beginPitchTrackEdit(backingTrack->id);
+                backingTrack->notes = std::move(repaired);
+                finishPitchTrackEdit(backingTrack->id);
+                sendWebProjectState();
+            }
+        }
         if (sourceAudio == juce::File())
         {
             preparingBackingSource_ = true;

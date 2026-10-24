@@ -11,4 +11,7 @@ std::vector<NoteBlock> leadNotesForBackingGeneration(const std::vector<NoteBlock
 std::vector<NoteBlock> parseBackingNotes(const juce::DynamicObject& root,
                                        const std::vector<NoteBlock>& sourceNotes,
                                        juce::String& error);
+// Offline cleanup of counter-direction excursions near connected note edges.
+// Returns the number of changed notes; a second call leaves the curve unchanged.
+int repairBackingPitchTransitions(std::vector<NoteBlock>& notes);
 }

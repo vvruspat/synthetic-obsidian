@@ -222,6 +222,117 @@ void testBackingPitchCurves(const juce::File& directory)
             && restored.flags.contains("explicit_pitch_curve"), "project round trip preserves contour and render priority");
 }
 
+void testBackingPitchTransitions()
+{
+    const auto pair = []
+    {
+        std::vector<NoteBlock> notes(2);
+        for (size_t index = 0; index < notes.size(); ++index)
+        {
+            auto& note = notes[index];
+            note.id = "note-" + juce::String(static_cast<int>(index));
+            note.clipId = "one-clip";
+            note.start = note.voicedStart = static_cast<double>(index);
+            note.end = note.voicedEnd = note.start + 1.0;
+            note.pitch = 61 + static_cast<int>(index) * 2;
+            note.pitchExact = static_cast<double>(note.pitch);
+            note.flags.add("explicit_pitch_curve");
+            for (int sample = 0; sample <= 100; ++sample)
+            {
+                const auto time = note.start + static_cast<double>(sample) * 0.01;
+                auto offset = 0.3 * std::sin(2.0 * juce::MathConstants<double>::pi * 5.0 * time);
+                if (index == 0 && sample >= 95) offset = -1.6;
+                if (index == 1 && sample < 15) offset = 2.43 - static_cast<double>(sample) * 0.13;
+                note.curve.push_back({time, note.pitchExact + offset, 0.95});
+            }
+        }
+        return notes;
+    };
+    auto notes = pair();
+    const auto original = notes;
+    require(repairBackingPitchTransitions(notes) == 2, "repair opposing tail and attack excursions on an upward step");
+    for (size_t index = 0; index < notes.size(); ++index)
+    {
+        const auto& note = notes[index];
+        require(note.id == original[index].id && std::abs(note.start - original[index].start) < 1e-12
+                    && std::abs(note.end - original[index].end) < 1e-12
+                    && note.pitch == original[index].pitch, "boundary repair does not move or repitch notes");
+        for (const auto& point : note.curve)
+        {
+            const auto distance = index == 0 ? note.end - point.time : point.time - note.start;
+            if (distance >= 0.0 && distance <= 0.08)
+                require(point.midi >= 60.0 - 1e-7 && point.midi <= 64.0 + 1e-7, "allow at most one semitone outside the transition corridor");
+        }
+        for (const auto& point : original[index].curve)
+        {
+            const auto distance = index == 0 ? note.end - point.time : point.time - note.start;
+            if (distance < 0.22) continue;
+            const auto found = std::find_if(note.curve.begin(), note.curve.end(), [&](const auto& value) { return std::abs(value.time - point.time) < 1e-9; });
+            require(found != note.curve.end() && std::abs(found->midi - point.midi) < 1e-9, "sustained drift and vibrato are unchanged");
+        }
+    }
+    require(repairBackingPitchTransitions(notes) == 0, "render retries do not accumulate boundary corrections");
+    require(std::abs(notes[0].curve.back().midi - notes[1].curve.front().midi) < 1e-9,
+            "a repaired connected boundary has no instantaneous F0 jump");
+    const auto shoulder = std::find_if(notes[1].curve.begin(), notes[1].curve.end(), [](const auto& point)
+    { return std::abs(point.time - 1.10) < 1e-9; });
+    require(shoulder != notes[1].curve.end() && shoulder->midi > 63.0 && shoulder->midi < 63.8,
+            "reduce the excursion proportionally instead of clipping the attack to a flat ceiling");
+    auto lastPitch = -1.0;
+    for (const auto& note : notes)
+        for (const auto& point : note.curve)
+            if (point.time >= 0.92 && point.time <= 1.08)
+            {
+                require(point.midi >= lastPitch - 1e-7, "the repaired upward transition is monotonic through the boundary");
+                lastPitch = point.midi;
+            }
+
+    auto down = pair();
+    for (auto& note : down)
+    {
+        note.pitchExact = 124.0 - note.pitchExact;
+        note.pitch = juce::roundToInt(note.pitchExact);
+        for (auto& point : note.curve) point.midi = 124.0 - point.midi;
+    }
+    require(repairBackingPitchTransitions(down) == 2, "descending steps have symmetric limits");
+    for (size_t index = 0; index < notes.size(); ++index)
+    {
+        require(down[index].curve.size() == notes[index].curve.size(), "symmetric repairs keep sampling geometry");
+        for (size_t sample = 0; sample < notes[index].curve.size(); ++sample)
+            require(std::abs(down[index].curve[sample].midi - (124.0 - notes[index].curve[sample].midi)) < 1e-8,
+                    "repair direction follows the generated melody");
+    }
+    auto gentle = pair();
+    for (auto& note : gentle)
+        for (auto& point : note.curve)
+            point.midi = note.pitchExact + 0.99 * std::sin(2.0 * juce::MathConstants<double>::pi * 5.0 * point.time);
+    require(repairBackingPitchTransitions(gentle) == 0, "preserve small attacks and normal vibrato exactly");
+
+    auto disconnected = pair();
+    disconnected[1].start += 0.2;
+    require(repairBackingPitchTransitions(disconnected) == 0, "do not connect across a pause");
+    disconnected = pair(); disconnected[1].start -= 0.2;
+    require(repairBackingPitchTransitions(disconnected) == 0, "do not connect overlapping voices");
+    disconnected = pair(); disconnected[1].clipId = "another-clip";
+    require(repairBackingPitchTransitions(disconnected) == 0, "do not connect independent clips");
+
+    auto shortNotes = pair();
+    for (auto& note : shortNotes)
+    {
+        const auto start = note.start;
+        note.start = note.voicedStart = start * 0.08;
+        note.end = note.voicedEnd = note.start + 0.08;
+        for (auto& point : note.curve) point.time *= 0.08;
+    }
+    require(repairBackingPitchTransitions(shortNotes) == 2, "short notes get bounded non-overlapping edge windows");
+    require(repairBackingPitchTransitions(shortNotes) == 0, "short-note repairs are stable on repeated renders");
+    auto sparse = pair();
+    for (auto& point : sparse[0].curve) point.midi = sparse[0].pitchExact;
+    sparse[1].curve = {{1.0, 63.2, 1.0}, {1.07, 63.5, 1.0}, {1.09, 65.0, 1.0}, {2.0, 63.0, 1.0}};
+    require(repairBackingPitchTransitions(sparse) == 2, "detect an interpolated excursion at the guard edge of a sparse contour");
+    require(repairBackingPitchTransitions(sparse) == 0, "interpolated guard extrema are included in proportional repair");
+}
+
 void testNativeNoteTransform()
 {
     NoteBlock note;
@@ -320,6 +431,7 @@ int main()
     try
     {
         testBackingPitchCurves(directory);
+        testBackingPitchTransitions();
         testNativeNoteTransform();
         testAudioFileTransfer(directory);
         const auto audio = makeAudio(directory);

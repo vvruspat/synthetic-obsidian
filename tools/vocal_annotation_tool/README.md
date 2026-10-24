@@ -95,6 +95,12 @@ The Vibrato tool scales this contour;
 the SVC renderer preserves it instead of adding automatic expression on top.
 Curves and edits persist in project saves. Existing backing notes keep their
 saved curves; regenerate their notes to inherit the source contour.
+Large counter-direction excursions at connected note edges are reduced
+proportionally when they exceed a one-semitone margin around the generated
+interval, preserving their shape and smoothly recovering into
+the original contour. Small attacks and sustained vibrato are preserved.
+This repair also runs before rendering existing backing notes and supports
+pitch undo; it does not require regenerating their melody.
 
 Vertical zoom spans 1×–4× and preserves the visible pitch centre. The keyboard
 and notes share one vertical scroller. Alt+wheel changes vertical zoom,

@@ -8,6 +8,119 @@ namespace vocal_annotation
 {
 namespace
 {
+constexpr double kBoundaryMarginSemitones = 1.0;
+
+PitchCurvePoint curvePointAt(const std::vector<PitchCurvePoint>& curve, double time)
+{
+    const auto right = std::lower_bound(curve.begin(), curve.end(), time,
+        [](const auto& point, double value) { return point.time < value; });
+    if (right == curve.begin()) return { time, right->midi, right->confidence };
+    if (right == curve.end()) return { time, curve.back().midi, curve.back().confidence };
+    const auto& left = *(right - 1);
+    const auto fraction = (time - left.time) / juce::jmax(1e-9, right->time - left.time);
+    return { time, left.midi + fraction * (right->midi - left.midi),
+             left.confidence + fraction * (right->confidence - left.confidence) };
+}
+
+bool repairCurveEdge(NoteBlock& note, bool atStart, double lowerPitch, double upperPitch)
+{
+    const auto duration = note.end - note.start;
+    if (note.curve.empty() || !std::isfinite(duration) || duration <= 0.0)
+        return false;
+    if (std::any_of(note.curve.begin(), note.curve.end(), [](const auto& point)
+    {
+        return !std::isfinite(point.time) || !std::isfinite(point.midi) || !std::isfinite(point.confidence);
+    }))
+        return false;
+    auto source = note.curve;
+    std::stable_sort(source.begin(), source.end(), [](const auto& left, const auto& right) { return left.time < right.time; });
+    const auto window = juce::jmin(0.22, duration * 0.45);
+    const auto guard = juce::jmin(0.08, window * 0.5);
+    const auto distanceFromEdge = [&](double time) { return atStart ? time - note.start : note.end - time; };
+    const auto lowerCentre = lowerPitch + kBoundaryMarginSemitones;
+    const auto upperCentre = upperPitch - kBoundaryMarginSemitones;
+    const auto edgePitch = atStart ? source.front().midi : source.back().midi;
+    const auto guardPitch = curvePointAt(source, atStart ? note.start + guard : note.end - guard).midi;
+    auto maximumBelow = juce::jmax(0.0, lowerCentre - juce::jmin(edgePitch, guardPitch));
+    auto maximumAbove = juce::jmax(0.0, juce::jmax(edgePitch, guardPitch) - upperCentre);
+    for (const auto& point : source)
+    {
+        const auto distance = distanceFromEdge(point.time);
+        if (distance >= 0.0 && distance <= guard)
+        {
+            maximumBelow = juce::jmax(maximumBelow, lowerCentre - point.midi);
+            maximumAbove = juce::jmax(maximumAbove, point.midi - upperCentre);
+        }
+    }
+    if (maximumBelow <= kBoundaryMarginSemitones + 1e-7 && maximumAbove <= kBoundaryMarginSemitones + 1e-7)
+        return false;
+    const auto lowerScale = kBoundaryMarginSemitones / juce::jmax(kBoundaryMarginSemitones, maximumBelow);
+    const auto upperScale = kBoundaryMarginSemitones / juce::jmax(kBoundaryMarginSemitones, maximumAbove);
+
+    // Add local samples so even a sparse saved contour recovers smoothly to
+    // its original curve. Never smooth or decimate the sustained vibrato.
+    for (double distance = 0.0; distance < window; distance += 0.01)
+        note.curve.push_back(curvePointAt(source, atStart ? note.start + distance : note.end - distance));
+    for (const auto distance : {guard, window})
+        note.curve.push_back(curvePointAt(source, atStart ? note.start + distance : note.end - distance));
+    std::stable_sort(note.curve.begin(), note.curve.end(), [](const auto& left, const auto& right) { return left.time < right.time; });
+    note.curve.erase(std::unique(note.curve.begin(), note.curve.end(), [](const auto& left, const auto& right)
+    {
+        return std::abs(left.time - right.time) < 1e-9;
+    }), note.curve.end());
+    for (auto& point : note.curve)
+    {
+        const auto distance = distanceFromEdge(point.time);
+        if (distance < 0.0 || distance >= window)
+            continue;
+        const auto progress = juce::jlimit(0.0, 1.0, (distance - guard) / (window - guard));
+        const auto weight = 1.0 - progress * progress * (3.0 - 2.0 * progress);
+        // Scale the whole offending excursion about the musical interval.
+        // Sample-wise clipping would flatten the attack into a horizontal shelf.
+        const auto shaped = point.midi < lowerCentre ? lowerCentre + (point.midi - lowerCentre) * lowerScale
+                          : point.midi > upperCentre ? upperCentre + (point.midi - upperCentre) * upperScale
+                          : point.midi;
+        point.midi += (shaped - point.midi) * weight;
+    }
+    note.flags.addIfNotAlreadyThere("explicit_pitch_curve");
+    return true;
+}
+
+bool connectRepairedEdges(NoteBlock& previous, NoteBlock& current)
+{
+    for (const auto* note : {&previous, &current})
+        if (note->curve.empty() || std::any_of(note->curve.begin(), note->curve.end(), [](const auto& point)
+        {
+            return !std::isfinite(point.time) || !std::isfinite(point.midi) || !std::isfinite(point.confidence);
+        }))
+            return false;
+    const auto start = previous.end - juce::jmin(0.08, (previous.end - previous.start) * 0.20);
+    const auto end = current.start + juce::jmin(0.08, (current.end - current.start) * 0.20);
+    for (auto* note : {&previous, &current})
+        std::stable_sort(note->curve.begin(), note->curve.end(), [](const auto& left, const auto& right) { return left.time < right.time; });
+    const auto from = curvePointAt(previous.curve, start).midi;
+    const auto to = curvePointAt(current.curve, end).midi;
+    for (auto* note : {&previous, &current})
+    {
+        const auto source = note->curve;
+        const auto begin = juce::jmax(start, note->start), finish = juce::jmin(end, note->end);
+        for (double time = begin; time < finish; time += 0.01)
+            note->curve.push_back(curvePointAt(source, time));
+        note->curve.push_back(curvePointAt(source, finish));
+        for (auto& point : note->curve)
+            if (point.time >= begin && point.time <= finish)
+            {
+                const auto progress = juce::jlimit(0.0, 1.0, (point.time - start) / (end - start));
+                point.midi = from + (to - from) * progress * progress * (3.0 - 2.0 * progress);
+            }
+        std::stable_sort(note->curve.begin(), note->curve.end(), [](const auto& left, const auto& right) { return left.time < right.time; });
+        note->curve.erase(std::unique(note->curve.begin(), note->curve.end(), [](const auto& left, const auto& right)
+        { return std::abs(left.time - right.time) < 1e-9; }), note->curve.end());
+        note->flags.addIfNotAlreadyThere("explicit_pitch_curve");
+    }
+    return true;
+}
+
 std::vector<PitchCurvePoint> expressionCurveForBacking(const NoteBlock& note)
 {
     // Raw F0 can jump to another harmonic even at high detector confidence.
@@ -185,6 +298,41 @@ std::vector<NoteBlock> leadNotesForBackingGeneration(const std::vector<NoteBlock
     return notes;
 }
 
+int repairBackingPitchTransitions(std::vector<NoteBlock>& notes)
+{
+    std::vector<size_t> order;
+    for (size_t index = 0; index < notes.size(); ++index)
+        if (std::isfinite(notes[index].start) && std::isfinite(notes[index].end)
+            && std::isfinite(notes[index].pitchExact) && notes[index].end > notes[index].start)
+            order.push_back(index);
+    std::stable_sort(order.begin(), order.end(), [&](size_t left, size_t right) { return notes[left].start < notes[right].start; });
+    std::vector<bool> changed(notes.size(), false);
+    for (size_t index = 1; index < order.size(); ++index)
+    {
+        auto& previous = notes[order[index - 1]];
+        auto& current = notes[order[index]];
+        const auto gap = current.start - previous.end;
+        // Do not join overlapping voices, separate clips or rearticulations
+        // after a pause. The bounds follow the generated harmony, not the lead.
+        if (gap < -0.001 || gap > 0.08
+            || (previous.clipId.isNotEmpty() && current.clipId.isNotEmpty() && previous.clipId != current.clipId))
+            continue;
+        const auto lower = juce::jmin(previous.pitchExact, current.pitchExact) - kBoundaryMarginSemitones;
+        const auto upper = juce::jmax(previous.pitchExact, current.pitchExact) + kBoundaryMarginSemitones;
+        const auto previousChanged = repairCurveEdge(previous, false, lower, upper);
+        const auto currentChanged = repairCurveEdge(current, true, lower, upper);
+        if (previousChanged || currentChanged)
+        {
+            // Limiting the overshoot alone still leaves an instantaneous jump
+            // between notes. Use the same smooth transition on both sides.
+            const auto connected = connectRepairedEdges(previous, current);
+            if (previousChanged || connected) changed[order[index - 1]] = true;
+            if (currentChanged || connected) changed[order[index]] = true;
+        }
+    }
+    return static_cast<int>(std::count(changed.begin(), changed.end(), true));
+}
+
 std::vector<NoteBlock> parseBackingNotes(const juce::DynamicObject& root,
                                        const std::vector<NoteBlock>& sourceNotes,
                                        juce::String& error)
@@ -256,6 +404,7 @@ std::vector<NoteBlock> parseBackingNotes(const juce::DynamicObject& root,
     if (generatedNotes.empty())
         error = "Backing vocal model returned only invalid notes.";
 
+    repairBackingPitchTransitions(generatedNotes);
     return generatedNotes;
 }
 

@@ -315,7 +315,7 @@ juce::Result ArrangementPlayback::renderTrack(const AnnotationDocument& document
     const auto total = static_cast<juce::int64>(std::ceil(plan->duration * 48000.0));
     for (juce::int64 sample = 0; sample < total; sample += buffer.getNumSamples())
     {
-        const auto count = static_cast<int>(juce::jmin<juce::int64>(buffer.getNumSamples(), total - sample));
+        const auto count = static_cast<int>(std::min<juce::int64>(buffer.getNumSamples(), total - sample));
         buffer.clear();
         mix(*plan, buffer, 0, count, static_cast<double>(sample) / 48000.0, 48000.0);
         if (! writer->writeFromAudioSampleBuffer(buffer, 0, count)) return juce::Result::fail("Could not write track audio.");

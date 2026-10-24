@@ -1,4 +1,4 @@
-add_library(ObsidianStudioViews STATIC NativeStudioView.cpp NativeStudioSettings.cpp)
+add_library(ObsidianStudioViews STATIC NativeStudioView.cpp NativeStudioSettings.cpp StudioShortcuts.cpp)
 target_link_libraries(ObsidianStudioViews PUBLIC Obsidian::EditorUI
     PRIVATE juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)
 
@@ -182,7 +182,7 @@ endif()
 
 if(BUILD_TESTING AND SYNTHETIC_OBSIDIAN_ARRANGEMENT_TESTS)
     juce_add_console_app(NativeStudioTests PRODUCT_NAME "Native studio integration checks")
-    target_sources(NativeStudioTests PRIVATE NativeStudioTests.cpp NativeStudioSettingsTests.cpp)
+    target_sources(NativeStudioTests PRIVATE NativeStudioTests.cpp NativeStudioSettingsTests.cpp StudioShortcutsTests.cpp)
     target_link_libraries(NativeStudioTests PRIVATE ObsidianStudioViews
         juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)
     add_test(NAME NativeStudioTests COMMAND NativeStudioTests)

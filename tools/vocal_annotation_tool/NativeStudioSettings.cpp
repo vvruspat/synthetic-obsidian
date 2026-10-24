@@ -1,4 +1,5 @@
 #include "NativeStudioSettings.h"
+#include "StudioShortcuts.h"
 #include "uikit/Controls.h"
 #include "uikit/Theme.h"
 
@@ -300,6 +301,7 @@ public:
         row(status_, 44);
         laidOutHeight_ = y + 8;
     }
+    int voiceSectionY() const { return voiceHeading_.getY(); }
     int laidOutHeight() const noexcept { return laidOutHeight_; }
 private:
     void emit(const juce::String& type, const juce::String& action = {}, Properties properties = {})
@@ -390,9 +392,18 @@ private:
     std::vector<std::unique_ptr<StateRow>> sources_, jobs_;
 };
 
-NativeStudioSettings::NativeStudioSettings(std::function<void(const juce::var&)> handler)
-    : content_(std::make_unique<Content>(handler)), commandHandler_(std::move(handler))
+NativeStudioSettings::NativeStudioSettings(std::function<void(const juce::var&)> handler, std::shared_ptr<StudioShortcuts> shortcuts)
+    : shortcuts_(shortcuts ? std::move(shortcuts) : std::make_shared<StudioShortcuts>()),
+      content_(std::make_unique<Content>(handler)), shortcutEditor_(std::make_unique<StudioShortcutEditor>(shortcuts_)), commandHandler_(std::move(handler))
 {
+    auto mainTab = std::make_unique<ui::Button>("Audio / Voice / Backing");
+    auto shortcutsTab = std::make_unique<ui::Button>("Key commands");
+    mainTab->setComponentID("settings.tab.main"); shortcutsTab->setComponentID("settings.tab.shortcuts");
+    mainTab->onClick = [this] { viewport_.setVisible(true); shortcutEditor_->setVisible(false); };
+    shortcutsTab->onClick = [this] { viewport_.setVisible(false); shortcutEditor_->setVisible(true); };
+    addAndMakeVisible(*mainTab); addAndMakeVisible(*shortcutsTab);
+    mainTab_ = std::move(mainTab); shortcutsTab_ = std::move(shortcutsTab);
+    addChildComponent(*shortcutEditor_);
     setTitle("Studio settings and voice lab"); setComponentID("settings.panel"); setVisible(false);
     setWantsKeyboardFocus(true); setFocusContainerType(juce::Component::FocusContainerType::focusContainer);
     auto close = std::make_unique<ui::IconButton>(ui::Icon::close, "Close studio settings");
@@ -406,6 +417,12 @@ NativeStudioSettings::NativeStudioSettings(std::function<void(const juce::var&)>
 NativeStudioSettings::~NativeStudioSettings() { viewport_.setViewedComponent(nullptr, false); }
 void NativeStudioSettings::dispatch(const juce::var& event) { content_->dispatch(event); }
 void NativeStudioSettings::setBackingParent(const juce::String& trackId) { content_->setBackingParent(trackId); }
+void NativeStudioSettings::showVoiceLab()
+{
+    viewport_.setVisible(true); shortcutEditor_->setVisible(false);
+    setVisible(true); toFront(true); grabKeyboardFocus();
+    viewport_.setViewPosition(0, content_->voiceSectionY());
+}
 void NativeStudioSettings::refresh()
 {
     auto callback = commandHandler_;
@@ -425,7 +442,9 @@ void NativeStudioSettings::paint(juce::Graphics& g)
 void NativeStudioSettings::resized()
 {
     close_->setBounds(getWidth() - 48, 14, 30, 30);
-    viewport_.setBounds(getLocalBounds().withTrimmedTop(62));
+    mainTab_->setBounds(20, 63, 220, 30); shortcutsTab_->setBounds(250, 63, 160, 30);
+    viewport_.setBounds(getLocalBounds().withTrimmedTop(100));
+    shortcutEditor_->setBounds(viewport_.getBounds());
     content_->setSize(juce::jmax(1, viewport_.getWidth() - viewport_.getScrollBarThickness()), content_->getHeight());
     content_->resized();
     content_->setSize(content_->getWidth(), content_->laidOutHeight());

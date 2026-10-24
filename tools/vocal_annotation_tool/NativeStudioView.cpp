@@ -1,4 +1,5 @@
 #include "NativeStudioView.h"
+#include "StudioShortcuts.h"
 #include "editor_ui/Chrome.h"
 #include "editor_ui/PitchEditor.h"
 #include "uikit/Layout.h"
@@ -14,7 +15,9 @@ namespace
 using namespace obsidian::ui;
 using namespace obsidian::editor;
 constexpr int kHeaderWidth = 272, kKeyboardWidth = 78, kTransportHeight = 60;
-constexpr int kToolbarHeight = 42, kRulerHeight = 24, kStatusHeight = 24, kRowHeight = 72;
+constexpr int kCycleHeight = 24, kRulerHeight = 24, kStatusHeight = 24, kRowHeight = 96;
+constexpr int kPitchMinimum = 0, kPitchMaximum = 127;
+constexpr double kPitchRowHeight = 18.0;
 using Fields = std::initializer_list<std::pair<juce::Identifier, juce::var>>;
 juce::var object(Fields fields)
 {
@@ -141,7 +144,7 @@ public:
         g.setFont(font());
         for (int i = 0; i < 3; ++i)
         {
-            auto bounds = juce::Rectangle<int>(8, 36 + i * 32, kHeaderWidth - 10, 32);
+            auto bounds = juce::Rectangle<int>(8, 36 + kCycleHeight + i * 32, kHeaderWidth - 10, 32);
             g.setColour(colour(tokens::surface)); g.fillRect(bounds);
             g.setColour(colour(tokens::border)); g.drawRect(bounds);
             drawIcon(g, icons[i], bounds.withTrimmedLeft(24).withWidth(18).toFloat().withSizeKeepingCentre(17, 17), colour(tokens::muted));
@@ -175,19 +178,154 @@ private:
 class CycleOverlay final : public juce::Component
 {
 public:
-    explicit CycleOverlay(const TimeViewport& view) : view_(view) { setInterceptsMouseClicks(false, false); setAccessible(false); }
-    void setRange(double first, double last, bool active) { first_ = first; last_ = last; active_ = active; repaint(); }
+    explicit CycleOverlay(const TimeViewport& view) : view_(view)
+    {
+        setWantsKeyboardFocus(true); setTitle("Cycle range"); setComponentID("studio.cycle");
+        setDescription("Drag outside the cycle to create; drag inside to move; drag edges to resize. Click the cycle or press Enter to toggle. Escape cancels a drag.");
+    }
+    std::function<double(double)> positionForBeat, beatForPosition;
+    std::function<void(double, double, bool)> onCommit;
+    std::function<void(const juce::MouseEvent&, const juce::MouseWheelDetails&)> onWheel;
+    void setRange(double first, double last, bool active, double duration, bool authoritative = true)
+    {
+        minimum_ = duration > 0.0 ? std::min(100.0, 100.0 / duration) : 100.0;
+        setEnabled(duration > 0.0);
+        if (mode_ != Mode::none)
+        {
+            if (authoritative) cancel();
+            else { repaint(); return; }
+        }
+        first_ = std::clamp(first, 0.0, 100.0); last_ = std::clamp(last, first_, 100.0); active_ = active; repaint();
+    }
     void paint(juce::Graphics& g) override
     {
-        if (!active_ || last_ <= first_) return;
-        const auto firstX = view_.xForBeat(first_), lastX = view_.xForBeat(last_);
-        g.setColour(colour(tokens::olive).withAlpha(0.6f));
-        g.fillRect(firstX, static_cast<float>(getHeight() - 4), lastX - firstX, 3.0f);
+        g.fillAll(colour(tokens::surface));
+        g.setColour(colour(tokens::border)); g.drawHorizontalLine(getHeight() - 1, 0.0f, static_cast<float>(getWidth()));
+        const auto firstX = xAt(first_), lastX = xAt(last_);
+        if (last_ > first_)
+        {
+            const auto bounds = juce::Rectangle<float>(firstX, 3.0f, std::max(1.0f, lastX - firstX), static_cast<float>(getHeight() - 6));
+            g.setColour(colour(active_ ? tokens::olive : tokens::muted).withAlpha(active_ ? 0.3f : 0.12f)); g.fillRoundedRectangle(bounds, 3.0f);
+            g.setColour(colour(active_ ? tokens::olive : tokens::faint)); g.drawRoundedRectangle(bounds, 3.0f, 1.0f);
+            g.fillRect(firstX, 6.0f, 3.0f, static_cast<float>(std::max(1, getHeight() - 12)));
+            g.fillRect(lastX - 3.0f, 6.0f, 3.0f, static_cast<float>(std::max(1, getHeight() - 12)));
+            g.setFont(font(tokens::fontSmall)); g.drawText("Cycle", bounds.reduced(8.0f, 0.0f), juce::Justification::centredLeft, true);
+        }
+        if (lastX < 0.0f || firstX > static_cast<float>(getWidth()) || last_ <= first_)
+        { g.setColour(colour(tokens::faint)); g.setFont(font(tokens::fontSmall)); g.drawText("Drag to create a cycle", getLocalBounds().reduced(8, 0), juce::Justification::centredLeft); }
+        drawFocus(g, *this);
+    }
+    void mouseDown(const juce::MouseEvent& event) override
+    {
+        if (!isEnabled() || !event.mods.isLeftButtonDown()) return;
+        const juce::Component::SafePointer<CycleOverlay> safe(this);
+        const auto x = event.position.x;
+        grabKeyboardFocus(); if (safe == nullptr) return;
+        initialFirst_ = first_; initialLast_ = last_; initialActive_ = active_;
+        anchor_ = positionAt(x); moved_ = false;
+        const auto firstX = xAt(first_), lastX = xAt(last_);
+        if (last_ > first_ && std::abs(x - firstX) <= 6.0f) mode_ = Mode::start;
+        else if (last_ > first_ && std::abs(x - lastX) <= 6.0f) mode_ = Mode::end;
+        else if (last_ > first_ && x > firstX && x < lastX) mode_ = Mode::move;
+        else mode_ = Mode::create;
+        if (mode_ == Mode::create)
+        { first_ = std::min(anchor_, 100.0 - minimum_); last_ = first_ + minimum_; active_ = true; }
+        else if (mode_ == Mode::start || mode_ == Mode::end) active_ = true;
+        repaint();
+    }
+    void mouseDrag(const juce::MouseEvent& event) override
+    {
+        if (mode_ == Mode::none) return;
+        const auto position = positionAt(event.position.x);
+        moved_ = moved_ || event.getDistanceFromDragStart() >= 3 || std::abs(position - anchor_) >= 0.1;
+        if (mode_ == Mode::create)
+        {
+            first_ = std::min(anchor_, position); last_ = std::max(anchor_, position);
+            if (last_ - first_ < minimum_)
+            { first_ = position < anchor_ ? std::max(0.0, anchor_ - minimum_) : std::min(anchor_, 100.0 - minimum_); last_ = first_ + minimum_; }
+        }
+        else if (mode_ == Mode::move)
+        {
+            const auto width = initialLast_ - initialFirst_;
+            first_ = std::clamp(initialFirst_ + position - anchor_, 0.0, std::max(0.0, 100.0 - width)); last_ = first_ + width;
+        }
+        else if (mode_ == Mode::start) first_ = std::clamp(position, 0.0, std::max(0.0, last_ - minimum_));
+        else if (mode_ == Mode::end) last_ = std::clamp(position, std::min(100.0, first_ + minimum_), 100.0);
+        repaint();
+    }
+    void mouseUp(const juce::MouseEvent&) override
+    {
+        if (mode_ == Mode::none) return;
+        if (mode_ == Mode::move && !moved_) active_ = !initialActive_;
+        mode_ = Mode::none; repaint(); commit();
+    }
+    bool keyPressed(const juce::KeyPress& key) override
+    {
+        const auto code = key.getKeyCode();
+        if (code == juce::KeyPress::escapeKey) { cancel(); return true; }
+        if (code == juce::KeyPress::returnKey || code == juce::KeyPress::spaceKey) { active_ = !active_; repaint(); commit(); return true; }
+        if (code == juce::KeyPress::leftKey || code == juce::KeyPress::rightKey)
+        {
+            const auto direction = code == juce::KeyPress::leftKey ? -1.0 : 1.0;
+            const auto width = last_ - first_;
+            const auto delta = std::max(0.01, minimum_ * 0.25) * direction;
+            first_ = std::clamp(first_ + delta, 0.0, std::max(0.0, 100.0 - width)); last_ = first_ + width;
+            repaint(); commit(); return true;
+        }
+        return false;
+    }
+    void mouseWheelMove(const juce::MouseEvent& event, const juce::MouseWheelDetails& wheel) override { const auto callback = onWheel; if (callback) callback(event, wheel); }
+    void focusGained(FocusChangeType) override { repaint(); }
+    void focusLost(FocusChangeType) override { cancel(); repaint(); }
+    void visibilityChanged() override { if (!isShowing()) cancel(); }
+    std::unique_ptr<juce::AccessibilityHandler> createAccessibilityHandler() override
+    { return std::make_unique<juce::AccessibilityHandler>(*this, juce::AccessibilityRole::group); }
+private:
+    enum class Mode { none, create, move, start, end };
+    float xAt(double position) const { return view_.xForBeat(beatForPosition ? beatForPosition(position) : position); }
+    double positionAt(float x) const
+    {
+        const auto beat = view_.beatAtX(x);
+        const auto convert = [&](double value) { return std::clamp(positionForBeat ? positionForBeat(value) : value, 0.0, 100.0); };
+        const auto requested = convert(beat);
+        auto nearest = requested <= 50.0 ? 0.0 : 100.0;
+        view_.forEachGridLine(std::max(0.0, beat - 4.0), beat + 4.0, 1.0, [&](double gridBeat, bool)
+        { const auto candidate = convert(gridBeat); if (std::abs(candidate - requested) < std::abs(nearest - requested)) nearest = candidate; });
+        return nearest;
+    }
+    void cancel()
+    {
+        if (mode_ == Mode::none) return;
+        first_ = initialFirst_; last_ = initialLast_; active_ = initialActive_; mode_ = Mode::none; repaint();
+    }
+    void commit()
+    {
+        const auto callback = onCommit; const auto first = first_, last = last_; const auto active = active_;
+        if (callback) callback(first, last, active);
+    }
+    const TimeViewport& view_;
+    Mode mode_ = Mode::none;
+    double first_ = 0.0, last_ = 0.0, minimum_ = 1.0, anchor_ = 0.0, initialFirst_ = 0.0, initialLast_ = 0.0;
+    bool active_ = false, initialActive_ = false, moved_ = false;
+};
+class Caption final : public juce::Component
+{
+public:
+    explicit Caption(juce::String text) : text_(std::move(text)) { setInterceptsMouseClicks(false, false); }
+    void paint(juce::Graphics& g) override
+    {
+        g.setColour(colour(tokens::muted)); g.setFont(font(tokens::fontSmall));
+        g.drawText(text_, getLocalBounds(), juce::Justification::centredLeft);
     }
 private:
-    const TimeViewport& view_;
-    double first_ = 0.0, last_ = 0.0;
-    bool active_ = false;
+    juce::String text_;
+};
+class PianoViewport final : public juce::Viewport
+{
+public:
+    std::function<void(const juce::MouseEvent&, const juce::MouseWheelDetails&)> onWheel;
+    void mouseWheelMove(const juce::MouseEvent& event, const juce::MouseWheelDetails& wheel) override
+    { const auto callback = onWheel; if (callback) callback(event, wheel); }
 };
 class ScrollViewport final : public juce::Viewport
 {
@@ -195,9 +333,61 @@ public:
     void mouseWheelMove(const juce::MouseEvent&, const juce::MouseWheelDetails& wheel) override
     { setViewPosition(0, getViewPositionY() - juce::roundToInt(wheel.deltaY * 220.0f)); }
 };
+class BackingPicker final : public Popover
+{
+public:
+    BackingPicker()
+    {
+        setTitle("Add backing track"); setComponentID("studio.backing.picker");
+        addAndMakeVisible(local_); addAndMakeVisible(luna_); addAndMakeVisible(terra_); addAndMakeVisible(scroll_);
+        local_.setComponentID("studio.backing.generator.local"); luna_.setComponentID("studio.backing.generator.luna"); terra_.setComponentID("studio.backing.generator.terra");
+        local_.onClick = [this] { setGenerator("local"); }; luna_.onClick = [this] { setGenerator("luna"); }; terra_.onClick = [this] { setGenerator("terra"); };
+        setGenerator("local"); scroll_.setViewedComponent(&list_, false); scroll_.setScrollBarsShown(false, false);
+    }
+    ~BackingPicker() override { scroll_.setViewedComponent(nullptr, false); }
+    std::function<void(const juce::String&, const juce::String&, const juce::String&)> onCreate;
+    const juce::String& generator() const noexcept { return generator_; }
+    void show(const juce::String& parentId, const juce::String& name, const juce::StringArray& types, juce::Component& anchor)
+    {
+        parentId_ = parentId; parentName_ = name; buttons_.clear();
+        for (int index = 0; index < types.size(); ++index)
+        {
+            auto button = std::make_unique<Button>(types[index], Icon::backing); button->setVariant(Button::Variant::subtle); button->setTextJustification(juce::Justification::centredLeft);
+            button->setComponentID("studio.backing.type." + juce::String(index));
+            button->onClick = [this, type = types[index]]
+            {
+                const auto callback = onCreate; const auto parent = parentId_, generator = generator_;
+                dismiss(); if (callback) callback(parent, type, generator);
+            };
+            list_.addAndMakeVisible(*button); buttons_.push_back(std::move(button));
+        }
+        Popover::showFor(anchor, 286, std::min(448, 90 + static_cast<int>(buttons_.size()) * 30));
+        resized();
+    }
+    void paint(juce::Graphics& g) override
+    {
+        Popover::paint(g); g.setColour(colour(tokens::text)); g.setFont(font());
+        g.drawText("Add backing to " + parentName_, juce::Rectangle<int>(12, 6, getWidth() - 24, 24), juce::Justification::centredLeft, true);
+    }
+    void resized() override
+    {
+        const auto width = (getWidth() - 32) / 3;
+        local_.setBounds(8, 34, width, 28); luna_.setBounds(16 + width, 34, width, 28); terra_.setBounds(24 + width * 2, 34, width, 28);
+        scroll_.setBounds(6, 70, getWidth() - 12, std::max(0, getHeight() - 76));
+        list_.setSize(scroll_.getWidth(), static_cast<int>(buttons_.size()) * 30);
+        for (std::size_t i = 0; i < buttons_.size(); ++i) buttons_[i]->setBounds(0, static_cast<int>(i) * 30, list_.getWidth(), 30);
+    }
+private:
+    void setGenerator(juce::String value)
+    { generator_ = std::move(value); local_.setSelected(generator_ == "local"); luna_.setSelected(generator_ == "luna"); terra_.setSelected(generator_ == "terra"); }
+    Button local_ { "Local" }, luna_ { "Luna" }, terra_ { "Terra" };
+    ScrollViewport scroll_; juce::Component list_;
+    std::vector<std::unique_ptr<Button>> buttons_;
+    juce::String parentId_, parentName_, generator_;
+};
 }
 
-class NativeStudioView::Content final : public juce::Component
+class NativeStudioView::Content final : public juce::Component, private juce::KeyListener, private juce::ComponentListener
 {
 public:
     struct Track
@@ -209,7 +399,7 @@ public:
     struct Note
     {
         int localId = -1;
-        juce::String id;
+        juce::String id, track;
         double x = 0.0, width = 0.0, pitch = 60.0;
         juce::var source;
     };
@@ -322,14 +512,28 @@ public:
             header_.getMuteButton().setComponentID("studio.mute." + track.id);
             header_.getSoloButton().setComponentID("studio.solo." + track.id);
             header_.getGainSlider().setComponentID("studio.gain." + track.id);
-            header_.getGainSlider().setEnabled(track.id == "Instrumental");
+            header_.getGainSlider().setEnabled(track.id == "Instrumental"); header_.setGainVisible(track.id == "Instrumental");
+            if (track.id == "Instrumental") header_.getGainSlider().setRange(-60.0, 0.0, 0.1);
             header_.getGainSlider().setDescription(track.id == "Instrumental" ? "Instrumental gain" : "This track has no independent gain control.");
             header_.setGain(track.id == "Instrumental" ? 20.0 * std::log10(std::max(0.0001, content.instrumentalVolume_ / 100.0)) : 0.0);
-            header_.onMute = [this](bool value) { content_.setTrackState(track_.id, value, track_.solo); };
-            header_.onSolo = [this](bool value) { content_.setTrackState(track_.id, track_.muted, value); };
+            header_.onMute = [this](bool value) { track_.muted = value; content_.setTrackState(track_.id, track_.muted, track_.solo); };
+            header_.onSolo = [this](bool value) { track_.solo = value; content_.setTrackState(track_.id, track_.muted, track_.solo); };
             header_.onGain = [this](double db) { content_.send(command("set-instrumental-volume", { { "value", std::clamp(std::pow(10.0, db / 20.0) * 100.0, 0.0, 100.0) } })); };
             header_.onMenu = [this] { content_.showTrackMenu(track_.id, header_); };
             header_.addMouseListener(this, true);
+            for (auto* component : std::initializer_list<juce::Component*> { &audioLayer_, &noteLayer_, &import_, &remove_, &profile_ }) addAndMakeVisible(component);
+            body_.addAndMakeVisible(render_); body_.addAndMakeVisible(regenerate_);
+            audioLayer_.setComponentID("studio.layer.audio." + track.id); noteLayer_.setComponentID("studio.layer.notes." + track.id);
+            import_.setComponentID("studio.import." + track.id); remove_.setComponentID("studio.remove." + track.id); profile_.setComponentID("studio.profile." + track.id);
+            render_.setComponentID("studio.render." + track.id); regenerate_.setComponentID("studio.regenerate." + track.id);
+            audioLayer_.onToggle = [this](bool enabled) { track_.audioMuted = !enabled; sendLayers(); };
+            noteLayer_.onToggle = [this](bool enabled) { track_.notesMuted = !enabled; sendLayers(); };
+            import_.onClick = [this] { content_.send(command("import-track-audio", { { "track", track_.id } })); };
+            remove_.onClick = [this] { content_.send(command("remove-track", { { "track", track_.id } })); };
+            profile_.onChange = [this](int profileIndex) { if (juce::isPositiveAndBelow(profileIndex, static_cast<int>(profileIds_.size()))) content_.send(command("set-backing-voice-profile", { { "track", track_.id }, { "profileId", profileIds_[static_cast<std::size_t>(profileIndex)] } })); };
+            render_.onClick = [this] { content_.send(command("render-backing-track", { { "track", track_.id } })); };
+            regenerate_.onClick = [this] { content_.send(command("regenerate-backing-track", { { "track", track_.id }, { "generator", content_.backingPicker_.generator() } })); };
+            updateControls();
             grid_.onSeek = [this](double beat) { content_.seek(beat); };
             grid_.addMouseListener(this, false);
             for (const auto& value : array(track.source["clips"]))
@@ -341,8 +545,16 @@ public:
         ~Row() override { header_.removeMouseListener(this); grid_.removeMouseListener(this); }
         void resized() override
         {
-            header_.setBounds(8, 0, kHeaderWidth - 10, getHeight() - 2);
-            body_.setBounds(getLocalBounds().withTrimmedLeft(kHeaderWidth)); grid_.setBounds(body_.getLocalBounds()); refresh();
+            header_.setBounds(8, 0, kHeaderWidth - 10, getHeight() - 26);
+            auto strip = juce::Rectangle<int>(16, getHeight() - 24, kHeaderWidth - 28, 22);
+            audioLayer_.setBounds(strip.removeFromLeft(48)); strip.removeFromLeft(4); noteLayer_.setBounds(strip.removeFromLeft(48)); strip.removeFromLeft(4);
+            if (track_.parent.isEmpty()) { import_.setBounds(strip.removeFromLeft(25)); strip.removeFromLeft(4); }
+            else { profile_.setBounds(strip.removeFromLeft(std::min(102, strip.getWidth() - 30))); strip.removeFromLeft(4); }
+            remove_.setBounds(strip.removeFromLeft(25));
+            if (track_.id == "Instrumental") import_.setBounds(kHeaderWidth - 42, getHeight() - 24, 25, 22);
+            body_.setBounds(getLocalBounds().withTrimmedLeft(kHeaderWidth)); grid_.setBounds(body_.getLocalBounds());
+            render_.setBounds(std::max(0, body_.getWidth() - 190), 34, 80, 28); regenerate_.setBounds(std::max(0, body_.getWidth() - 106), 34, 100, 28);
+            refresh(); render_.toFront(false); regenerate_.toFront(false);
         }
         void refresh()
         {
@@ -356,46 +568,78 @@ public:
         }
         void updateState(const Track& track)
         {
-            track_ = track; header_.setMuted(track.muted); header_.setSolo(track.solo); repaint();
+            track_ = track; header_.setMuted(track.muted); header_.setSolo(track.solo); updateControls(); repaint();
+        }
+        void updateControls()
+        {
+            const auto backing = track_.parent.isNotEmpty(), instrumental = track_.id == "Instrumental";
+            const auto content = content_.backingContent(track_.id);
+            const auto hasNotes = !array(content_.noteValues(track_.id)).isEmpty();
+            audioLayer_.setVisible(!instrumental); noteLayer_.setVisible(!instrumental); profile_.setVisible(backing); remove_.setVisible(!instrumental); import_.setVisible(!backing);
+            audioLayer_.setToggleState(!track_.audioMuted); noteLayer_.setToggleState(!track_.notesMuted);
+            audioLayer_.setEnabled(!array(track_.source["clips"]).isEmpty()); noteLayer_.setEnabled(hasNotes);
+            import_.setEnabled(!content_.busy_); remove_.setEnabled(!content_.busy_);
+            content_.populateProfile(profile_, track_.id, profileIds_); profile_.setEnabled(!content_.busy_ && hasNotes && !profileIds_.empty());
+            const auto generating = content_.generationTrack_ == track_.id, rendering = content_.renderTrack_ == track_.id;
+            render_.setText(rendering ? "Rendering..." : "Render"); regenerate_.setText(generating ? "Generating..." : "Regenerate");
+            render_.setVisible(backing && (!static_cast<bool>(content["hasAudio"]) || generating || rendering)); regenerate_.setVisible(render_.isVisible());
+            render_.setEnabled(hasNotes && !content_.busy_); regenerate_.setEnabled(hasNotes && !content_.busy_);
+            render_.toFront(false); regenerate_.toFront(false);
         }
         void updateSelection()
         {
-            for (auto& clip : clips_) clip->setSelected(content_.selectedTrack_ == track_.id && content_.selectedClip_ == clip->getComponentID());
+            for (auto& clip : clips_) clip->setSelected(content_.isTrackSelected(track_.id) && content_.selectedClip_ == clip->getComponentID());
             repaint();
         }
         void paintOverChildren(juce::Graphics& g) override
         {
-            if (content_.selectedTrack_ == track_.id)
+            if (content_.isTrackSelected(track_.id))
             { g.setColour(trackColour(track_.id, track_.parent.isNotEmpty()).withAlpha(0.2f)); g.drawRect(8, 0, kHeaderWidth - 10, getHeight() - 2, 1); }
         }
         juce::String id() const { return track_.id; }
         TrackHeader& header() { return header_; }
     private:
+        void sendLayers() { content_.send(command("set-track-layer-state", { { "track", track_.id }, { "state", object({ { "audioMuted", track_.audioMuted }, { "notesMuted", track_.notesMuted } }) } })); }
         void mouseDown(const juce::MouseEvent& event) override
         {
-            if (event.eventComponent == &grid_ || header_.isParentOf(event.eventComponent) || event.eventComponent == &header_) content_.selectTrack(track_.id);
+            for (auto* target = event.eventComponent; target != nullptr && target != &header_ && target != this; target = target->getParentComponent())
+                if (dynamic_cast<Button*>(target) != nullptr || dynamic_cast<Slider*>(target) != nullptr || dynamic_cast<Select*>(target) != nullptr) return;
+            if (event.eventComponent == this || event.eventComponent == &grid_ || header_.isParentOf(event.eventComponent) || event.eventComponent == &header_) content_.selectTrack(track_.id, true, event.mods.isShiftDown());
         }
         void mouseWheelMove(const juce::MouseEvent& event, const juce::MouseWheelDetails& wheel) override
         { if (event.eventComponent == &grid_) content_.arrangementWheel(event, wheel, event.position.x); }
         Content& content_; Track track_; TrackHeader header_; juce::Component body_; TimelineGrid grid_;
+        ToggleButton audioLayer_ { "Audio" }, noteLayer_ { "Notes" };
+        IconButton import_ { Icon::plus, "Import audio" }, remove_ { Icon::close, "Remove track" };
+        Select profile_;
+        Button render_ { "Render" }, regenerate_ { "Regenerate" };
+        std::vector<juce::String> profileIds_;
         std::vector<std::unique_ptr<ClipItem>> clips_;
     };
 
-    Content(NativeStudioView& owner, CommandHandler handler) : owner_(owner), handler_(std::move(handler)),
+    Content(NativeStudioView& owner, CommandHandler handler, std::shared_ptr<StudioShortcuts> shortcuts) : owner_(owner), handler_(std::move(handler)), shortcuts_(shortcuts ? std::move(shortcuts) : std::make_shared<StudioShortcuts>()),
         ruler_(view_), tempo_(view_), signature_(view_), chords_(view_), arrangementPlayhead_(view_), musicalEvents_(view_), cycleOverlay_(view_),
         lowerRuler_(lowerView_), pitch_(lowerView_), lowerPlayhead_(lowerView_)
     {
         view_.firstBeat = 0.0; view_.pixelsPerBeat = 40.0; lowerView_ = view_;
-        for (auto* child : std::initializer_list<juce::Component*> { &transport_, &scroll_, &toolbar_, &lowerRuler_, &keyboard_, &pitch_, &lowerPlayhead_, &horizontal_, &status_ }) addAndMakeVisible(child);
+        for (auto* child : std::initializer_list<juce::Component*> { &transport_, &scroll_, &toolbar_, &lowerRuler_, &pianoScroll_, &lowerPlayhead_, &horizontal_, &status_, &statusDismiss_, &exportToast_ }) addAndMakeVisible(child);
         scroll_.setViewedComponent(&arrangement_, false); scroll_.setScrollBarsShown(false, false);
+        pianoScroll_.setViewedComponent(&pianoCanvas_, false); pianoScroll_.setScrollBarsShown(false, false);
+        pianoCanvas_.addAndMakeVisible(keyboard_); pianoCanvas_.addAndMakeVisible(pitch_);
+        pianoScroll_.setComponentID("studio.pitchViewport");
+        scroll_.setComponentID("studio.arrangementViewport");
+        pianoScroll_.onWheel = [this](const juce::MouseEvent& event, const juce::MouseWheelDetails& wheel) { pitchWheel(event, wheel); };
         for (auto* child : std::initializer_list<juce::Component*> { &ruler_, &tempo_, &signature_, &chords_, &global_, &addTrack_, &arrangementPlayhead_, &musicalEvents_, &cycleOverlay_ }) arrangement_.addAndMakeVisible(child);
+        toolbar_.setComponentID("studio.pitchToolbar");
         transport_.setComponentID("studio.transport"); ruler_.setComponentID("studio.ruler"); lowerRuler_.setComponentID("studio.pitchRuler"); pitch_.setComponentID("studio.pitch");
         transport_.setProjectTitle("Obsidian"); transport_.setRecordingAvailable(false);
-        transport_.setProjectActions({ "New project", "Open project…", "Save project", "Import vocal audio…", "Import instrumental…", "Load annotation JSON…", "Load lyrics…", "Analyze selected track", "Analyze AI parts", "Generate backing", "Render backing audio", "Undo", "Redo", "Export all tracks…", "Export MIDI…", "Validate", "Audio and voice settings…", "Set loop start at playhead", "Set loop end at playhead", "Loop entire project" });
+        transport_.setProjectActions({ "New project", "Open project...", "Save project", "Import vocal audio...", "Import instrumental...", "Load annotation JSON...", "Load lyrics...", "Analyze selected track", "Analyze AI parts", "Generate backing", "Render backing audio", "Undo", "Redo", "Export all tracks...", "Export MIDI...", "Validate", "Audio and voice settings...", "Set loop start at playhead", "Set loop end at playhead", "Loop entire project", "File Import..." });
         transport_.onProjectAction = [this](int index)
         {
             static const char* actions[] { "new-project", "open-project", "save-project", "open-audio", "open-instrumental", "load-json", "load-lyrics", "analyze", "ai-parts", "generate-backing", "render-backing", "undo", "redo", "export-all-tracks", "export-midi", "validate" };
             if (index == 16) { const auto callback = owner_.onShowSettings; if (callback) callback(); }
+            else if (index == 20) send(command("import-track-audio", { { "track", selectedRoot() } }));
+            else if (index == 9) showBackingPicker(selectedTrack_, transport_);
             else if (index >= 17 && index <= 19) changeLoop(index - 17);
             else if (juce::isPositiveAndBelow(index, static_cast<int>(std::size(actions)))) send(command("project-action", { { "action", actions[index] } }));
         };
@@ -403,18 +647,48 @@ public:
         transport_.onStop = [this] { send(command("transport", { { "action", "stop" } })); };
         transport_.onRewind = [this] { send(command("transport", { { "action", "return-to-start" } })); };
         transport_.onMasterVolume = [this](double value) { send(command("set-volume", { { "value", value * 100.0 } })); };
+        cycleOverlay_.positionForBeat = [this](double beat) { return beatToPercent(beat); };
+        cycleOverlay_.beatForPosition = [this](double position) { return percentToBeat(position); };
+        cycleOverlay_.onCommit = [this](double first, double last, bool active)
+        {
+            loopActive_ = active; loopRange_ = object({ { "start", first }, { "end", last } }); transport_.setLooping(active);
+            send(command("set-loop", { { "active", active }, { "range", loopRange_ } }));
+        };
+        cycleOverlay_.onWheel = [this](const juce::MouseEvent& event, const juce::MouseWheelDetails& wheel) { arrangementWheel(event, wheel, event.position.x); };
         transport_.onLoop = [this](bool active) { send(command("set-loop", { { "active", active }, { "range", loopRange_ } })); };
         global_.setVariant(Button::Variant::subtle); global_.setTextJustification(juce::Justification::centredLeft);
         global_.onClick = [this] { arrangement_.globalsExpanded = !arrangement_.globalsExpanded; global_.setIcon(arrangement_.globalsExpanded ? Icon::chevronDown : Icon::chevronRight); resized(); };
         addTrack_.setComponentID("studio.addTrack"); addTrack_.onClick = [this] { send(command("add-track")); };
-        for (auto* item : std::initializer_list<juce::Component*> { &trackSelect_, &pointer_, &pencil_, &scissors_, &snap_, &delete_, &noteMenu_, &undo_, &redo_, &zoomOut_, &zoom_, &zoomIn_ }) toolbar_.addAndMakeVisible(item);
-        trackSelect_.setComponentID("studio.trackSelect"); snap_.setComponentID("studio.snap");
-        pointer_.setComponentID("studio.pointer"); pencil_.setComponentID("studio.pencil"); scissors_.setComponentID("studio.scissors"); delete_.setComponentID("studio.delete");
+        for (auto* item : std::initializer_list<juce::Component*> { &trackSelect_, &primaryLabel_, &primaryTool_, &secondaryLabel_, &secondaryTool_, &snap_, &chordSnap_, &delete_, &noteMenu_, &undo_, &redo_, &zoomOut_, &zoom_, &zoomIn_, &pitchZoomLabel_, &pitchZoom_, &pitchCollapse_, &toolbarHelp_, &addBacking_, &settings_, &voiceLab_, &backingProfile_, &backingRender_, &backingRegenerate_ }) toolbar_.addAndMakeVisible(item);
+        addBacking_.setComponentID("studio.addBacking"); settings_.setComponentID("studio.settings"); voiceLab_.setComponentID("studio.voiceLab");
+        backingProfile_.setComponentID("studio.backing.profile"); backingRender_.setComponentID("studio.backing.render"); backingRegenerate_.setComponentID("studio.backing.regenerate");
+        addBacking_.onClick = [this] { showBackingPicker(selectedTrack_, addBacking_); };
+        settings_.onClick = [this] { const auto callback = owner_.onShowSettings; if (callback) callback(); };
+        voiceLab_.onClick = [this] { const auto callback = owner_.onShowVoiceLab ? owner_.onShowVoiceLab : owner_.onShowSettings; if (callback) callback(); };
+        backingProfile_.onChange = [this](int index) { if (juce::isPositiveAndBelow(index, static_cast<int>(backingProfileIds_.size()))) send(command("set-backing-voice-profile", { { "track", selectedTrack_ }, { "profileId", backingProfileIds_[static_cast<std::size_t>(index)] } })); };
+        backingRender_.onClick = [this] { send(command("render-backing-track", { { "track", selectedTrack_ } })); };
+        backingRegenerate_.onClick = [this] { send(command("regenerate-backing-track", { { "track", selectedTrack_ }, { "generator", backingPicker_.generator() } })); };
+        trackSelect_.setComponentID("studio.trackSelect"); snap_.setComponentID("studio.snap"); delete_.setComponentID("studio.delete");
+        primaryTool_.setComponentID("studio.tool.primary"); secondaryTool_.setComponentID("studio.tool.secondary");
+        primaryTool_.setTitle("Click tool"); secondaryTool_.setTitle(juce::SystemStats::getOperatingSystemType() & juce::SystemStats::MacOSX ? "Command-click tool" : "Control-click tool");
+        primaryTool_.setDescription("Primary piano roll tool. Keys 1 through 9 select a tool.");
+        secondaryTool_.setDescription("Secondary tool for Command-click on macOS, Control-click on Windows or Linux, and right-click.");
+        const juce::StringArray toolNames { "Pointer", "Pencil", "Eraser", "Scissors", "Join", "Flex", "Vibrato", "Gain", "Zoom" };
+        primaryTool_.setItems(toolNames); secondaryTool_.setItems(toolNames);
+        primaryTool_.setSelectedIndex(0); secondaryTool_.setSelectedIndex(3);
+        primaryTool_.onChange = [this](int) { applyTools(); }; secondaryTool_.onChange = [this](int) { applyTools(); };
+        applyTools();
+        pitchZoom_.setComponentID("studio.pitchZoom"); pitchZoom_.setTitle("Vertical Piano Roll zoom");
+        pitchZoom_.setRange(1.0, 4.0, 0.05); pitchZoom_.setValue(verticalZoom_);
+        pitchZoom_.valueToText = [](double value) { return juce::String(value, 2) + juce::String::fromUTF8("×"); };
+        pitchZoom_.onValueChange = [this](double value) { setVerticalZoom(value); };
+        pitchCollapse_.setComponentID("studio.pitchCollapse"); pitchCollapse_.setTitle("Collapse Piano Roll");
+        pitchCollapse_.onClick = [this] { pianoCollapsed_ = !pianoCollapsed_; pitchCollapse_.setIcon(pianoCollapsed_ ? Icon::chevronRight : Icon::chevronDown); pitchCollapse_.setTitle(pianoCollapsed_ ? "Expand Piano Roll" : "Collapse Piano Roll"); pitchCollapse_.setSelected(pianoCollapsed_); resized(); };
         trackSelect_.onChange = [this](int index) { if (juce::isPositiveAndBelow(index, static_cast<int>(tracks_.size()))) selectTrack(tracks_[static_cast<std::size_t>(index)].id); };
-        pointer_.onClick = [this] { setTool(PitchTool::pointer); }; pencil_.onClick = [this] { setTool(PitchTool::pencil); }; scissors_.onClick = [this] { setTool(PitchTool::scissors); };
-        setTool(PitchTool::pointer);
         snap_.setItems({ "Snap off", "1/4", "1/8", "1/16", "1/32" }); snap_.setSelectedIndex(3);
         snap_.onChange = [this](int index) { constexpr double steps[] {0.0, 1.0, 0.5, 0.25, 0.125}; snapBeats_ = steps[std::clamp(index, 0, 4)]; pitch_.setSnapBeats(snapBeats_); };
+        chordSnap_.setComponentID("studio.chordSnap"); chordSnap_.setTitle("Snap notes to chord tones");
+        chordSnap_.onToggle = [this](bool enabled) { snapToChord_ = enabled; };
         delete_.onClick = [this] { deleteSelection(); };
         noteMenu_.onClick = [this] { showNoteMenu(); };
         undo_.onClick = [this] { send(command("pitch-history", { { "track", selectedTrack_ }, { "action", "undo" } })); };
@@ -440,13 +714,45 @@ public:
             updateEnabled();
         };
         pitch_.onEditRequested = [this](PitchTool tool, int id, double beat, int midi) { editNote(tool, id, beat, midi); };
+        pitch_.onNoteCreated = [this](double start, double length, double pitch) { createNote(start, length, pitch); };
+        pitch_.pitchTransform = [this](double requested, double beat)
+        {
+            if (!snapToChord_ || !pitchTrackAvailable()) return requested;
+            const auto seconds = tempoMap_.secondsAt(beat);
+            for (const auto& chord : array(project_["chords"]))
+            {
+                const auto start = number(chord["startSeconds"], -1.0), end = number(chord["endSeconds"], -1.0);
+                if (start < 0.0 || seconds < start || seconds >= end || array(chord["pitchClasses"]).isEmpty()) continue;
+                auto result = requested, distance = 128.0;
+                for (int midi = 0; midi <= 127; ++midi)
+                    if (std::any_of(array(chord["pitchClasses"]).begin(), array(chord["pitchClasses"]).end(), [midi](const auto& pitchClass) { return static_cast<int>(number(pitchClass, -1.0)) == midi % 12; }))
+                    {
+                        const auto difference = std::abs(static_cast<double>(midi) - requested);
+                        if (difference < distance) { result = static_cast<double>(midi); distance = difference; }
+                    }
+                return result;
+            }
+            return requested;
+        };
+        pitch_.defaultNoteLengthBeats = [this](double start) { return tempoMap_.beatAt(tempoMap_.secondsAt(start) + 0.5) - start; };
+        pitch_.onNoteExpressionEdited = [this](PitchTool tool, int id, double value)
+        {
+            if (!pitchTrackAvailable()) return;
+            const auto* note = findNote(id); if (note == nullptr) return;
+            if (tool == PitchTool::vibrato) send(command("set-clip-vibrato", { { "track", selectedTrack_ }, { "clipId", note->id }, { "scale", value } }));
+            else if (tool == PitchTool::gain) send(command("set-clip-gain", { { "track", selectedTrack_ }, { "clipId", note->id }, { "gainDb", value } }));
+        };
+        pitch_.onPitchPreview = [this](double pitch, bool restart) { send(command("preview-pitch-tone", { { "pitch", pitch }, { "restart", restart } })); };
+        pitch_.onPitchPreviewEnd = [this] { send(command("stop-pitch-tone")); };
+        pitch_.onWheelGesture = [this](const juce::MouseEvent& event, const juce::MouseWheelDetails& wheel) { pitchWheel(event, wheel); };
         pitch_.onNotesMoved = [this](const std::vector<PitchEditor::NoteMovement>& movements)
         {
+            if (!pitchTrackAvailable()) return;
             juce::Array<juce::var> changes;
             for (const auto& movement : movements)
             {
                 const auto* note = findNote(movement.id); if (note == nullptr) continue;
-                const auto pitch = std::clamp(note->pitch + static_cast<double>(movement.midiNote - juce::roundToInt(note->pitch)), 0.0, 127.0);
+                const auto pitch = std::clamp(std::isfinite(movement.pitch) ? movement.pitch : note->pitch + static_cast<double>(movement.midiNote - juce::roundToInt(note->pitch)), 0.0, 127.0);
                 const auto startDelta = tempoMap_.secondsAt(movement.startBeat) - duration_ * note->x / 100.0;
                 const auto endDelta = tempoMap_.secondsAt(movement.startBeat + movement.lengthBeats) - duration_ * (note->x + note->width) / 100.0;
                 changes.add(object({ { "clipId", note->id }, { "startDeltaSeconds", startDelta }, { "endDeltaSeconds", endDelta }, { "pitch", pitch } }));
@@ -454,13 +760,27 @@ public:
             if (!changes.isEmpty()) send(command("move-note-group", { { "track", selectedTrack_ }, { "notes", juce::var(changes) }, { "snapToChord", snapToChord_ } }));
         };
         horizontal_.setRange(0.0, 1.0); horizontal_.onValueChange = [this](double first) { view_.firstBeat = first; refreshViewport(); };
+        statusDismiss_.setComponentID("studio.status.dismiss"); statusDismiss_.onClick = [this] { status_.setText({}, juce::dontSendNotification); };
+        exportToast_.addAndMakeVisible(exportLabel_); exportToast_.addAndMakeVisible(exportOpen_); exportToast_.addAndMakeVisible(exportDismiss_); exportToast_.setVisible(false);
+        exportLabel_.setColour(juce::Label::textColourId, colour(tokens::text)); exportLabel_.setFont(font(tokens::fontSmall));
+        exportOpen_.setComponentID("studio.export.open"); exportDismiss_.setComponentID("studio.export.dismiss");
+        exportOpen_.onClick = [this] { const auto path = exportDirectory_; if (juce::File::isAbsolutePath(path)) juce::File(path).revealToUser(); };
+        exportDismiss_.onClick = [this] { exportToast_.setVisible(false); };
         status_.setText("Open a project or import audio to begin.", juce::dontSendNotification); status_.setColour(juce::Label::textColourId, colour(tokens::muted)); status_.setFont(font(tokens::fontSmall));
         setWantsKeyboardFocus(true);
-        pitch_.setNoteRange(46, 75); keyboard_.setNoteRange(46, 75);
+        pitch_.setNoteRange(kPitchMinimum, kPitchMaximum); keyboard_.setNoteRange(kPitchMinimum, kPitchMaximum);
         loopRange_ = object({ { "start", 0.0 }, { "end", 25.0 } });
+        backingPicker_.onCreate = [this](const juce::String& parent, const juce::String& type, const juce::String& generator)
+        { send(command("add-backing-track", { { "track", type }, { "generator", generator }, { "parentId", parent } })); };
         updateEnabled();
+        observeShortcutRoot(); installShortcuts(owner_);
     }
-    ~Content() override { scroll_.setViewedComponent(nullptr, false); }
+    ~Content() override
+    {
+        if (shortcutRoot_ != nullptr) shortcutRoot_->removeComponentListener(this);
+        for (auto target : shortcutTargets_) if (target != nullptr) target->removeKeyListener(this);
+        scroll_.setViewedComponent(nullptr, false); pianoScroll_.setViewedComponent(nullptr, false);
+    }
 
     void send(const juce::var& payload)
     {
@@ -496,7 +816,7 @@ public:
         for (auto* surface : std::initializer_list<EditorSurface*> { &ruler_, &tempo_, &signature_, &chords_, &lowerRuler_, &pitch_ }) surface->viewportChanged();
         for (auto& row : rows_) row->refresh();
         arrangementPlayhead_.viewportChanged(); lowerPlayhead_.viewportChanged(); musicalEvents_.repaint();
-        cycleOverlay_.setRange(percentToBeat(number(loopRange_["start"])), percentToBeat(number(loopRange_["end"])), loopActive_);
+        cycleOverlay_.setRange(number(loopRange_["start"]), number(loopRange_["end"]), loopActive_, duration_, false);
         zoom_.setValue(view_.pixelsPerBeat);
         horizontal_.setRange(0.0, std::max(1.0, tempoMap_.beatAt(duration_))); horizontal_.setValue(view_.firstBeat);
     }
@@ -517,6 +837,19 @@ public:
         const auto found = std::find_if(tracks_.begin(), tracks_.end(), [&](const auto& track) { return track.id == id; });
         return found == tracks_.end() ? nullptr : &*found;
     }
+    juce::var backingContent(const juce::String& id) const
+    {
+        for (const auto& item : array(project_["backingTrackContents"])) if (item["id"].toString() == id) return item;
+        return {};
+    }
+    juce::var noteValues(const juce::String& id) const { return id == "Voice Main" ? project_["clips"] : backingContent(id)["clips"]; }
+    void populateProfile(Select& selector, const juce::String& trackId, std::vector<juce::String>& ids)
+    {
+        juce::StringArray names; ids.clear();
+        for (const auto& profile : array(project_["voiceProfiles"])) { names.add(profile["name"].toString()); ids.push_back(profile["id"].toString()); }
+        selector.setItems(names); const auto selected = backingContent(trackId)["voiceProfileId"].toString();
+        const auto found = std::find(ids.begin(), ids.end(), selected); selector.setSelectedIndex(found == ids.end() ? -1 : static_cast<int>(std::distance(ids.begin(), found)));
+    }
     const Note* findNote(int id) const
     {
         const auto found = std::find_if(notes_.begin(), notes_.end(), [id](const auto& note) { return note.localId == id; });
@@ -534,14 +867,26 @@ public:
     }
     void setTrackState(const juce::String& id, bool muted, bool solo)
     { send(command("set-track-state", { { "track", id }, { "state", object({ { "mute", muted }, { "solo", solo } }) } })); }
-    void selectTrack(const juce::String& id, bool notify = true)
+    bool isTrackSelected(const juce::String& id) const
+    { return std::find(selectedTracks_.begin(), selectedTracks_.end(), id) != selectedTracks_.end(); }
+    void selectTrack(const juce::String& id, bool notify = true, bool additive = false)
     {
         if (findTrack(id) == nullptr) return;
-        if (selectedTrack_ != id) { selectedTrack_ = id; selectedClip_.clear(); selectedNote_.clear(); selectedNotes_.clear(); rebuildPitch(); }
-        for (std::size_t i = 0; i < tracks_.size(); ++i) if (tracks_[i].id == id) trackSelect_.setSelectedIndex(static_cast<int>(i));
+        const auto previous = selectedTracks_;
+        if (!additive) selectedTracks_ = { id };
+        else if (const auto found = std::find(selectedTracks_.begin(), selectedTracks_.end(), id); found != selectedTracks_.end()) selectedTracks_.erase(found);
+        else selectedTracks_.push_back(id);
+        selectedTrack_ = selectedTracks_.size() == 1 ? selectedTracks_.front() : juce::String();
+        if (selectedTracks_ != previous) { selectedClip_.clear(); selectedNote_.clear(); selectedNotes_.clear(); rebuildPitch(); }
+        trackSelect_.setSelectedIndex(-1);
+        for (std::size_t i = 0; i < tracks_.size(); ++i) if (tracks_[i].id == selectedTrack_) trackSelect_.setSelectedIndex(static_cast<int>(i));
         for (auto& row : rows_) row->updateSelection();
         updateEnabled();
-        if (notify) send(command("select-tracks", { { "tracks", juce::var(juce::Array<juce::var>{ juce::var(id) }) } }));
+        if (notify)
+        {
+            juce::Array<juce::var> values; for (const auto& track : selectedTracks_) values.add(track);
+            send(command("select-tracks", { { "tracks", juce::var(values) } }));
+        }
     }
     void selectClip(const juce::String& track, const juce::String& clip)
     {
@@ -560,28 +905,51 @@ public:
         selectedNotes_.clear(); if (note != nullptr) selectedNotes_.insert(note->id);
         updateEnabled();
     }
-    void setTool(PitchTool tool)
+    void applyTools()
     {
-        pitch_.setTool(tool); pointer_.setSelected(tool == PitchTool::pointer); pencil_.setSelected(tool == PitchTool::pencil); scissors_.setSelected(tool == PitchTool::scissors);
+        constexpr PitchTool tools[] { PitchTool::pointer, PitchTool::pencil, PitchTool::eraser, PitchTool::scissors, PitchTool::join, PitchTool::flex, PitchTool::vibrato, PitchTool::gain, PitchTool::zoom };
+        pitch_.setTool(tools[std::clamp(primaryTool_.getSelectedIndex(), 0, 8)]);
+        pitch_.setSecondaryTool(tools[std::clamp(secondaryTool_.getSelectedIndex(), 0, 8)]);
+    }
+    void createNote(double beat, double length, double pitch)
+    {
+        if (!pitchTrackAvailable() || duration_ <= 0.0) return;
+        const auto start = beatToPercent(beat), end = beatToPercent(beat + length);
+        send(command("add-clip", { { "track", selectedTrack_ }, { "snapToChord", snapToChord_ },
+            { "clip", object({ { "id", juce::Uuid().toString() }, { "x", start }, { "width", std::max(0.001, end - start) }, { "pitch", std::clamp(pitch, 0.0, 127.0) } }) } }));
     }
     void editNote(PitchTool tool, int id, double beat, int midi)
     {
         if (!pitchTrackAvailable()) return;
         if (tool == PitchTool::pencil)
         {
-            const auto start = beatToPercent(beat), end = beatToPercent(beat + std::max(0.125, snapBeats_));
-            send(command("add-clip", { { "track", selectedTrack_ }, { "snapToChord", snapToChord_ },
-                { "clip", object({ { "id", juce::Uuid().toString() }, { "x", start }, { "width", std::max(0.001, end - start) }, { "pitch", midi } }) } }));
+            const auto length = tempoMap_.beatAt(tempoMap_.secondsAt(beat) + 0.5) - beat;
+            createNote(beat, length, static_cast<double>(midi));
+            return;
         }
-        else if (tool == PitchTool::scissors)
-        {
-            const auto* note = findNote(id);
-            if (note == nullptr) return;
+        const auto* note = findNote(id);
+        if (note == nullptr) return;
+        if (tool == PitchTool::scissors)
             send(command("split-clip", { { "track", selectedTrack_ }, { "clipId", note->id }, { "x", beatToPercent(beat) }, { "rightClipId", juce::Uuid().toString() }, { "snapToChord", snapToChord_ } }));
+        else if (tool == PitchTool::eraser)
+            send(command("delete-clips", { { "track", selectedTrack_ }, { "clipIds", juce::var(juce::Array<juce::var>{ juce::var(note->id) }) } }));
+        else if (tool == PitchTool::join)
+        {
+            juce::Array<juce::var> ids;
+            if (selectedNotes_.contains(note->id) && selectedNotes_.size() > 1)
+                for (const auto& selected : selectedNotes_) ids.add(selected);
+            else if (notes_.size() > 1)
+            {
+                const auto index = static_cast<std::size_t>(note - notes_.data());
+                if (index + 1 < notes_.size()) { ids.add(note->id); ids.add(notes_[index + 1].id); }
+                else { ids.add(notes_[index - 1].id); ids.add(note->id); }
+            }
+            if (ids.size() > 1) send(command("join-clips", { { "track", selectedTrack_ }, { "clipIds", juce::var(ids) }, { "snapToChord", snapToChord_ } }));
         }
     }
     bool pitchTrackAvailable() const
     {
+        if (selectedTracks_.size() != 1) return false;
         if (selectedTrack_ == "Voice Main") return true;
         for (const auto& content : array(project_["backingTrackContents"])) if (content["id"].toString() == selectedTrack_) return true;
         return false;
@@ -590,6 +958,7 @@ public:
     {
         if (!selectedNotes_.empty())
         {
+            if (!pitchTrackAvailable()) return;
             juce::Array<juce::var> ids; for (const auto& id : selectedNotes_) ids.add(id);
             send(command("delete-clips", { { "track", selectedTrack_ }, { "clipIds", juce::var(ids) } }));
         }
@@ -614,7 +983,7 @@ public:
         const auto* selected = findNote(pitch_.selectedNote());
         const auto id = selected != nullptr ? selected->id : juce::String();
         std::vector<Menu::Item> items;
-        items.push_back({ "Snap pitch edits to chord", [this] { snapToChord_ = !snapToChord_; }, true, snapToChord_ });
+        items.push_back({ "Snap pitch edits to chord", [this] { snapToChord_ = !snapToChord_; chordSnap_.setToggleState(snapToChord_); }, true, snapToChord_ });
         items.push_back({ "Select all notes", [this] { selectAllNotes(); }, !notes_.empty() });
         items.push_back({ "Move selected up one semitone", [this] { shiftNotes(1.0); }, !selectedNotes_.empty() });
         items.push_back({ "Move selected down one semitone", [this] { shiftNotes(-1.0); }, !selectedNotes_.empty() });
@@ -629,33 +998,42 @@ public:
             for (auto scale : { 0.0, 0.5, 1.0, 1.5 })
                 items.push_back({ "Vibrato " + juce::String(scale * 100.0, 0) + "%", [this, id, scale] { send(command("set-clip-vibrato", { { "track", selectedTrack_ }, { "clipId", id }, { "scale", scale } })); } });
         }
-        menu_.setItems(std::move(items)); menu_.showFor(noteMenu_, 260);
+        menu_.setItems(std::move(items)); menu_.showFor(noteMenu_, 260); installShortcuts(menu_);
+    }
+    void showBackingPicker(juce::String parentId, juce::Component& anchor)
+    {
+        if (busy_) return;
+        if (parentId.isEmpty() || parentId == "Instrumental") { status_.setText("Select one vocal track before adding backing.", juce::dontSendNotification); return; }
+        const auto* track = findTrack(parentId); if (track == nullptr) return;
+        juce::StringArray types; for (const auto& value : array(project_["backingTrackOptions"])) types.add(value.toString());
+        if (types.isEmpty()) { status_.setText("No backing types are available for this project.", juce::dontSendNotification); return; }
+        backingPicker_.show(parentId, track->name, types, anchor); installShortcuts(backingPicker_);
     }
     void showTrackMenu(const juce::String& id, juce::Component& anchor)
     {
         const auto* track = findTrack(id); if (track == nullptr) return;
         const auto audioMuted = track->audioMuted, notesMuted = track->notesMuted;
         std::vector<Menu::Item> items {
-            { "Import audio…", [this, id] { send(command("import-track-audio", { { "track", id } })); } },
+            { "Import audio...", [this, id] { send(command("import-track-audio", { { "track", id } })); } },
             { "Audio layer", [this, id, audioMuted, notesMuted] { send(command("set-track-layer-state", { { "track", id }, { "state", object({ { "audioMuted", !audioMuted }, { "notesMuted", notesMuted } }) } })); }, true, !audioMuted },
             { "Note layer", [this, id, audioMuted, notesMuted] { send(command("set-track-layer-state", { { "track", id }, { "state", object({ { "audioMuted", audioMuted }, { "notesMuted", !notesMuted } }) } })); }, id != "Instrumental", !notesMuted },
             { "Analyze selected track", [this, id] { selectTrack(id); send(command("project-action", { { "action", "analyze" } })); }, id != "Instrumental" },
-            { "Add backing / voice settings…", [this, id] { selectTrack(id); const auto callback = owner_.onShowSettings; if (callback) callback(); }, id != "Instrumental" }
+            { "Add backing...", [this, id, anchorPointer = juce::Component::SafePointer<juce::Component>(&anchor)] { selectTrack(id); if (anchorPointer != nullptr) showBackingPicker(id, *anchorPointer); }, id != "Instrumental" }
         };
         if (track->parent.isNotEmpty())
         {
-            items.push_back({ "Regenerate backing", [this, id] { send(command("regenerate-backing-track", { { "track", id }, { "generator", "local" } })); } });
+            items.push_back({ "Regenerate backing", [this, id] { send(command("regenerate-backing-track", { { "track", id }, { "generator", backingPicker_.generator() } })); } });
             items.push_back({ "Render backing audio", [this, id] { send(command("render-backing-track", { { "track", id } })); } });
             items.push_back({ "Remove backing track", [this, id] { send(command("remove-backing-track", { { "track", id } })); } });
         }
         else if (id != "Instrumental") items.push_back({ "Remove track", [this, id] { send(command("remove-track", { { "track", id } })); } });
-        menu_.setItems(std::move(items)); menu_.showFor(anchor, 260);
+        menu_.setItems(std::move(items)); menu_.showFor(anchor, 260); installShortcuts(menu_);
     }
     void showClipMenu(const juce::String& track, const juce::String& clip, juce::Component& anchor)
     {
         menu_.setItems({ { "Select track", [this, track] { selectTrack(track); } },
             { "Remove audio clip", [this, track, clip] { send(command("remove-arrangement-clip", { { "track", track }, { "clipId", clip } })); } } });
-        menu_.showFor(anchor, 230);
+        menu_.showFor(anchor, 230); installShortcuts(menu_);
     }
     juce::String trackAt(juce::Point<int> position) const
     {
@@ -663,37 +1041,55 @@ public:
         for (const auto& row : rows_) if (row->isVisible() && row->getBounds().contains(point)) return row->id();
         return {};
     }
+    juce::String selectedRoot() const
+    {
+        if (selectedTracks_.size() != 1) return {};
+        auto id = selectedTracks_.front(); std::set<juce::String> visited;
+        while (visited.insert(id).second)
+        {
+            const auto* track = findTrack(id); if (track == nullptr) return {};
+            if (track->parent.isEmpty()) return id;
+            id = track->parent;
+        }
+        return {};
+    }
     void importFiles(const juce::StringArray& paths, juce::Point<int> position)
     {
+        if (busy_) { status_.setText("Wait for the current operation before importing audio.", juce::dontSendNotification); return; }
         juce::Array<juce::var> files;
         for (const auto& path : paths) if (juce::File::isAbsolutePath(path)) files.add(path);
         if (files.isEmpty()) return;
-        auto track = trackAt(position); if (track.isEmpty()) track = selectedTrack_;
+        auto track = trackAt(position);
         const auto local = arrangement_.getLocalPoint(this, position);
-        const auto seconds = tempoMap_.secondsAt(snapBeat(view_.beatAtX(static_cast<float>(std::max(0, local.x - kHeaderWidth)))));
+        const auto actualLane = scroll_.getBounds().contains(position) && local.x >= kHeaderWidth && track.isNotEmpty();
+        const auto seconds = actualLane ? tempoMap_.secondsAt(snapBeat(view_.beatAtX(static_cast<float>(local.x - kHeaderWidth)))) : duration_ * playheadPercent_ / 100.0;
+        if (!actualLane) track = selectedRoot();
         send(command("import-dropped-audio", { { "track", track }, { "start", seconds }, { "files", juce::var(files) } }));
     }
     void rebuildRows()
     {
         juce::String focusId;
         if (auto* focused = juce::Component::getCurrentlyFocusedComponent(); focused != nullptr && arrangement_.isParentOf(focused)) focusId = focused->getComponentID();
-        menu_.dismiss();
+        menu_.dismiss(); backingPicker_.dismiss();
         rows_.clear(); groups_.clear();
         for (std::size_t index = 0; index < tracks_.size(); ++index)
         {
             auto row = std::make_unique<Row>(*this, tracks_[index], static_cast<int>(index));
             arrangement_.addAndMakeVisible(*row); rows_.push_back(std::move(row));
             const auto& track = tracks_[index];
-            if (std::any_of(tracks_.begin(), tracks_.end(), [&](const auto& child) { return child.parent == track.id; }))
+            if ((track.parent.isEmpty() && track.id != "Instrumental") || std::any_of(tracks_.begin(), tracks_.end(), [&](const auto& child) { return child.parent == track.id; }))
             {
                 auto group = std::make_unique<TrackGroupHeader>();
-                group->setTitle(track.name + " · Backing Vocals"); group->setExpanded(!track.collapsed);
+                group->setComponentID("studio.group." + track.id);
+                group->setTitle(track.name + " - Backing Vocals"); group->setExpanded(!track.collapsed);
+                for (auto* child : group->getChildren()) if (child->getComponentID() == "group.add") { child->setComponentID("studio.addBacking." + track.id); child->setTitle("Add backing to " + track.name); }
                 group->onExpanded = [this, id = track.id](bool expanded) { send(command("set-track-collapsed", { { "track", id }, { "collapsed", !expanded } })); };
-                group->onAdd = [this, id = track.id] { selectTrack(id); const auto callback = owner_.onShowSettings; if (callback) callback(); };
+                group->onAdd = [this, id = track.id] { selectTrack(id); if (const auto found = groups_.find(id); found != groups_.end()) showBackingPicker(id, *found->second); };
                 arrangement_.addAndMakeVisible(*group); groups_.emplace(track.id, std::move(group));
             }
         }
         for (auto& row : rows_) row->updateSelection();
+        installShortcuts(owner_);
         resized();
         if (focusId.isNotEmpty())
         {
@@ -709,24 +1105,27 @@ public:
     void rebuildPitch()
     {
         notes_.clear();
-        juce::var noteValues;
-        if (selectedTrack_ == "Voice Main") noteValues = project_["clips"];
-        else for (const auto& track : array(project_["backingTrackContents"])) if (track["id"].toString() == selectedTrack_) { noteValues = track["clips"]; break; }
-        std::vector<NoteSegment> segments;
-        int minimum = 127, maximum = 0;
-        for (const auto& value : array(noteValues))
+        std::vector<std::pair<juce::String, juce::var>> noteGroups;
+        for (const auto& trackId : selectedTracks_)
         {
-            Note note;
+            if (trackId == "Voice Main") noteGroups.emplace_back(trackId, project_["clips"]);
+            else for (const auto& track : array(project_["backingTrackContents"])) if (track["id"].toString() == trackId) { noteGroups.emplace_back(trackId, track["clips"]); break; }
+        }
+        std::vector<NoteSegment> segments;
+
+        for (const auto& [trackId, values] : noteGroups)
+        for (const auto& value : array(values))
+        {
+            Note note; note.track = trackId;
             note.id = value["id"].toString(); if (note.id.isEmpty()) continue;
-            const auto key = selectedTrack_ + "\n" + note.id;
+            const auto key = trackId + "\n" + note.id;
             auto found = noteIds_.find(key);
             if (found == noteIds_.end()) found = noteIds_.emplace(key, nextNoteId_++).first;
             note.localId = found->second; note.x = number(value["x"]); note.width = number(value["width"]); note.pitch = std::clamp(number(value["pitch"], 60.0), 0.0, 127.0); note.source = value;
             if (note.width <= 0.0) continue;
             NoteSegment segment;
             segment.id = note.localId; segment.startBeat = percentToBeat(note.x); segment.lengthBeats = percentToBeat(note.x + note.width) - segment.startBeat;
-            segment.midiNote = juce::roundToInt(note.pitch); segment.colour = trackColour(selectedTrack_, selectedTrack_ != "Voice Main");
-            minimum = std::min(minimum, segment.midiNote); maximum = std::max(maximum, segment.midiNote);
+            segment.midiNote = juce::roundToInt(note.pitch); segment.pitch = note.pitch; segment.gainDb = number(value["gainDb"]); segment.colour = trackColour(trackId, trackId != "Voice Main"); segment.ghost = selectedTracks_.size() > 1;
             // Wire curves have absolute, irregular x positions. Resample in time
             // here because PitchEditor deliberately accepts uniform offsets.
             std::vector<std::pair<double, double>> curve;
@@ -752,14 +1151,12 @@ public:
                     }
                     else pitchValue = curve.back().second;
                 }
-                segment.pitchOffsets.push_back(static_cast<float>(pitchValue - static_cast<double>(segment.midiNote)));
+                segment.pitchOffsets.push_back(static_cast<float>(pitchValue - note.pitch));
             }
             notes_.push_back(std::move(note)); segments.push_back(std::move(segment));
         }
         std::sort(notes_.begin(), notes_.end(), [](const auto& a, const auto& b) { return a.x < b.x; });
-        if (segments.empty()) { minimum = 48; maximum = 72; }
-        const auto low = std::max(0, minimum - 5), high = std::min(127, std::max(maximum + 5, low + 23));
-        pitch_.setNoteRange(low, high); keyboard_.setNoteRange(low, high); pitch_.setNotes(std::move(segments));
+        pitch_.setNotes(std::move(segments));
         std::vector<int> selectedLocals;
         std::set<juce::String> surviving;
         for (const auto& note : notes_) if (selectedNotes_.contains(note.id)) { selectedLocals.push_back(note.localId); surviving.insert(note.id); }
@@ -771,12 +1168,31 @@ public:
     void updateEnabled()
     {
         const auto editable = pitchTrackAvailable() && duration_ > 0.0;
-        pencil_.setEnabled(editable); scissors_.setEnabled(editable); pitch_.setEnabled(duration_ > 0.0);
-        if (!editable) setTool(PitchTool::pointer);
-        delete_.setEnabled(!selectedNotes_.empty() || selectedClip_.isNotEmpty()); noteMenu_.setEnabled(editable);
+        const auto backing = backingContent(selectedTrack_);
+        const auto backingSelected = selectedTracks_.size() == 1 && backing.isObject();
+        backingProfile_.setVisible(backingSelected); backingRender_.setVisible(backingSelected); backingRegenerate_.setVisible(backingSelected);
+        if (backingSelected) populateProfile(backingProfile_, selectedTrack_, backingProfileIds_);
+        backingProfile_.setEnabled(backingSelected && !busy_ && !backingProfileIds_.empty());
+        backingRender_.setText(renderTrack_ == selectedTrack_ && busy_ ? "Rendering..." : static_cast<bool>(backing["hasAudio"]) ? "Re-render" : "Render");
+        backingRender_.setEnabled(backingSelected && !busy_ && !array(backing["clips"]).isEmpty()); backingRegenerate_.setEnabled(backingRender_.isEnabled());
+        addBacking_.setEnabled(!busy_ && selectedTracks_.size() == 1 && selectedTrack_ != "Instrumental");
+        for (auto& [id, group] : groups_)
+            for (auto* child : group->getChildren()) if (child->getComponentID() == "studio.addBacking." + id) child->setEnabled(!busy_);
+        if (backingToolbarVisible_ != backingSelected) { backingToolbarVisible_ = backingSelected; resized(); }
+        primaryTool_.setEnabled(duration_ > 0.0); secondaryTool_.setEnabled(duration_ > 0.0); pitch_.setEnabled(duration_ > 0.0); pitch_.setReadOnly(!editable);
+        chordSnap_.setEnabled(editable && !array(project_["chords"]).isEmpty());
+        delete_.setEnabled((editable && !selectedNotes_.empty()) || selectedClip_.isNotEmpty()); noteMenu_.setEnabled(editable);
         bool canUndo = false, canRedo = false;
         for (const auto& item : array(project_["pitchEditorHistory"])) if (item["track"].toString() == selectedTrack_) { canUndo = static_cast<bool>(item["canUndo"]); canRedo = static_cast<bool>(item["canRedo"]); }
         undo_.setEnabled(canUndo); redo_.setEnabled(canRedo);
+    }
+    void showExport(const juce::var& event)
+    {
+        exportDirectory_ = event["directory"].toString();
+        status_.setText(event["message"].toString(), juce::dontSendNotification);
+        exportLabel_.setText(event["message"].toString() + (exportDirectory_.isNotEmpty() ? "  " + exportDirectory_ : juce::String()), juce::dontSendNotification);
+        exportOpen_.setEnabled(juce::File::isAbsolutePath(exportDirectory_) && juce::File(exportDirectory_).isDirectory());
+        exportToast_.setVisible(true); exportToast_.toFront(false); resized();
     }
     void dispatch(const juce::var& event)
     {
@@ -827,18 +1243,23 @@ public:
             }
             const auto selectCreatedBacking = pendingTrack_.isNotEmpty() && findTrack(pendingTrack_) != nullptr;
             if (selectCreatedBacking)
-            { selectedTrack_ = pendingTrack_; pendingTrack_.clear(); selectedNote_.clear(); selectedNotes_.clear(); selectedClip_.clear(); }
-            if (findTrack(selectedTrack_) == nullptr)
+            { selectedTracks_ = { pendingTrack_ }; pendingTrack_.clear(); selectedNote_.clear(); selectedNotes_.clear(); selectedClip_.clear(); }
+            selectedTracks_.erase(std::remove_if(selectedTracks_.begin(), selectedTracks_.end(), [this](const auto& id) { return findTrack(id) == nullptr; }), selectedTracks_.end());
+            if (!selectionInitialised_ && selectedTracks_.empty())
             {
-                selectedTrack_ = findTrack("Voice Main") != nullptr ? "Voice Main" : tracks_.empty() ? juce::String() : tracks_.front().id;
+                const auto fallback = findTrack("Voice Main") != nullptr ? juce::String("Voice Main") : tracks_.empty() ? juce::String() : tracks_.front().id;
+                if (fallback.isNotEmpty()) selectedTracks_.push_back(fallback);
                 selectedNote_.clear(); selectedNotes_.clear(); selectedClip_.clear();
             }
-            trackSelect_.setItems(names);
+            selectionInitialised_ = true;
+            selectedTrack_ = selectedTracks_.size() == 1 ? selectedTracks_.front() : juce::String();
+            trackSelect_.setItems(names); trackSelect_.setSelectedIndex(-1);
             for (std::size_t i = 0; i < tracks_.size(); ++i) if (tracks_[i].id == selectedTrack_) trackSelect_.setSelectedIndex(static_cast<int>(i));
             instrumentalVolume_ = std::clamp(number(project_["initialInstrumentalVolume"], 100.0), 0.0, 100.0);
             transport_.setMasterVolume(std::clamp(number(project_["initialVolume"], 100.0), 0.0, 100.0) / 100.0);
             loopActive_ = static_cast<bool>(project_["initialLoopActive"]); transport_.setLooping(loopActive_); loopRange_ = project_["initialCycleRange"];
             if (!loopRange_.isObject()) loopRange_ = object({ { "start", 0.0 }, { "end", 25.0 } });
+            cycleOverlay_.setRange(number(loopRange_["start"]), number(loopRange_["end"]), loopActive_, duration_);
             rebuildRows(); rebuildPitch();
             if (!fitted_ && duration_ > 0.0 && std::any_of(tracks_.begin(), tracks_.end(), [](const auto& track) { return !array(track.source["clips"]).isEmpty(); }))
             { view_.firstBeat = 0.0; view_.pixelsPerBeat = std::clamp(static_cast<double>(std::max(300, ruler_.getWidth())) / std::max(1.0, tempoMap_.beatAt(duration_)), 5.0, 80.0); fitted_ = true; }
@@ -853,7 +1274,7 @@ public:
             for (auto& row : rows_) if (row->id() == "Instrumental") row->header().setGain(20.0 * std::log10(std::max(0.0001, instrumentalVolume_ / 100.0)));
         }
         else if (type == "output-meter-state") transport_.setMasterLevels(static_cast<float>(number(event["left"])), static_cast<float>(number(event["right"])));
-        else if (type == "loop-state") { loopActive_ = static_cast<bool>(event["active"]); transport_.setLooping(loopActive_); loopRange_ = event["range"]; cycleOverlay_.setRange(percentToBeat(number(loopRange_["start"])), percentToBeat(number(loopRange_["end"])), loopActive_); }
+        else if (type == "loop-state") { loopActive_ = static_cast<bool>(event["active"]); transport_.setLooping(loopActive_); loopRange_ = event["range"]; cycleOverlay_.setRange(number(loopRange_["start"]), number(loopRange_["end"]), loopActive_, duration_); }
         else if (type == "track-selected") selectTrack(event["track"].toString(), false);
         else if (type == "backing-track-created")
         {
@@ -884,38 +1305,127 @@ public:
                 if (auto* data = value.getDynamicObject()) data->setProperty("pitch", event["pitch"]);
             if (track == selectedTrack_) rebuildPitch();
         }
-        else if (type == "status-state" || type == "export-complete") status_.setText(event["message"].toString(), juce::dontSendNotification);
+        else if (type == "status-state")
+        {
+            busy_ = static_cast<bool>(event["vocalAnalysisRunning"]) || static_cast<bool>(event["instrumentalAnalysisRunning"]) || static_cast<bool>(event["backingGenerationRunning"]) || static_cast<bool>(event["backingAudioRenderRunning"]);
+            generationTrack_ = static_cast<bool>(event["backingGenerationRunning"]) ? event["backingGenerationTrack"].toString() : juce::String();
+            renderTrack_ = static_cast<bool>(event["backingAudioRenderRunning"]) ? event["backingAudioRenderTrack"].toString() : juce::String();
+            status_.setText(event["message"].toString(), juce::dontSendNotification);
+            for (auto& row : rows_) row->updateControls();
+            updateEnabled();
+        }
+        else if (type == "voice-training-state")
+        {
+            const auto state = event["state"]; auto progress = std::clamp(number(state["progress"]), 0.0, 1.0);
+            auto message = state["message"].toString();
+            for (const auto& job : array(state["jobs"])) if (static_cast<bool>(job["canCancel"])) { progress = std::clamp(number(job["progress"]), 0.0, 1.0); message = job["presetName"].toString() + ": " + job["message"].toString(); break; }
+            const auto phase = state["phase"].toString();
+            const auto active = phase == "preparing" || phase == "cancelling" || std::any_of(array(state["jobs"]).begin(), array(state["jobs"]).end(), [](const auto& job) { return static_cast<bool>(job["canCancel"]); });
+            voiceLab_.setText(active ? "Voice " + juce::String(juce::roundToInt(progress * 100.0)) + "%" : "Voice Lab");
+            voiceLab_.setSelected(active); voiceLab_.setDescription(message);
+        }
+        else if (type == "export-complete") showExport(event);
     }
     NativeStudioView::Snapshot state() const
     {
         NativeStudioView::Snapshot result;
         result.trackCount = static_cast<int>(tracks_.size()); result.noteCount = static_cast<int>(notes_.size());
         for (const auto& track : tracks_) result.clipCount += array(track.source["clips"]).size();
+        result.selectedTrackCount = static_cast<int>(selectedTracks_.size()); result.pitchReadOnly = pitch_.isReadOnly();
+        result.loopActive = loopActive_; result.loopStart = number(loopRange_["start"]); result.loopEnd = number(loopRange_["end"]);
+        result.verticalZoom = verticalZoom_; result.pianoCollapsed = pianoCollapsed_;
+        result.lowestMidi = kPitchMinimum; result.highestMidi = kPitchMaximum; result.pianoScrollY = pianoScroll_.getViewPositionY();
         result.selectedTrack = selectedTrack_; result.selectedNoteId = selectedNote_; result.playheadSeconds = duration_ * playheadPercent_ / 100.0; result.pixelsPerBeat = view_.pixelsPerBeat;
         return result;
     }
     void paint(juce::Graphics& g) override { g.fillAll(colour(tokens::background)); }
+    void layoutPianoCanvas()
+    {
+        const auto canvasHeight = juce::roundToInt(kPitchRowHeight * static_cast<double>(kPitchMaximum - kPitchMinimum + 1) * verticalZoom_);
+        pianoCanvas_.setSize(pianoScroll_.getWidth(), canvasHeight);
+        keyboard_.setBounds(2, 0, kKeyboardWidth - 4, canvasHeight);
+        pitch_.setBounds(kKeyboardWidth, 0, std::max(0, pianoCanvas_.getWidth() - kKeyboardWidth), canvasHeight);
+        if (!pianoViewportInitialised_ && pianoScroll_.getHeight() > 0)
+        {
+            const auto centreC4 = (static_cast<double>(kPitchMaximum - 60) + 0.5) * kPitchRowHeight * verticalZoom_;
+            pianoScroll_.setViewPosition(0, juce::roundToInt(centreC4) - pianoScroll_.getHeight() / 2);
+            pianoViewportInitialised_ = true;
+        }
+    }
+    void setVerticalZoom(double zoom, float requestedAnchor = -1.0f)
+    {
+        zoom = std::clamp(zoom, 1.0, 4.0);
+        if (std::abs(zoom - verticalZoom_) < 0.000001) return;
+        auto anchor = requestedAnchor;
+        if (anchor < 0.0f)
+        {
+            anchor = static_cast<float>(pianoScroll_.getHeight()) * 0.5f;
+            const auto selected = pitch_.noteBounds(pitch_.selectedNote());
+            const auto selectedY = selected.getCentreY() - static_cast<float>(pianoScroll_.getViewPositionY());
+            if (!selected.isEmpty() && selectedY >= 0.0f && selectedY <= static_cast<float>(pianoScroll_.getHeight())) anchor = selectedY;
+        }
+        anchor = std::clamp(anchor, 0.0f, static_cast<float>(std::max(0, pianoScroll_.getHeight())));
+        const auto unscaledY = (static_cast<double>(pianoScroll_.getViewPositionY()) + static_cast<double>(anchor)) / verticalZoom_;
+        verticalZoom_ = zoom;
+        layoutPianoCanvas();
+        pianoScroll_.setViewPosition(0, juce::roundToInt(unscaledY * verticalZoom_ - static_cast<double>(anchor)));
+        pitchZoom_.setValue(verticalZoom_);
+    }
+    void pitchWheel(const juce::MouseEvent& event, const juce::MouseWheelDetails& wheel)
+    {
+        const auto delta = wheel.deltaX != 0.0f ? wheel.deltaX : wheel.deltaY;
+        const auto local = getLocalPoint(event.eventComponent, event.position);
+        const auto anchorX = local.x - static_cast<float>(kHeaderWidth);
+        if (event.mods.isAltDown())
+        {
+            const auto anchor = pianoScroll_.getLocalPoint(event.eventComponent, event.position).y;
+            setVerticalZoom(verticalZoom_ * std::exp(static_cast<double>(delta) * 1.7), anchor);
+        }
+        else if (event.mods.isCommandDown() || event.mods.isCtrlDown()) gesture(0.0, std::exp(static_cast<double>(delta) * 1.7), anchorX);
+        else if (event.mods.isShiftDown() || std::abs(wheel.deltaX) > std::abs(wheel.deltaY)) gesture(-static_cast<double>(delta) * 160.0 / view_.pixelsPerBeat, 1.0, anchorX);
+        else pianoScroll_.setViewPosition(0, pianoScroll_.getViewPositionY() - juce::roundToInt(wheel.deltaY * 220.0f));
+    }
     void resized() override
     {
         auto bounds = getLocalBounds();
         transport_.setBounds(bounds.removeFromTop(kTransportHeight));
-        status_.setBounds(bounds.removeFromBottom(kStatusHeight));
+        auto statusArea = bounds.removeFromBottom(kStatusHeight); statusDismiss_.setBounds(statusArea.removeFromRight(24)); status_.setBounds(statusArea);
         horizontal_.setBounds(bounds.removeFromBottom(16).withTrimmedLeft(kHeaderWidth).reduced(8, 1));
-        const auto pitchHeight = std::clamp(bounds.getHeight() * 37 / 100, 150, 360);
-        auto pitchArea = bounds.removeFromBottom(std::min(pitchHeight, std::max(0, bounds.getHeight() - kToolbarHeight - 120)));
-        auto pitchRuler = pitchArea.removeFromTop(kRulerHeight);
-        lowerRuler_.setBounds(pitchRuler.withTrimmedLeft(kKeyboardWidth));
-        keyboard_.setBounds(pitchArea.removeFromLeft(kKeyboardWidth).reduced(2, 0)); pitch_.setBounds(pitchArea);
-        lowerPlayhead_.setBounds(lowerRuler_.getX(), lowerRuler_.getY(), lowerRuler_.getWidth(), lowerRuler_.getHeight() + pitch_.getHeight());
-        toolbar_.setBounds(bounds.removeFromBottom(kToolbarHeight));
+        const auto narrowToolbar = getWidth() < 1560 || backingToolbarVisible_;
+        const auto toolbarHeight = narrowToolbar ? 76 : 42;
+        auto pitchArea = juce::Rectangle<int>();
+        if (!pianoCollapsed_)
+        {
+            const auto pitchHeight = std::clamp(bounds.getHeight() * 37 / 100, 150, 360);
+            pitchArea = bounds.removeFromBottom(std::min(pitchHeight, std::max(0, bounds.getHeight() - toolbarHeight - 120)));
+            auto pitchRuler = pitchArea.removeFromTop(kRulerHeight);
+            lowerRuler_.setBounds(pitchRuler.withTrimmedLeft(kKeyboardWidth));
+            pianoScroll_.setBounds(pitchArea); layoutPianoCanvas();
+            lowerPlayhead_.setBounds(lowerRuler_.getX(), lowerRuler_.getY(), lowerRuler_.getWidth(), lowerRuler_.getHeight() + pianoScroll_.getHeight());
+        }
+        lowerRuler_.setVisible(!pianoCollapsed_); pianoScroll_.setVisible(!pianoCollapsed_); lowerPlayhead_.setVisible(!pianoCollapsed_);
+        toolbar_.setBounds(bounds.removeFromBottom(toolbarHeight));
         auto tools = toolbar_.getLocalBounds().reduced(10, 6);
-        trackSelect_.setBounds(tools.removeFromLeft(std::min(180, tools.getWidth() / 5))); tools.removeFromLeft(10);
-        for (auto* button : { &pointer_, &pencil_, &scissors_ }) { button->setBounds(tools.removeFromLeft(32)); tools.removeFromLeft(4); }
-        tools.removeFromLeft(8); snap_.setBounds(tools.removeFromLeft(94)); tools.removeFromLeft(8);
-        for (auto* button : { &delete_, &noteMenu_, &undo_, &redo_ }) { button->setBounds(tools.removeFromLeft(30)); tools.removeFromLeft(4); }
-        zoomIn_.setBounds(tools.removeFromRight(30)); zoom_.setBounds(tools.removeFromRight(std::min(130, tools.getWidth()))); zoomOut_.setBounds(tools.removeFromRight(30));
+        auto firstRow = tools.removeFromTop(30);
+        pitchCollapse_.setBounds(firstRow.removeFromRight(30)); firstRow.removeFromRight(8);
+        const auto placeControl = [](juce::Component& component, juce::Rectangle<int>& row, int width, int gap = 4)
+        { component.setBounds(row.removeFromLeft(std::min(width, row.getWidth()))); row.removeFromLeft(gap); };
+        auto zoomRow = narrowToolbar ? tools.withTrimmedTop(4).withHeight(30) : firstRow.removeFromRight(344);
+        placeControl(trackSelect_, firstRow, narrowToolbar ? 110 : 160, narrowToolbar ? 6 : 8);
+        placeControl(primaryLabel_, firstRow, 30); placeControl(primaryTool_, firstRow, narrowToolbar ? 100 : 115, narrowToolbar ? 6 : 8);
+        placeControl(secondaryLabel_, firstRow, 54); placeControl(secondaryTool_, firstRow, narrowToolbar ? 100 : 115, 8);
+        placeControl(snap_, firstRow, 100, 6); placeControl(chordSnap_, firstRow, 86, 6);
+        for (auto* button : { &delete_, &noteMenu_, &undo_, &redo_ }) placeControl(*button, firstRow, 28, 3);
+        placeControl(addBacking_, firstRow, 110, 4); placeControl(settings_, firstRow, 80, 4);
+        if (narrowToolbar) { voiceLab_.setBounds(zoomRow.removeFromRight(96)); zoomRow.removeFromRight(6); }
+        else placeControl(voiceLab_, firstRow, 96, 4);
+        placeControl(zoomOut_, zoomRow, 28); placeControl(zoom_, zoomRow, narrowToolbar ? 130 : 110); placeControl(zoomIn_, zoomRow, 28, 12);
+        placeControl(pitchZoomLabel_, zoomRow, 32); placeControl(pitchZoom_, zoomRow, narrowToolbar ? 130 : 100, 8);
+        if (backingToolbarVisible_)
+        { placeControl(backingProfile_, zoomRow, 170, 4); placeControl(backingRender_, zoomRow, 86, 4); placeControl(backingRegenerate_, zoomRow, 94, 4); }
+        toolbarHelp_.setVisible(narrowToolbar && !backingToolbarVisible_); if (toolbarHelp_.isVisible()) toolbarHelp_.setBounds(zoomRow);
         scroll_.setBounds(bounds);
-        const auto globalHeight = arrangement_.globalsExpanded ? 132 : 36;
+        const auto globalHeight = (arrangement_.globalsExpanded ? 132 : 36) + kCycleHeight;
         auto y = globalHeight + 40;
         std::set<juce::String> laidOut;
         const auto place = [&](const auto& self, const juce::String& id, bool visible) -> void
@@ -940,13 +1450,16 @@ public:
         arrangement_.setSize(scroll_.getWidth(), std::max(scroll_.getHeight(), y + 8));
         global_.setBounds(12, 4, kHeaderWidth - 14, 30);
         const auto timeWidth = std::max(0, arrangement_.getWidth() - kHeaderWidth);
-        ruler_.setBounds(kHeaderWidth, 4, timeWidth, 30);
+        ruler_.setBounds(kHeaderWidth, 4 + kCycleHeight, timeWidth, 30);
         for (auto* lane : std::initializer_list<juce::Component*> { &tempo_, &signature_, &chords_ }) lane->setVisible(arrangement_.globalsExpanded);
-        tempo_.setBounds(kHeaderWidth, 36, timeWidth, 32); signature_.setBounds(kHeaderWidth, 68, timeWidth, 32); chords_.setBounds(kHeaderWidth, 100, timeWidth, 32);
-        musicalEvents_.setBounds(kHeaderWidth, 36, timeWidth, 64); musicalEvents_.setVisible(arrangement_.globalsExpanded); musicalEvents_.toFront(false);
-        cycleOverlay_.setBounds(ruler_.getBounds()); cycleOverlay_.toFront(false);
+        tempo_.setBounds(kHeaderWidth, 36 + kCycleHeight, timeWidth, 32); signature_.setBounds(kHeaderWidth, 68 + kCycleHeight, timeWidth, 32); chords_.setBounds(kHeaderWidth, 100 + kCycleHeight, timeWidth, 32);
+        musicalEvents_.setBounds(kHeaderWidth, 36 + kCycleHeight, timeWidth, 64); musicalEvents_.setVisible(arrangement_.globalsExpanded); musicalEvents_.toFront(false);
+        cycleOverlay_.setBounds(kHeaderWidth, 4, timeWidth, kCycleHeight); cycleOverlay_.toFront(false);
         addTrack_.setBounds(14, globalHeight + 6, 150, 28);
-        arrangementPlayhead_.setBounds(kHeaderWidth, 26, timeWidth, arrangement_.getHeight() - 26); arrangementPlayhead_.toFront(false); lowerPlayhead_.toFront(false);
+        arrangementPlayhead_.setBounds(kHeaderWidth, 26 + kCycleHeight, timeWidth, arrangement_.getHeight() - 26 - kCycleHeight); arrangementPlayhead_.toFront(false); lowerPlayhead_.toFront(false);
+        exportToast_.setBounds(12, std::max(0, getHeight() - 100), std::min(760, std::max(0, getWidth() - 24)), 64);
+        auto toast = exportToast_.getLocalBounds().reduced(8); exportDismiss_.setBounds(toast.removeFromRight(72).withSizeKeepingCentre(72, 28)); toast.removeFromRight(6); exportOpen_.setBounds(toast.removeFromRight(100).withSizeKeepingCentre(100, 28)); toast.removeFromRight(8); exportLabel_.setBounds(toast);
+        if (exportToast_.isVisible()) exportToast_.toFront(false);
         refreshViewport();
     }
     void arrangementWheel(const juce::MouseEvent& event, const juce::MouseWheelDetails& wheel, float anchor)
@@ -973,19 +1486,83 @@ public:
         }
         return false;
     }
+    bool performShortcut(const juce::String& action)
+    {
+        if (action.startsWith("tool.left.") || action.startsWith("tool.right."))
+        {
+            const juce::StringArray tools { "pointer", "pencil", "eraser", "scissors", "join", "flex", "vibrato", "gain", "zoom" };
+            const auto index = tools.indexOf(action.fromLastOccurrenceOf(".", false, false));
+            if (index >= 0) { auto& selector = action.startsWith("tool.left.") ? primaryTool_ : secondaryTool_; selector.setSelectedIndex(index); applyTools(); }
+            return true;
+        }
+        if (action == "app.settings") { const auto callback = owner_.onShowSettings; if (callback) callback(); return true; }
+        if (action.startsWith("project."))
+        {
+            const auto suffix = action.substring(8);
+            const auto value = suffix == "new" ? "new-project" : suffix == "open" ? "open-project" : suffix == "save" ? "save-project" : suffix == "export" ? "export-all-tracks" : suffix;
+            send(command("project-action", { { "action", value } })); return true;
+        }
+        if (action == "transport.play-pause") { send(command("transport", { { "action", playing_ ? "pause" : "play" } })); return true; }
+        if (action == "transport.return-to-start") { send(command("transport", { { "action", "return-to-start" } })); return true; }
+        if (action == "transport.toggle-loop") { send(command("set-loop", { { "active", !loopActive_ }, { "range", loopRange_ } })); return true; }
+        if (action == "editor.toggle-piano") { pitchCollapse_.triggerClick(); return true; }
+        if (action == "editor.toggle-chord-snap") { if (chordSnap_.isEnabled()) chordSnap_.triggerClick(); return true; }
+        if (action.startsWith("view."))
+        {
+            const auto factor = action.endsWith("zoom-out") ? 0.8 : 1.25;
+            if (action.startsWith("view.vertical")) setVerticalZoom(verticalZoom_ * factor);
+            else gesture(0.0, factor, static_cast<float>(ruler_.getWidth()) * 0.5f);
+            return true;
+        }
+        return false;
+    }
     bool keyPressed(const juce::KeyPress& key) override
     {
+        if (auto* focus = juce::Component::getCurrentlyFocusedComponent(); dynamic_cast<juce::TextEditor*>(focus) != nullptr) return false;
+        const auto action = shortcuts_->actionFor(key);
+        if (action.isNotEmpty()) return performShortcut(action);
         if (arrangementKey(key)) return true;
         if (key.getKeyCode() == juce::KeyPress::deleteKey || key.getKeyCode() == juce::KeyPress::backspaceKey) { deleteSelection(); return true; }
-        if (key.getKeyCode() == juce::KeyPress::spaceKey) { send(command("transport", { { "action", playing_ ? "pause" : "play" } })); return true; }
-        if ((key.getModifiers().isCommandDown() || key.getModifiers().isCtrlDown()) && juce::CharacterFunctions::toLowerCase(static_cast<juce::juce_wchar>(key.getKeyCode())) == 'z')
-        { send(command("project-action", { { "action", key.getModifiers().isShiftDown() ? "redo" : "undo" } })); return true; }
         if ((key.getModifiers().isCommandDown() || key.getModifiers().isCtrlDown()) && juce::CharacterFunctions::toLowerCase(static_cast<juce::juce_wchar>(key.getKeyCode())) == 'a')
         { selectAllNotes(); return true; }
         return false;
     }
 private:
+    void installShortcuts(juce::Component& component)
+    {
+        if (dynamic_cast<juce::TextEditor*>(&component) != nullptr) return;
+        shortcutTargets_.erase(std::remove_if(shortcutTargets_.begin(), shortcutTargets_.end(), [](const auto& target) { return target == nullptr; }), shortcutTargets_.end());
+        if (std::none_of(shortcutTargets_.begin(), shortcutTargets_.end(), [&component](const auto& target) { return target.getComponent() == &component; }))
+        { component.addKeyListener(this); shortcutTargets_.emplace_back(&component); }
+        for (auto* child : component.getChildren()) installShortcuts(*child);
+    }
+    void observeShortcutRoot()
+    {
+        auto* root = owner_.getTopLevelComponent();
+        if (shortcutRoot_.getComponent() == root) return;
+        if (shortcutRoot_ != nullptr) shortcutRoot_->removeComponentListener(this);
+        shortcutRoot_ = root; if (shortcutRoot_ != nullptr) shortcutRoot_->addComponentListener(this);
+    }
+    void parentHierarchyChanged() override { observeShortcutRoot(); }
+    void componentChildrenChanged(juce::Component& component) override
+    {
+        auto* focused = juce::Component::getCurrentlyFocusedComponent();
+        const auto ownsFocus = focused != nullptr && (focused == &owner_ || owner_.isParentOf(focused) || menu_.isParentOf(focused) || backingPicker_.isParentOf(focused));
+        if (!ownsFocus) return;
+        // Select opens its owned menu in the top-level window; register that
+        // transient subtree without touching the separate settings editor.
+        for (auto* child : component.getChildren()) if (dynamic_cast<Popover*>(child) != nullptr) installShortcuts(*child);
+    }
+    bool keyPressed(const juce::KeyPress& key, juce::Component* origin) override
+    {
+        if (dynamic_cast<juce::TextEditor*>(origin) != nullptr) return false;
+        const auto action = shortcuts_->actionFor(key);
+        return action.isNotEmpty() && performShortcut(action);
+    }
     NativeStudioView& owner_; CommandHandler handler_;
+    std::shared_ptr<StudioShortcuts> shortcuts_;
+    std::vector<juce::Component::SafePointer<juce::Component>> shortcutTargets_;
+    juce::Component::SafePointer<juce::Component> shortcutRoot_;
     juce::var project_, loopRange_;
     TempoMap tempoMap_;
     TimeViewport view_, lowerView_;
@@ -1004,27 +1581,48 @@ private:
     std::vector<std::unique_ptr<Row>> rows_;
     std::map<juce::String, std::unique_ptr<TrackGroupHeader>> groups_;
     Panel toolbar_;
-    Select trackSelect_, snap_;
-    IconButton pointer_ { Icon::pointer, "Select notes" }, pencil_ { Icon::pencil, "Draw notes" }, scissors_ { Icon::scissors, "Split notes" };
+    Button addBacking_ { "Add backing", Icon::plus }, settings_ { "Settings" }, voiceLab_ { "Voice Lab", Icon::microphone };
+    Select backingProfile_;
+    Button backingRender_ { "Render" }, backingRegenerate_ { "Regenerate" };
+    std::vector<juce::String> backingProfileIds_;
+    bool backingToolbarVisible_ = false;
+    Select trackSelect_, snap_, primaryTool_, secondaryTool_;
+    ToggleButton chordSnap_ { "Chord Snap" };
+    Caption primaryLabel_ { "Click" }, secondaryLabel_ { juce::SystemStats::getOperatingSystemType() & juce::SystemStats::MacOSX ? juce::String::fromUTF8("⌘ Click") : "Ctrl Click" };
+    Caption pitchZoomLabel_ { "Pitch" }, toolbarHelp_ { "Wheel: pitch scroll   Alt+wheel: pitch zoom" };
+    Slider pitchZoom_;
+    IconButton pitchCollapse_ { Icon::chevronDown, "Collapse Piano Roll" };
     IconButton delete_ { Icon::close, "Delete selection" }, noteMenu_ { Icon::more, "Note actions" }, undo_ { Icon::rewind, "Undo pitch edit" }, redo_ { Icon::loop, "Redo pitch edit" };
     IconButton zoomOut_ { Icon::minus, "Zoom out" }, zoomIn_ { Icon::plus, "Zoom in" };
     Slider zoom_, horizontal_;
     TimelineRuler lowerRuler_;
+    PianoViewport pianoScroll_;
+    juce::Component pianoCanvas_;
     PianoKeyboard keyboard_;
     PitchEditor pitch_;
     Playhead lowerPlayhead_;
     juce::Label status_;
+    IconButton statusDismiss_ { Icon::close, "Dismiss status" };
+    Panel exportToast_;
+    juce::Label exportLabel_;
+    Button exportOpen_ { "Show folder" }, exportDismiss_ { "Dismiss" };
+    juce::String exportDirectory_;
     Menu menu_;
+    BackingPicker backingPicker_;
     std::vector<Note> notes_;
     std::map<juce::String, int> noteIds_;
     std::set<juce::String> selectedNotes_, activatedBackingTracks_;
     int nextNoteId_ = 1;
     juce::String selectedTrack_, selectedClip_, selectedNote_, pendingTrack_;
+    std::vector<juce::String> selectedTracks_;
     double duration_ = 0.0, playheadBeat_ = 0.0, playheadPercent_ = 0.0, instrumentalVolume_ = 100.0, snapBeats_ = 0.25;
-    bool fitted_ = false, snapToChord_ = false, playing_ = false, loopActive_ = false;
+    double verticalZoom_ = 1.0;
+    bool pianoCollapsed_ = false, pianoViewportInitialised_ = false, selectionInitialised_ = false;
+    juce::String generationTrack_, renderTrack_;
+    bool fitted_ = false, snapToChord_ = false, playing_ = false, loopActive_ = false, busy_ = false;
 };
 
-NativeStudioView::NativeStudioView(CommandHandler handler) : content_(std::make_unique<Content>(*this, std::move(handler)))
+NativeStudioView::NativeStudioView(CommandHandler handler, std::shared_ptr<StudioShortcuts> shortcuts) : content_(std::make_unique<Content>(*this, std::move(handler), std::move(shortcuts)))
 {
     setTitle("Obsidian vocal editor"); addAndMakeVisible(*content_); setWantsKeyboardFocus(true);
 }

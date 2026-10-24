@@ -67,6 +67,7 @@ public:
     TrackHeader();
     void setTrack(int number, juce::String name, juce::Colour accent, ui::Icon icon);
     void setGain(double db);
+    void setGainVisible(bool visible) { gain_.setVisible(visible); repaint(); }
     void setMuted(bool);
     void setSolo(bool);
     std::function<void(bool)> onMute, onSolo;

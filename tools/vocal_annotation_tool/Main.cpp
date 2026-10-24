@@ -11,6 +11,7 @@
 #endif
 #include "NativeStudioView.h"
 #include "NativeStudioSettings.h"
+#include "StudioShortcuts.h"
 
 #include <JuceHeader.h>
 
@@ -307,7 +308,7 @@ WaveformReadResult readWaveformData(const juce::File& file)
         ? static_cast<double>(reader->lengthInSamples) / reader->sampleRate
         : 0.0;
     const auto pointCount = static_cast<int>(
-        juce::jmin<juce::int64>(kWaveformPointCount, reader->lengthInSamples));
+        std::min<juce::int64>(kWaveformPointCount, reader->lengthInSamples));
     const auto channelsToRead = static_cast<int>(juce::jmin(2u, reader->numChannels));
     juce::AudioBuffer<float> buffer(channelsToRead, kWaveformReadBlockSize);
     WaveformData result(static_cast<size_t>(pointCount));
@@ -317,7 +318,7 @@ WaveformReadResult readWaveformData(const juce::File& file)
          readPosition += kWaveformReadBlockSize)
     {
         const auto samplesToRead = static_cast<int>(
-            juce::jmin<juce::int64>(
+            std::min<juce::int64>(
                 kWaveformReadBlockSize,
                 reader->lengthInSamples - readPosition));
         if (! reader->read(&buffer, 0, samplesToRead, readPosition, true, true))
@@ -1064,8 +1065,8 @@ class MainComponent final : public juce::AudioAppComponent,
 public:
     MainComponent()
         : editor_(formatManager_, document_),
-          studio_([this](const juce::var& command) { handleWebCommand(command); }),
-          studioSettings_([this](const juce::var& command) { handleWebCommand(command); })
+          studio_([this](const juce::var& command) { handleWebCommand(command); }, shortcuts_),
+          studioSettings_([this](const juce::var& command) { handleWebCommand(command); }, shortcuts_)
     {
         formatManager_.registerBasicFormats();
         loadActiveVoiceProfile();
@@ -1169,6 +1170,7 @@ public:
             studioSettings_.toFront(true);
             studioSettings_.grabKeyboardFocus();
         };
+        studio_.onShowVoiceLab = [this] { studioSettings_.showVoiceLab(); };
         studioSettings_.onClose = [this]
         {
             studioSettings_.setVisible(false);
@@ -1219,6 +1221,7 @@ public:
         if (voiceProfileCancellation_ != nullptr)
             voiceProfileCancellation_->store(true, std::memory_order_release);
         stopTimer();
+        stopPitchTone();
         stopBackingVocalWorker();
         stopBackingAudioWorker();
         transport_.stop();
@@ -1665,50 +1668,7 @@ public:
 
     bool keyPressed(const juce::KeyPress& key) override
     {
-        if (key == juce::KeyPress('n', juce::ModifierKeys::commandModifier, 0))
-        {
-            requestNewProject();
-            return true;
-        }
-
-        if (key == juce::KeyPress('o', juce::ModifierKeys::commandModifier, 0))
-        {
-            chooseProject();
-            return true;
-        }
-
-        if (key == juce::KeyPress('s', juce::ModifierKeys::commandModifier, 0))
-        {
-            saveProject();
-            return true;
-        }
-
-        if (key == juce::KeyPress('z', juce::ModifierKeys::commandModifier, 0))
-        {
-            undo();
-            return true;
-        }
-
-        if (key == juce::KeyPress('z', juce::ModifierKeys::commandModifier | juce::ModifierKeys::shiftModifier, 0)
-            || key == juce::KeyPress('y', juce::ModifierKeys::commandModifier, 0))
-        {
-            redo();
-            return true;
-        }
-
-        if (key == juce::KeyPress::spaceKey)
-        {
-            togglePlayback();
-            return true;
-        }
-
-        if (key == juce::KeyPress::returnKey)
-        {
-            handleTransportCommand("return-to-start");
-            return true;
-        }
-
-        return false;
+        return !studioSettings_.isVisible() && studio_.keyPressed(key);
     }
 
 private:
@@ -4211,6 +4171,13 @@ private:
         {
             auto* item = new juce::DynamicObject();
             item->setProperty("label", chord.name);
+            item->setProperty("startSeconds", chord.start);
+            item->setProperty("endSeconds", chord.end);
+            juce::Array<juce::var> pitchClasses;
+            if (const auto classes = chordPitchClasses(chord.name))
+                for (int pitchClass = 0; pitchClass < 12; ++pitchClass)
+                    if ((*classes)[static_cast<size_t>(pitchClass)]) pitchClasses.add(pitchClass);
+            item->setProperty("pitchClasses", pitchClasses);
             item->setProperty(
                 "width",
                 juce::jlimit(0.0, 100.0, (chord.end - chord.start) * 100.0 / duration));
@@ -10678,6 +10645,8 @@ private:
     juce::ComboBox boundaryKindBox_;
     juce::Label infoLabel_;
     juce::Label statusLabel_;
+    std::shared_ptr<StudioShortcuts> shortcuts_ = std::make_shared<StudioShortcuts>(
+        RuntimeManager::applicationSupportRoot().getChildFile("Settings").getChildFile("shortcuts.json"));
     NativeStudioView studio_;
     NativeStudioSettings studioSettings_;
 

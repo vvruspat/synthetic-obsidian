@@ -209,7 +209,7 @@ void TrackHeader::paint(juce::Graphics& g)
     text(g, juce::String(number_), { 8, 0, 20, getHeight() }, 11.0f, ui::colour(ui::tokens::muted), juce::Justification::centred);
     ui::drawIcon(g, icon_, juce::Rectangle<float>(37.0f, static_cast<float>(getHeight()) * 0.5f - 13.0f, 26.0f, 26.0f), accent_);
     text(g, name_, { 80, 5, juce::jmax(0, getWidth() - 112), 26 });
-    text(g, gain_.getValueText(), { getWidth() - 62, getHeight() - 32, 55, 24 }, 10.0f, ui::colour(ui::tokens::muted), juce::Justification::centredRight);
+    if (gain_.isVisible()) text(g, gain_.getValueText(), { getWidth() - 62, getHeight() - 32, 55, 24 }, 10.0f, ui::colour(ui::tokens::muted), juce::Justification::centredRight);
 }
 
 void TrackHeader::resized()

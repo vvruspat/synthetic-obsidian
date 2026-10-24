@@ -6,6 +6,8 @@ WebView), build `NativeNoteAnnotator`. See
 
 Standalone offline annotator for creating gold vocal note/syllable datasets.
 
+See [native control parity and validation](UI_PARITY.md) for the migrated control inventory.
+
 ## Tracks and clips
 
 Use **+** above the track list to add an audio track. **File Import** (also in
@@ -71,13 +73,30 @@ jobs. Record is disabled because the current editor has no recording command.
 Only Instrumental has independent track gain in the current playback model;
 other gain sliders are disabled. Individual note gain is available in **Note actions**.
 
-In the pitch editor, Shift-click toggles notes, Cmd/Ctrl+A selects all, pointer
-drag moves the selection, and edge drags resize notes. A group gesture commits
-one undo action. Escape, losing focus, hiding/disabling the editor and incoming
-project data cancel uncommitted local geometry. Pencil/scissors, Delete,
-join/vibrato/gain/chord-snap actions, pitch history, snap, zoom and pan use the
-existing document edit path. Moving a displayed vocal fragment applies deltas
-to its full source note, preserving unvoiced regions and fractional MIDI pitch.
+The piano toolbar has independent **Click** and **Command-click** tool menus
+(**Ctrl-click** on Windows/Linux). Both contain Pointer, Pencil, Eraser, Scissors,
+Join, Flex, Vibrato, Gain and Zoom; the defaults are Pointer and Scissors.
+Right-click also uses the secondary tool. The tool is chosen at gesture start.
+
+Pointer moves selected notes vertically with continuous fractional pitch and
+live audition, while keeping their timing. Shift-click toggles selection and
+Cmd/Ctrl+A selects all. Pencil draws a note in either horizontal direction;
+a click creates a half-second note. Flex stretches the boundary nearest the
+clicked half of a note. Eraser deletes, Scissors splits, and Join merges the
+selected group or an adjacent pair. Gain and Vibrato preview during vertical
+drag and commit once on release. Zoom doubles/halves time scale at the click.
+The existing note menu and pitch history remain available.
+
+Vertical zoom spans 1×–4× and preserves the visible pitch centre. The keyboard
+and notes share one vertical scroller. Alt+wheel changes vertical zoom,
+Cmd/Ctrl+wheel changes horizontal zoom, Shift+wheel pans time and plain wheel
+scrolls pitches. The collapse button leaves the toolbar visible, expands the
+arrangement, and restores pitch zoom, scroll and selection when reopened.
+
+Escape, losing focus, hiding/disabling the editor and incoming project data
+cancel uncommitted gestures and end audition. Moving a displayed vocal fragment
+applies deltas to its full source note, preserving unvoiced regions and exact
+pitch. A group gesture creates one undo action.
 
 Run `Synthetic Obsidian --project /absolute/path/to/project-folder` to open an
 existing project directly. For checks configure

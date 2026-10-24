@@ -1,4 +1,5 @@
 #include "NativeStudioView.h"
+#include "StudioShortcuts.h"
 #include "editor_ui/Chrome.h"
 #include "editor_ui/PitchEditor.h"
 #include "uikit/Controls.h"
@@ -6,15 +7,41 @@
 
 namespace
 {
+juce::File snapshotDirectory;
+void snapshot(const juce::String& name, juce::Component& component)
+{
+    if (snapshotDirectory == juce::File()) return;
+    snapshotDirectory.createDirectory();
+    juce::MemoryOutputStream output;
+    juce::PNGImageFormat png;
+    if (png.writeImageToStream(component.createComponentSnapshot(component.getLocalBounds()), output))
+        snapshotDirectory.getChildFile(name + ".png").replaceWithData(output.getData(), output.getDataSize());
+}
 juce::Component* find(juce::Component& root, const juce::String& id)
 {
     if (root.getComponentID() == id) return &root;
     for (auto* child : root.getChildren()) if (auto* result = find(*child, id)) return result;
     return nullptr;
 }
+bool toolbarFits(juce::Component& view)
+{
+    auto* toolbar = find(view, "studio.pitchToolbar");
+    if (!toolbar) return false;
+    for (auto* child : toolbar->getChildren())
+    {
+        if (!child->isVisible()) continue;
+        const auto interactive = dynamic_cast<obsidian::ui::Button*>(child) || dynamic_cast<obsidian::ui::Select*>(child) || dynamic_cast<obsidian::ui::Slider*>(child);
+        if (!interactive) continue;
+        if (!toolbar->getLocalBounds().contains(child->getBounds()) || child->getWidth() < 28 || child->getHeight() < 20) return false;
+        if (dynamic_cast<obsidian::ui::Select*>(child) && child->getWidth() < 100) return false;
+    }
+    for (const auto& id : { "studio.addBacking", "studio.settings", "studio.voiceLab" })
+        if (auto* button = find(view, id); !button || !button->isVisible() || button->getWidth() < 80) return false;
+    return true;
+}
 juce::var fixture()
 {
-    return juce::JSON::parse(R"({"tempo":120,"meter":"4/4","timelineDurationSeconds":12,"initialPlayhead":25,"initialVolume":76,"initialInstrumentalVolume":70,"initialCycleRange":{"start":0,"end":100},"tracks":[{"id":"Instrumental","name":"Same name","clips":[{"id":"a","name":"trimmed","start":0,"offset":1,"duration":4,"waveformDurationSeconds":8,"waveform":[[-0.1,0.1],[-0.2,0.2],[-0.3,0.3],[-0.4,0.4]]}]},{"id":"Voice Main","name":"Same name","clips":[{"id":"b","name":"one","start":1,"offset":0,"duration":3},{"id":"c","name":"two","start":6,"offset":0,"duration":2}]},{"id":"backing-id","name":"Same name","parentId":"Voice Main","clips":[]}],"clips":[{"id":"vocal-note","x":10,"width":10,"pitch":60.25,"pitchCurve":[{"x":10,"pitch":60.1},{"x":11,"pitch":60.3},{"x":20,"pitch":60.2}]}],"backingTrackContents":[{"id":"backing-id","clips":[{"id":"backing-id:precise-note","x":25,"width":10,"pitch":64.35}]}],"tempoSegments":[{"start":0,"end":4,"bpm":120},{"start":4,"end":12,"bpm":60}],"timeSignatures":[{"start":0,"end":4,"numerator":4,"denominator":4},{"start":4,"end":12,"numerator":6,"denominator":8}]})");
+    return juce::JSON::parse(R"({"chords":[{"label":"C","width":100,"startSeconds":0,"endSeconds":12,"pitchClasses":[0,4,7]}],"backingTrackOptions":["Unison Double","Third Above"],"voiceProfiles":[{"id":"source-timbre","name":"Source timbre"}],"initialBackingTracks":[{"id":"backing-id","name":"Same name"}],"tempo":120,"meter":"4/4","timelineDurationSeconds":12,"initialPlayhead":25,"initialVolume":76,"initialInstrumentalVolume":70,"initialCycleRange":{"start":0,"end":100},"tracks":[{"id":"Instrumental","name":"Same name","clips":[{"id":"a","name":"trimmed","start":0,"offset":1,"duration":4,"waveformDurationSeconds":8,"waveform":[[-0.1,0.1],[-0.2,0.2],[-0.3,0.3],[-0.4,0.4]]}]},{"id":"Voice Main","name":"Same name","clips":[{"id":"b","name":"one","start":1,"offset":0,"duration":3},{"id":"c","name":"two","start":6,"offset":0,"duration":2}]},{"id":"backing-id","name":"Same name","parentId":"Voice Main","clips":[]}],"clips":[{"id":"vocal-note","x":10,"width":10,"pitch":60.25,"pitchCurve":[{"x":10,"pitch":60.1},{"x":11,"pitch":60.3},{"x":20,"pitch":60.2}]}],"backingTrackContents":[{"id":"backing-id","voiceProfileId":"source-timbre","hasAudio":false,"clips":[{"id":"backing-id:precise-note","x":25,"width":10,"pitch":64.35}]}],"tempoSegments":[{"start":0,"end":4,"bpm":120},{"start":4,"end":12,"bpm":60}],"timeSignatures":[{"start":0,"end":4,"numerator":4,"denominator":4},{"start":4,"end":12,"numerator":6,"denominator":8}]})");
 }
 juce::var projectEvent(const juce::var& project)
 {
@@ -48,16 +75,66 @@ public:
             ruler->onViewportGesture(0, 1.5, 300);
             const auto image = view.createComponentSnapshot(view.getLocalBounds()); expect(image.isValid());
         }
+        snapshot("editor", view);
         beginTest("Compact layouts retain usable pitch editor");
-        view.setSize(1000, 700); if (pitch) { expect(pitch->getWidth() >= 800); expect(pitch->getHeight() >= 150); }
+        view.setSize(1000, 700); snapshot("compact", view); if (pitch) { expect(pitch->getWidth() >= 800); expect(pitch->getHeight() >= 150); }
         beginTest("Snapshots interrupt local note gestures and keep source IDs");
         view.dispatch(projectEvent(project)); expectEquals(view.state().noteCount, 1);
+        beginTest("Independent primary and Command-click tool menus expose all legacy tools");
+        auto* primary = dynamic_cast<obsidian::ui::Select*>(find(view, "studio.tool.primary"));
+        auto* secondary = dynamic_cast<obsidian::ui::Select*>(find(view, "studio.tool.secondary"));
+        expect(primary && secondary);
+        if (primary && secondary && pitch)
+        {
+            expectEquals(primary->getItems().size(), 9); expectEquals(secondary->getItems().size(), 9);
+            expect(pitch->getTool() == obsidian::editor::PitchTool::pointer);
+            expect(pitch->getSecondaryTool() == obsidian::editor::PitchTool::scissors);
+            primary->setSelectedIndex(7, juce::sendNotificationSync);
+            expect(pitch->getTool() == obsidian::editor::PitchTool::gain);
+            expect(pitch->getSecondaryTool() == obsidian::editor::PitchTool::scissors);
+            secondary->setSelectedIndex(4, juce::sendNotificationSync);
+            expect(pitch->getSecondaryTool() == obsidian::editor::PitchTool::join);
+        }
+        beginTest("Vertical zoom and collapsed panel preserve pitch data, selection and scroll");
+        auto* vertical = dynamic_cast<obsidian::ui::Slider*>(find(view, "studio.pitchZoom"));
+        auto* collapse = dynamic_cast<obsidian::ui::Button*>(find(view, "studio.pitchCollapse"));
+        auto* arrangement = find(view, "studio.arrangementViewport");
+        expect(vertical && collapse && arrangement);
+        if (vertical && collapse && arrangement && pitch)
+        {
+            pitch->keyPressed(juce::KeyPress(juce::KeyPress::downKey));
+            vertical->setValue(2.5, juce::sendNotificationSync);
+            expectWithinAbsoluteError(view.state().verticalZoom, 2.5, 0.001);
+            const auto expanded = view.state(); const auto arrangementHeight = arrangement->getHeight();
+            collapse->triggerClick();
+            expect(view.state().pianoCollapsed); expect(!pitch->isShowing());
+            expect(arrangement->getHeight() > arrangementHeight);
+            snapshot("collapsed", view);
+            collapse->triggerClick(); expect(!view.state().pianoCollapsed); expect(pitch->isShowing());
+            expectWithinAbsoluteError(view.state().verticalZoom, expanded.verticalZoom, 0.001);
+            expectEquals(view.state().pianoScrollY, expanded.pianoScrollY);
+            expectEquals(view.state().selectedNoteId, expanded.selectedNoteId);
+            expectEquals(view.state().noteCount, expanded.noteCount);
+            snapshot("vertical-zoom", view);
+            view.dispatch(projectEvent(project));
+            expectWithinAbsoluteError(view.state().verticalZoom, expanded.verticalZoom, 0.001);
+            expectEquals(view.state().pianoScrollY, expanded.pianoScrollY);
+        }
+        beginTest("All toolbar controls retain usable bounds at compact, laptop and large widths");
+        for (const auto width : {1000, 1280, 1586})
+        { view.setSize(width, 800); expect(toolbarFits(view), "Toolbar control clipped at width " + juce::String(width)); }
         view.removeFromDesktop();
     }
 };
 StudioChecks studioChecks;
 
 // Exercise queued UI -> backend -> UI feedback through the real message loop.
+juce::MouseEvent mouseEvent(juce::Component& target, juce::Point<float> point, int modifiers = juce::ModifierKeys::leftButtonModifier)
+{
+    const auto time = juce::Time::getCurrentTime();
+    return { juce::Desktop::getInstance().getMainMouseSource(), point, juce::ModifierKeys(modifiers),
+             1.0f, 0.0f, 0.0f, 0.0f, 0.0f, &target, &target, time, point, time, 1, false };
+}
 class QueuedChecks final : private juce::Timer
 {
 public:
@@ -67,7 +144,12 @@ public:
         {
             commands_.push_back(value);
             if (value["type"].toString() == "set-track-state") view_->dispatch(projectEvent(fixture()));
-        });
+            if (value["type"].toString() == "set-loop")
+            {
+                auto* event = new juce::DynamicObject(); event->setProperty("type", "loop-state");
+                event->setProperty("active", value["active"]); event->setProperty("range", value["range"]); view_->dispatch(event);
+            }
+        }, shortcuts_);
         view_->setBounds(-2000, -2000, 1280, 800); view_->addToDesktop(0); view_->setVisible(true); view_->dispatch(projectEvent(fixture()));
         startTimer(10);
     }
@@ -75,6 +157,12 @@ private:
     void check(bool pass, const char* message) { if (!pass) { ++failures_; std::cerr << message << '\n'; } }
     const juce::var* last(const char* type)
     { for (auto it = commands_.rbegin(); it != commands_.rend(); ++it) if ((*it)["type"].toString() == type) return &*it; return nullptr; }
+    float cycleX(double percent) const
+    {
+        const auto seconds = percent * 12.0 / 100.0;
+        const auto beat = seconds <= 4.0 ? seconds * 2.0 : 8.0 + seconds - 4.0;
+        return static_cast<float>(beat * view_->state().pixelsPerBeat);
+    }
     void timerCallback() override
     {
         using namespace obsidian;
@@ -102,6 +190,8 @@ private:
             case 2:
             {
                 check(view_->state().selectedTrack == "backing-id", "duplicate display names must select backing by ID");
+                check(toolbarFits(*view_), "selected-backing profile/render controls must fit the toolbar");
+                snapshot("backing-controls", *view_);
                 auto* pitch = dynamic_cast<editor::PitchEditor*>(find(*view_, "studio.pitch"));
                 if (pitch)
                 {
@@ -156,17 +246,210 @@ private:
                       "automatic backing selection must synchronize backend target once");
                 break;
             }
+            case 6:
+            {
+                auto* tracks = dynamic_cast<ui::Select*>(find(*view_, "studio.trackSelect"));
+                if (tracks) tracks->setSelectedIndex(1, juce::sendNotificationSync);
+                auto* primary = dynamic_cast<ui::Select*>(find(*view_, "studio.tool.primary"));
+                if (primary) primary->setSelectedIndex(2, juce::sendNotificationSync); // Eraser
+                auto* pitch = dynamic_cast<editor::PitchEditor*>(find(*view_, "studio.pitch"));
+                if (pitch)
+                {
+                    pitch->keyPressed(juce::KeyPress(juce::KeyPress::downKey));
+                    const auto point = pitch->noteBounds(pitch->selectedNote()).getCentre();
+                   #if JUCE_MAC
+                    const auto modifier = juce::ModifierKeys::commandModifier;
+                   #else
+                    const auto modifier = juce::ModifierKeys::ctrlModifier;
+                   #endif
+                    const auto event = mouseEvent(*pitch, point, juce::ModifierKeys::leftButtonModifier | modifier);
+                    pitch->mouseDown(event); pitch->mouseUp(event);
+                }
+                break;
+            }
+            case 7:
+            {
+                check(last("split-clip") && (*last("split-clip"))["clipId"].toString() == "vocal-note", "Command-click must use secondary Scissors, not primary Eraser");
+                auto* pitch = dynamic_cast<editor::PitchEditor*>(find(*view_, "studio.pitch"));
+                if (pitch) { const auto event = mouseEvent(*pitch, pitch->noteBounds(pitch->selectedNote()).getCentre()); pitch->mouseDown(event); pitch->mouseUp(event); }
+                break;
+            }
+            case 8:
+            {
+                check(last("delete-clips") && (*last("delete-clips"))["clipIds"][0].toString() == "vocal-note", "ordinary click must use independently selected Eraser");
+                auto* primary = dynamic_cast<ui::Select*>(find(*view_, "studio.tool.primary"));
+                if (primary) primary->setSelectedIndex(7, juce::sendNotificationSync); // Gain
+                auto* pitch = dynamic_cast<editor::PitchEditor*>(find(*view_, "studio.pitch"));
+                if (pitch)
+                {
+                    pitch->keyPressed(juce::KeyPress(juce::KeyPress::downKey));
+                    const auto point = pitch->noteBounds(pitch->selectedNote()).getCentre();
+                    pitch->mouseDown(mouseEvent(*pitch, point)); pitch->mouseDrag(mouseEvent(*pitch, point + juce::Point<float>(0, -16))); pitch->mouseUp(mouseEvent(*pitch, point));
+                }
+                break;
+            }
+            case 9:
+                check(last("set-clip-gain") && std::abs(static_cast<double>((*last("set-clip-gain"))["gainDb"]) - 2.0) < 0.001,
+                      "Gain tool drag must commit through the existing backend");
+                break;
+            case 10:
+            {
+                auto* backingRow = find(*view_, "studio.track.backing-id");
+                if (backingRow) backingRow->mouseDown(mouseEvent(*backingRow, {40, 20}, juce::ModifierKeys::leftButtonModifier | juce::ModifierKeys::shiftModifier));
+                check(view_->state().selectedTrackCount == 2 && view_->state().pitchReadOnly && view_->state().noteCount == 2,
+                      "Shift-click tracks must combine notes in a read-only pitch overlay");
+                break;
+            }
+            case 11:
+            {
+                auto* tracks = dynamic_cast<ui::Select*>(find(*view_, "studio.trackSelect"));
+                if (tracks && tracks->onChange) tracks->onChange(1);
+                if (auto* add = dynamic_cast<ui::Button*>(find(*view_, "studio.addBacking"))) add->triggerClick();
+                auto* generator = dynamic_cast<ui::Button*>(find(*view_, "studio.backing.generator.terra"));
+                auto* style = dynamic_cast<ui::Button*>(find(*view_, "studio.backing.type.1"));
+                check(generator && style, "Add backing must open direct generator and harmony style choices");
+                snapshot("backing-picker", *view_);
+                if (generator) generator->triggerClick(); if (style) style->triggerClick();
+                break;
+            }
+            case 12:
+            {
+                const auto* add = last("add-backing-track");
+                check(add && (*add)["track"].toString() == "Third Above" && (*add)["generator"].toString() == "terra" && (*add)["parentId"].toString() == "Voice Main",
+                      "backing type and generator must create on the chosen source track");
+                auto* loop = new juce::DynamicObject(); loop->setProperty("type", "loop-state"); loop->setProperty("active", false);
+                auto* range = new juce::DynamicObject(); range->setProperty("start", 0); range->setProperty("end", 10); loop->setProperty("range", range); view_->dispatch(loop);
+                if (auto* cycle = find(*view_, "studio.cycle"))
+                {
+                    auto event = mouseEvent(*cycle, {150, 12});
+                    cycle->mouseDown(event); cycle->mouseDrag(event.withNewPosition(juce::Point<float>(350, 12))); cycle->mouseUp(event.withNewPosition(juce::Point<float>(350, 12)));
+                }
+                else check(false, "direct cycle lane is missing");
+                break;
+            }
+            case 13:
+            {
+                const auto* loop = last("set-loop");
+                check(loop && static_cast<bool>((*loop)["active"]) && static_cast<double>((*loop)["range"]["end"]) > static_cast<double>((*loop)["range"]["start"]),
+                      "dragging the cycle lane must create a real active loop");
+                check(view_->state().loopActive, "created cycle must appear active immediately");
+                snapshot("cycle", *view_);
+                if (auto* cycle = find(*view_, "studio.cycle"))
+                { auto event = mouseEvent(*cycle, {250, 12}); cycle->mouseDown(event); cycle->mouseUp(event); }
+                break;
+            }
+            case 14:
+            {
+                const auto* loop = last("set-loop");
+                check(loop && !static_cast<bool>((*loop)["active"]), "clicking the cycle body must toggle the loop off");
+                cycleStart_ = view_->state().loopStart; cycleEnd_ = view_->state().loopEnd;
+                if (auto* cycle = find(*view_, "studio.cycle"))
+                {
+                    const auto centre = (cycleX(cycleStart_) + cycleX(cycleEnd_)) * 0.5f;
+                    auto event = mouseEvent(*cycle, {centre, 12});
+                    cycle->mouseDown(event); cycle->mouseDrag(event.withNewPosition(juce::Point<float>(centre + 80, 12))); cycle->mouseUp(event);
+                }
+                break;
+            }
+            case 15:
+            {
+                check(view_->state().loopStart > cycleStart_ && std::abs((view_->state().loopEnd - view_->state().loopStart) - (cycleEnd_ - cycleStart_)) < 0.001,
+                      "dragging cycle body must move range while preserving length");
+                cycleStart_ = view_->state().loopStart; cycleEnd_ = view_->state().loopEnd;
+                if (auto* cycle = find(*view_, "studio.cycle"))
+                {
+                    const auto x = cycleX(cycleStart_); auto event = mouseEvent(*cycle, {x, 12});
+                    cycle->mouseDown(event); cycle->mouseDrag(event.withNewPosition(juce::Point<float>(x - 80, 12))); cycle->mouseUp(event);
+                }
+                break;
+            }
+            case 16:
+            {
+                check(view_->state().loopStart < cycleStart_ && std::abs(view_->state().loopEnd - cycleEnd_) < 0.001,
+                      "cycle left edge must resize with the right edge fixed");
+                cycleStart_ = view_->state().loopStart; cycleEnd_ = view_->state().loopEnd;
+                if (auto* cycle = find(*view_, "studio.cycle"))
+                {
+                    const auto x = cycleX(cycleEnd_); auto event = mouseEvent(*cycle, {x, 12});
+                    cycle->mouseDown(event); cycle->mouseDrag(event.withNewPosition(juce::Point<float>(x + 80, 12))); cycle->mouseUp(event);
+                }
+                break;
+            }
+            case 17:
+            {
+                check(view_->state().loopEnd > cycleEnd_ && std::abs(view_->state().loopStart - cycleStart_) < 0.001,
+                      "cycle right edge must resize with the left edge fixed");
+                const auto before = commands_.size();
+                if (auto* cycle = find(*view_, "studio.cycle"))
+                {
+                    const auto x = cycleX(view_->state().loopEnd) + 70; auto event = mouseEvent(*cycle, {x, 12});
+                    cycle->mouseDown(event); cycle->mouseDrag(event.withNewPosition(juce::Point<float>(x + 60, 12))); cycle->keyPressed(juce::KeyPress(juce::KeyPress::escapeKey)); cycle->mouseUp(event);
+                }
+                check(commands_.size() == before, "Escape must cancel a cycle draft without sending a backend edit");
+                break;
+            }
+            case 18:
+            {
+                shortcuts_->assign("project.save", juce::KeyPress(juce::KeyPress::upKey));
+                auto* pitch = dynamic_cast<editor::PitchEditor*>(find(*view_, "studio.pitch"));
+                if (pitch)
+                {
+                    beforeShortcutNote_ = view_->state().selectedNoteId;
+                    pitch->grabKeyboardFocus();
+                    if (auto* peer = view_->getPeer()) peer->handleKeyPress(juce::KeyPress(juce::KeyPress::upKey));
+                }
+                break;
+            }
+            case 19:
+            {
+                const auto* action = last("project-action");
+                check(action && (*action)["action"].toString() == "save-project", "a configured Save->Up shortcut must take precedence over focused note selection");
+                check(view_->state().selectedNoteId == beforeShortcutNote_, "captured custom shortcut must not also change note selection");
+                break;
+            }
+            case 20:
+            {
+                auto* primary = dynamic_cast<ui::Select*>(find(*view_, "studio.tool.primary"));
+                if (primary) primary->setSelectedIndex(0, juce::sendNotificationSync);
+                if (auto* snap = dynamic_cast<ui::Button*>(find(*view_, "studio.chordSnap"))) snap->triggerClick();
+                auto* pitch = dynamic_cast<editor::PitchEditor*>(find(*view_, "studio.pitch"));
+                if (pitch)
+                {
+                    pitch->keyPressed(juce::KeyPress(juce::KeyPress::downKey));
+                    const auto point = pitch->noteBounds(pitch->selectedNote()).getCentre();
+                    auto event = mouseEvent(*pitch, point); pitch->mouseDown(event);
+                    pitch->mouseDrag(event.withNewPosition(point + juce::Point<float>(20, -18)));
+                    pitch->mouseUp(event);
+                }
+                break;
+            }
+            case 21:
+            {
+                const auto* moved = last("move-note-group"); const auto* preview = last("preview-pitch-tone");
+                check(moved && preview && std::abs(static_cast<double>((*moved)["notes"][0]["pitch"]) - 60.0) < 0.001
+                      && std::abs(static_cast<double>((*preview)["pitch"]) - 60.0) < 0.001,
+                      "Chord Snap must make audition and committed pitch agree");
+                if (moved) check(std::abs(static_cast<double>((*moved)["notes"][0]["startDeltaSeconds"])) < 0.001
+                                 && std::abs(static_cast<double>((*moved)["notes"][0]["endDeltaSeconds"])) < 0.001,
+                                 "Pointer pitch editing must preserve source note timing");
+                break;
+            }
             default:
                 stopTimer(); view_.reset(); juce::MessageManager::getInstance()->stopDispatchLoop(); break;
         }
     }
     int& failures_; int phase_ = 0;
     std::vector<juce::var> commands_;
+    std::shared_ptr<vocal_annotation::StudioShortcuts> shortcuts_ = std::make_shared<vocal_annotation::StudioShortcuts>();
+    juce::String beforeShortcutNote_;
+    double cycleStart_ = 0, cycleEnd_ = 0;
     std::unique_ptr<vocal_annotation::NativeStudioView> view_;
 };
 }
-int main()
+int main(int argc, char** argv)
 {
+    if (argc == 3 && juce::String(argv[1]) == "--snapshot-dir")
+        snapshotDirectory = juce::File::getCurrentWorkingDirectory().getChildFile(juce::String(argv[2]));
     juce::ScopedJuceInitialiser_GUI initialise;
     juce::UnitTestRunner runner; runner.setAssertOnFailure(false); runner.runTestsInCategory("NativeStudio", 123456);
     int failures = 0;

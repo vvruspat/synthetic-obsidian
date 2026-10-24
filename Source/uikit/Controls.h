@@ -4,6 +4,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <vector>
 #include "Theme.h"
 
 namespace obsidian::ui
@@ -121,6 +122,8 @@ public:
     Select();
     ~Select() override;
     void setItems(juce::StringArray);
+    void setItemIcons(std::vector<Icon>, bool iconOnly = false);
+    bool getIconOnly() const noexcept { return iconOnly_; }
     const juce::StringArray& getItems() const noexcept { return items_; }
     void setSelectedIndex(int, juce::NotificationType = juce::dontSendNotification);
     int getSelectedIndex() const noexcept { return selectedIndex_; }
@@ -139,6 +142,8 @@ protected:
     std::unique_ptr<juce::AccessibilityHandler> createAccessibilityHandler() override;
 private:
     juce::StringArray items_;
+    std::vector<Icon> itemIcons_;
+    bool iconOnly_ = false;
     std::unique_ptr<Menu> menu_;
     int selectedIndex_ = -1;
     bool hovered_ = false;

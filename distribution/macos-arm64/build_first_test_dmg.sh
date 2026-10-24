@@ -52,7 +52,6 @@ require_command() {
 require_command cmake
 require_command codesign
 require_command hdiutil
-require_command npm
 
 require_dir "${runtime_build}/core"
 require_dir "${runtime_build}/backing-notes"
@@ -84,10 +83,6 @@ SYNTHETIC_OBSIDIAN_CODESIGN_IDENTITY="${identity}" \
     "${script_dir}/pyinstaller/core.spec"
 
 echo "Building the embedded interface"
-(
-    cd "${project_root}/frontend"
-    npm run build
-)
 
 echo "Building the Apple Silicon application"
 cmake -S "${project_root}" -B "${release_build}" \

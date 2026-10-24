@@ -20,6 +20,7 @@ public:
     bool isPlaying() const noexcept { return playing_.load(); }
     double position() const noexcept { return reportedPosition_.load(); }
     void setLoop(bool enabled, double start, double end) noexcept;
+    double waveformDuration(const juce::File&) const; // Message-thread cached source duration.
     juce::var waveform(const juce::File&) const; // Message thread only.
     std::function<void(const juce::String&)> onReady;
     static juce::Result renderTrack(const AnnotationDocument&, const juce::String&, const juce::File&);
@@ -65,6 +66,7 @@ private:
     unsigned int revision_ = 0;
     Cache cache_;
     std::map<juce::String, juce::var> readyWaveforms_, waveforms_;
+    std::map<juce::String, double> readyWaveformDurations_, waveformDurations_;
     juce::String readyError_;
     std::atomic<Plan*> pending_ { nullptr }, retired_ { nullptr };
     Plan* active_ = nullptr; // Audio-thread-owned until shutdown.

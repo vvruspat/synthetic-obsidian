@@ -17,6 +17,7 @@ inline constexpr juce::uint32 text = 0xffe0e3e8;
 inline constexpr juce::uint32 muted = 0xffa8afb9;
 inline constexpr juce::uint32 faint = 0xff737d87;
 inline constexpr juce::uint32 blue = 0xff91accd;
+inline constexpr juce::uint32 yellow = 0xffd7c678;
 inline constexpr juce::uint32 olive = 0xffb5c89b;
 inline constexpr juce::uint32 pink = 0xffc18ead;
 inline constexpr juce::uint32 focus = 0xffc8d8eb;
@@ -42,7 +43,8 @@ enum class Icon
 {
     none, chevronDown, chevronRight, plus, minus, play, stop, record, rewind,
     loop, pointer, pencil, scissors, search, more, waveform, microphone,
-    backing, clock, signature, chords, logo, close, check
+    backing, clock, signature, chords, logo, close, check,
+    undo, redo, eraser, join, flex, vibrato, gain, notes
 };
 
 void drawIcon(juce::Graphics&, Icon, juce::Rectangle<float>, juce::Colour);

@@ -17,9 +17,12 @@ public:
     void setCurrentBeat(double);
     std::function<void(double)> onSeek;
     std::function<void(double, double, float)> onViewportGesture;
+    std::function<void(const juce::MouseEvent&, float scaleFactor)> onMagnifyGesture;
+    std::function<void(const juce::MouseEvent&, const juce::MouseWheelDetails&)> onWheelGesture;
     void mouseDown(const juce::MouseEvent&) override;
     void mouseDrag(const juce::MouseEvent&) override;
     void mouseWheelMove(const juce::MouseEvent&, const juce::MouseWheelDetails&) override;
+    void mouseMagnify(const juce::MouseEvent&, float scaleFactor) override;
     bool keyPressed(const juce::KeyPress&) override;
     void focusGained(juce::Component::FocusChangeType) override;
     void focusLost(juce::Component::FocusChangeType) override;

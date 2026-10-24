@@ -1,3 +1,7 @@
+add_library(ObsidianStudioViews STATIC NativeStudioView.cpp NativeStudioSettings.cpp StudioShortcuts.cpp)
+target_link_libraries(ObsidianStudioViews PUBLIC Obsidian::EditorUI
+    PRIVATE juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)
+
 juce_add_gui_app(VocalAnnotationTool
     COMPANY_NAME        "SyntheticObsidian"
     COMPANY_WEBSITE     "https://github.com/synthetic-obsidian"
@@ -7,8 +11,6 @@ juce_add_gui_app(VocalAnnotationTool
     VERSION             "${PROJECT_VERSION}"
     ICON_BIG            "${CMAKE_SOURCE_DIR}/distribution/macos-arm64/AppIcon.png"
     ICON_SMALL          "${CMAKE_SOURCE_DIR}/distribution/macos-arm64/AppIcon.png"
-    NEEDS_WEB_BROWSER   TRUE
-    NEEDS_WEBVIEW2      TRUE
     MICROPHONE_PERMISSION_ENABLED TRUE
     MICROPHONE_PERMISSION_TEXT "Synthetic Obsidian uses the selected audio input for vocal recording and monitoring."
 )
@@ -32,8 +34,6 @@ target_sources(VocalAnnotationTool
         ../native_note_annotator/NoteAnalysis.cpp
         ../native_note_annotator/NoteBoundaryModel.cpp
         ../native_note_annotator/PitchStructureFeatures.cpp
-        ${CMAKE_SOURCE_DIR}/Source/web/SyntheticObsidianWebView.cpp
-        ${CMAKE_SOURCE_DIR}/Source/web/AudioFileTransfer.cpp
 )
 
 target_include_directories(VocalAnnotationTool
@@ -44,9 +44,8 @@ target_include_directories(VocalAnnotationTool
 
 target_compile_definitions(VocalAnnotationTool
     PUBLIC
-        JUCE_WEB_BROWSER=1
+        JUCE_WEB_BROWSER=0
         JUCE_USE_CURL=0
-        JUCE_USE_WIN_WEBVIEW2=1
         $<$<NOT:$<CONFIG:Release>>:SYNTHETIC_OBSIDIAN_DEV_ROOT="${CMAKE_SOURCE_DIR}">
 )
 
@@ -64,7 +63,7 @@ target_link_libraries(VocalAnnotationTool
         juce::juce_graphics
         juce::juce_gui_basics
         juce::juce_gui_extra
-        SyntheticObsidianFrontendData
+        ObsidianStudioViews
     PUBLIC
         juce::juce_recommended_config_flags
         juce::juce_recommended_lto_flags
@@ -179,4 +178,12 @@ if(SYNTHETIC_OBSIDIAN_ARRANGEMENT_TESTS)
     target_link_libraries(ArrangementTests PRIVATE juce::juce_audio_utils juce::juce_gui_extra
         juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)
     add_test(NAME ArrangementTests COMMAND ArrangementTests)
+endif()
+
+if(BUILD_TESTING AND SYNTHETIC_OBSIDIAN_ARRANGEMENT_TESTS)
+    juce_add_console_app(NativeStudioTests PRODUCT_NAME "Native studio integration checks")
+    target_sources(NativeStudioTests PRIVATE NativeStudioTests.cpp NativeStudioSettingsTests.cpp StudioShortcutsTests.cpp)
+    target_link_libraries(NativeStudioTests PRIVATE ObsidianStudioViews
+        juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)
+    add_test(NAME NativeStudioTests COMMAND NativeStudioTests)
 endif()

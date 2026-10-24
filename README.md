@@ -5,7 +5,7 @@ Synthetic Obsidian is a JUCE 8 / CMake audio project for vocal processing and vo
 The repository currently contains two connected pieces of work:
 
 - a JUCE VST3/Standalone plugin scaffold for vocal processing experiments;
-- a standalone Vocal Annotation Tool with a React/TypeScript interface and a
+- a standalone Vocal Annotation Tool with a native C++/JUCE interface and a
   C++/Python backend for building and validating note, syllable, breath, pause,
   and pitch-curve annotations.
 
@@ -29,9 +29,11 @@ Source/                       JUCE plugin source
   dsp/                        DSP modules
   state/                      Project/session state models
   ui/                         Plugin UI components
-  web/                        JUCE WebView host for the embedded React UI
+  uikit/                      Reusable custom native controls and theme
+  editor_ui/                  Timeline, pitch editor and transport components
+  web/                        Previous WebView implementation and transfer helpers
 
-frontend/                     React/TypeScript application UI
+frontend/                     Previous React/TypeScript interface (not embedded)
 tools/vocal_annotation_tool/  Standalone annotation app
 research/gtsinger_alignment/  Boundary model training/inference utilities
 docs/                         Product, design, and architecture notes
@@ -40,16 +42,7 @@ data/gtsinger_alignment/      Lightweight runtime checkpoint only
 
 ## Build the Vocal Annotation Tool
 
-The checked-in `frontend/dist` bundle is embedded into the native app, so a
-normal C++ build does not require Node.js and the app does not start a local web
-server. When the frontend source changes, refresh the bundle first:
-
-```bash
-cd frontend
-npm ci
-npm run check
-cd ..
-```
+The app uses the native UI kit. C++ builds require no frontend bundle or WebView SDK.
 
 ```bash
 cmake -S . -B build-vocal-tool2 -DCMAKE_BUILD_TYPE=Debug
@@ -59,13 +52,13 @@ cmake --build build-vocal-tool2 --target VocalAnnotationTool -j 4
 On macOS, the app is generated at:
 
 ```text
-build-vocal-tool2/vocal_annotation_tool_build/VocalAnnotationTool_artefacts/Debug/Vocal Annotation Tool.app
+build-vocal-tool2/vocal_annotation_tool_build/VocalAnnotationTool_artefacts/Debug/Synthetic Obsidian.app
 ```
 
 Run it with:
 
 ```bash
-open "build-vocal-tool2/vocal_annotation_tool_build/VocalAnnotationTool_artefacts/Debug/Vocal Annotation Tool.app"
+open "build-vocal-tool2/vocal_annotation_tool_build/VocalAnnotationTool_artefacts/Debug/Synthetic Obsidian.app"
 ```
 
 ## Build the plugin
@@ -81,7 +74,7 @@ For more platform-specific build notes, see [BUILD.md](BUILD.md).
 
 The tool is designed for offline vocal annotation and review. It can:
 
-- run its entire visible UI in an embedded React WebView;
+- run its visible UI with custom native JUCE controls;
 - load audio and annotation JSON;
 - create and edit note blocks, syllable splits, breaths, pauses, noise regions, and legato/rearticulation boundaries;
 - draw pitch curves and export MIDI with pitch-bend events;

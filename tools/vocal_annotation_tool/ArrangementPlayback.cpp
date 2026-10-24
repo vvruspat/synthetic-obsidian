@@ -35,6 +35,11 @@ void ArrangementPlayback::setLoop(bool enabled, double start, double end) noexce
     loopEnd_.store(end);
     looping_.store(enabled && end > start && std::isfinite(start) && std::isfinite(end));
 }
+double ArrangementPlayback::waveformDuration(const juce::File& file) const
+{
+    const auto found = waveformDurations_.find(file.getFullPathName());
+    return found == waveformDurations_.end() ? 0.0 : found->second;
+}
 juce::var ArrangementPlayback::waveform(const juce::File& file) const
 {
     const auto found = waveforms_.find(file.getFullPathName());
@@ -145,9 +150,15 @@ void ArrangementPlayback::run()
             std::lock_guard lock(requestMutex_);
             if (revision != revision_ || threadShouldExit()) continue;
             readyWaveforms_.clear();
+            readyWaveformDurations_.clear();
             for (const auto& track : plan->tracks)
                 for (const auto& clip : track.clips)
-                    if (clip.audio) readyWaveforms_[clip.placement.audioFile.getFullPathName()] = clip.audio->waveform;
+                    if (clip.audio)
+                    {
+                        const auto path = clip.placement.audioFile.getFullPathName();
+                        readyWaveforms_[path] = clip.audio->waveform;
+                        readyWaveformDurations_[path] = clip.audio->samples.getNumSamples() / clip.audio->sampleRate;
+                    }
             readyError_ = error;
             delete pending_.exchange(plan.release());
             std::erase_if(cache_, [](const auto& entry) { return entry.second.expired(); });
@@ -164,7 +175,7 @@ void ArrangementPlayback::run()
 void ArrangementPlayback::handleAsyncUpdate()
 {
     juce::String error;
-    { std::lock_guard lock(requestMutex_); for (const auto& [path, waveform] : readyWaveforms_) waveforms_[path] = waveform; error = readyError_; }
+    { std::lock_guard lock(requestMutex_); for (const auto& [path, waveform] : readyWaveforms_) waveforms_[path] = waveform; waveformDurations_ = readyWaveformDurations_; error = readyError_; }
     if (onReady) onReady(error);
 }
 void ArrangementPlayback::mix(Plan& plan, juce::AudioBuffer<float>& buffer,
@@ -304,7 +315,7 @@ juce::Result ArrangementPlayback::renderTrack(const AnnotationDocument& document
     const auto total = static_cast<juce::int64>(std::ceil(plan->duration * 48000.0));
     for (juce::int64 sample = 0; sample < total; sample += buffer.getNumSamples())
     {
-        const auto count = static_cast<int>(juce::jmin<juce::int64>(buffer.getNumSamples(), total - sample));
+        const auto count = static_cast<int>(std::min<juce::int64>(buffer.getNumSamples(), total - sample));
         buffer.clear();
         mix(*plan, buffer, 0, count, static_cast<double>(sample) / 48000.0, 48000.0);
         if (! writer->writeFromAudioSampleBuffer(buffer, 0, count)) return juce::Result::fail("Could not write track audio.");

@@ -5,6 +5,8 @@ on:
       - 'frontend/**'
       - 'tools/vocal_annotation_tool/**'
       - 'Source/web/**'
+      - 'Source/uikit/**'
+      - 'Source/editor_ui/**'
       - 'CMakeLists.txt'
       - '.github/workflows/arrangement.yml'
   workflow_dispatch:
@@ -26,16 +28,26 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-15, windows-2022]
+        os: [macos-15, windows-2022, ubuntu-24.04]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - name: Install WebView2 SDK
-        if: runner.os == 'Windows'
-        run: nuget install Microsoft.Web.WebView2 -Version 1.0.1901.177 -OutputDirectory .webview2
+      - name: Install Linux GUI and audio dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev libx11-dev libxext-dev libxinerama-dev libxrandr-dev libxcursor-dev libfreetype6-dev libfontconfig1-dev libgl1-mesa-dev xvfb openbox x11-utils
       - name: Configure
-        run: cmake -S . -B build-arrangement -DCMAKE_BUILD_TYPE=Release -DSYNTHETIC_OBSIDIAN_BUILD_NATIVE_ANNOTATOR=OFF -DSYNTHETIC_OBSIDIAN_ARRANGEMENT_TESTS=ON -DJUCE_WEBVIEW2_PACKAGE_LOCATION=${{ github.workspace }}/.webview2
+        run: cmake -S . -B build-arrangement -DCMAKE_BUILD_TYPE=Release -DSYNTHETIC_OBSIDIAN_BUILD_NATIVE_ANNOTATOR=OFF -DSYNTHETIC_OBSIDIAN_ARRANGEMENT_TESTS=ON
       - name: Build
-        run: cmake --build build-arrangement --config Release --target ArrangementTests VocalAnnotationTool --parallel 3
-      - name: Verify playback and project round-trip
-        run: ctest --test-dir build-arrangement/vocal_annotation_tool_build -C Release -R ArrangementTests --output-on-failure
+        run: cmake --build build-arrangement --config Release --target ArrangementTests NativeStudioTests VocalAnnotationTool --parallel 3
+      - name: Verify playback, project round-trip and native UI
+        if: runner.os != 'Linux'
+        run: ctest --test-dir build-arrangement/vocal_annotation_tool_build -C Release -R "ArrangementTests|NativeStudioTests" --output-on-failure
+      - name: Verify Linux playback and native UI
+        if: runner.os == 'Linux'
+        run: xvfb-run -a -s '-screen 0 1920x1200x24' bash tools/uikit_demo/run-x11.sh ctest --test-dir build-arrangement/vocal_annotation_tool_build -C Release -R "ArrangementTests|NativeStudioTests" --output-on-failure
+      - name: Upload test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-studio-${{ matrix.os }}
+          path: build-arrangement/Testing/Temporary/LastTest.log

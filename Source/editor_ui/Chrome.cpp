@@ -68,6 +68,12 @@ void TransportBar::setSignature(int numerator, int denominator)
 
 juce::String TransportBar::getPositionText() const
 {
+    if (!timing_.signatures.empty())
+    {
+        const auto p = timing_.positionAt(beat_);
+        return juce::String(static_cast<juce::int64>(p.bar)).paddedLeft('0', 3) + " | " + juce::String(p.beat)
+            + " | " + juce::String(p.ticks).paddedLeft('0', 3);
+    }
     const double quarterNotesPerBeat = 4.0 / static_cast<double>(denominator_);
     const double quarterNotesPerBar = static_cast<double>(numerator_) * quarterNotesPerBeat;
     const auto bar = static_cast<juce::int64>(beat_ / quarterNotesPerBar) + 1;
@@ -121,9 +127,15 @@ void TransportBar::paint(juce::Graphics& g)
     g.setColour(ui::colour(ui::tokens::border));
     g.drawHorizontalLine(getHeight() - 1, 0.0f, static_cast<float>(getWidth()));
     auto brand = brandBounds_;
-    ui::drawIcon(g, ui::Icon::logo, brand.removeFromLeft(30).toFloat().reduced(3.0f), ui::colour(ui::tokens::muted));
-    brand.removeFromLeft(8);
-    text(g, "Obsidian", brand, ui::tokens::fontTitle);
+    ui::drawIcon(g, ui::Icon::logo, brand.removeFromLeft(32).toFloat().withSizeKeepingCentre(30.0f, 30.0f), ui::colour(ui::tokens::text));
+    brand.removeFromLeft(7);
+    auto wordmark = brand.withSizeKeepingCentre(brand.getWidth(), 34);
+    g.setColour(ui::colour(ui::tokens::muted));
+    g.setFont(ui::font(9.0f).withExtraKerningFactor(0.14f));
+    g.drawText("SYNTHETIC", wordmark.removeFromTop(13), juce::Justification::centredLeft);
+    g.setColour(ui::colour(ui::tokens::text));
+    g.setFont(ui::font(16.0f));
+    g.drawText("OBSIDIAN", wordmark, juce::Justification::centredLeft);
     text(g, projectTitle_, titleBounds_);
     text(g, getPositionText(), positionBounds_, 16.0f);
     const auto wholeSeconds = static_cast<int>(seconds_);
@@ -170,6 +182,8 @@ TrackHeader::TrackHeader()
     gain_.setComponentID("track.gain");
     menu_.setComponentID("track.menu");
     mute_.setTitle("Mute track");
+    mute_.setAccent(ui::colour(ui::tokens::blue));
+    solo_.setAccent(ui::colour(ui::tokens::yellow));
     solo_.setTitle("Solo track");
     gain_.setTitle("Track gain");
     gain_.setRange(-60.0, 6.0, 0.1);
@@ -189,6 +203,7 @@ void TrackHeader::setTrack(int number, juce::String name, juce::Colour accent, u
     gain_.setAccent(accent_);
     repaint();
 }
+void TrackHeader::setGainVisible(bool visible) { gain_.setVisible(visible); resized(); repaint(); }
 void TrackHeader::setGain(double db) { gain_.setValue(db, juce::dontSendNotification); repaint(); }
 void TrackHeader::setMuted(bool muted) { mute_.setToggleState(muted, juce::dontSendNotification); }
 void TrackHeader::setSolo(bool solo) { solo_.setToggleState(solo, juce::dontSendNotification); }
@@ -200,19 +215,29 @@ void TrackHeader::paint(juce::Graphics& g)
     g.fillRoundedRectangle(0.0f, 0.0f, 7.0f, static_cast<float>(getHeight()), 2.0f);
     g.setColour(ui::colour(ui::tokens::border));
     g.drawRect(getLocalBounds(), 1);
-    text(g, juce::String(number_), { 8, 0, 20, getHeight() }, 11.0f, ui::colour(ui::tokens::muted), juce::Justification::centred);
-    ui::drawIcon(g, icon_, juce::Rectangle<float>(37.0f, static_cast<float>(getHeight()) * 0.5f - 13.0f, 26.0f, 26.0f), accent_);
-    text(g, name_, { 80, 5, juce::jmax(0, getWidth() - 112), 26 });
-    text(g, gain_.getValueText(), { getWidth() - 62, getHeight() - 32, 55, 24 }, 10.0f, ui::colour(ui::tokens::muted), juce::Justification::centredRight);
+    text(g, juce::String(number_), numberBounds_, 11.0f, ui::colour(ui::tokens::muted), juce::Justification::centred);
+    ui::drawIcon(g, icon_, iconBounds_, accent_);
+    text(g, name_, nameBounds_);
+    if (gain_.isVisible()) text(g, gain_.getValueText(), gainValueBounds_, 10.0f, ui::colour(ui::tokens::muted), juce::Justification::centredRight);
 }
 
 void TrackHeader::resized()
 {
-    const int y = getHeight() - 34;
-    mute_.setBounds(80, y, 23, kTrackControlHeight);
-    solo_.setBounds(106, y, 23, kTrackControlHeight);
-    gain_.setBounds(142, y, juce::jmax(0, getWidth() - 209), kTrackControlHeight);
-    menu_.setBounds(getWidth() - 29, 5, 22, 24);
+    constexpr int nameX = 58, buttonWidth = 23, menuWidth = 22;
+    const auto blockHeight = std::min(64, getHeight());
+    const auto controlsY = std::max(0, std::min(33, blockHeight - kTrackControlHeight - 4));
+    const auto menuX = std::max(0, getWidth() - menuWidth - 7);
+    numberBounds_ = { 8, 0, 16, blockHeight };
+    iconBounds_ = { 29.0f, static_cast<float>(std::max(0, blockHeight / 2 - 12)), 24.0f, 24.0f };
+    nameBounds_ = { nameX, 5, std::max(0, menuX - nameX - 5), 24 };
+    mute_.setBounds(nameX, controlsY, buttonWidth, kTrackControlHeight);
+    solo_.setBounds(nameX + buttonWidth + 3, controlsY, buttonWidth, kTrackControlHeight);
+    const auto gainX = nameX + 60;
+    const auto gainValueWidth = 51;
+    const auto valueX = std::max(gainX, getWidth() - gainValueWidth - 7);
+    gain_.setBounds(gainX, controlsY, std::max(0, valueX - gainX - 5), kTrackControlHeight);
+    gainValueBounds_ = { valueX, controlsY, gainValueWidth, kTrackControlHeight };
+    menu_.setBounds(menuX, 5, menuWidth, 24);
 }
 
 TrackGroupHeader::TrackGroupHeader()
@@ -227,6 +252,13 @@ TrackGroupHeader::TrackGroupHeader()
     add_.setSize(ui::Button::Size::small);
     heading_.onClick = [this] { auto callback = onExpanded; if (callback) callback(!expanded_); };
     add_.onClick = [this] { auto callback = onAdd; if (callback) callback(); };
+}
+void TrackGroupHeader::setAddCompact(bool compact)
+{
+    addCompact_ = compact;
+    add_.setText(compact ? juce::String() : juce::String("Add backing"));
+    add_.setTitle("Add backing vocal track");
+    resized();
 }
 void TrackGroupHeader::setExpanded(bool expanded)
 {
@@ -244,7 +276,7 @@ void TrackGroupHeader::paint(juce::Graphics& g)
 void TrackGroupHeader::resized()
 {
     auto row = getLocalBounds().reduced(kHeaderPadding, 5);
-    add_.setBounds(row.removeFromRight(116));
+    add_.setBounds(row.removeFromRight(addCompact_ ? 28 : 116));
     row.removeFromRight(8);
     heading_.setBounds(row);
 }

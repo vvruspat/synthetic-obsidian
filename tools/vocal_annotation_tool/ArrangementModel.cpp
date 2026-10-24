@@ -7,6 +7,42 @@
 
 namespace vocal_annotation::arrangement
 {
+void transformNotes(std::vector<NoteBlock>& notes, const std::vector<NoteDelta>& edits,
+                    double duration, std::vector<AnnotationRegion>* regions)
+{
+    std::set<juce::String> transformed;
+    for (const auto& edit : edits)
+    {
+        if (!std::isfinite(edit.startDelta) || !std::isfinite(edit.endDelta) || !std::isfinite(edit.pitch)
+            || !transformed.insert(edit.id).second) continue;
+        const auto found = std::find_if(notes.begin(), notes.end(), [&edit](const auto& note) { return note.id == edit.id; });
+        if (found == notes.end()) continue;
+        const auto start = std::clamp(found->start + edit.startDelta, 0.0, std::max(0.0, duration - 0.04));
+        const auto end = std::clamp(found->end + edit.endDelta, start + 0.04, std::max(start + 0.04, duration));
+        transformNote(*found, start, end, edit.pitch, regions);
+    }
+}
+void transformNote(NoteBlock& note, double start, double end, double pitch,
+                   std::vector<AnnotationRegion>* regions)
+{
+    if (!std::isfinite(start) || !std::isfinite(end) || !std::isfinite(pitch) || end <= start) return;
+    const auto previousStart = note.start;
+    const auto previousLength = std::max(0.000001, note.end - note.start);
+    const auto mapTime = [=](double time) { return start + (time - previousStart) * (end - start) / previousLength; };
+    const auto nextPitch = std::clamp(pitch, 0.0, 127.0);
+    const auto pitchDelta = nextPitch - note.pitchExact;
+    note.start = start; note.end = end;
+    note.voicedStart = std::clamp(mapTime(note.voicedStart), start, end);
+    note.voicedEnd = std::clamp(mapTime(note.voicedEnd), note.voicedStart, end);
+    note.pitchExact = nextPitch; note.pitch = static_cast<int>(std::lround(nextPitch));
+    for (auto& point : note.curve)
+    { point.time = std::clamp(mapTime(point.time), start, end); point.midi = std::clamp(point.midi + pitchDelta, 0.0, 127.0); }
+    if (regions != nullptr)
+        for (auto& region : *regions)
+            if (region.noteId == note.id)
+            { region.start = std::clamp(mapTime(region.start), start, end); region.end = std::clamp(mapTime(region.end), region.start, end); }
+}
+
 ArrangementTrack* findTrack(AnnotationDocument& document, const juce::String& id)
 {
     for (auto& track : document.tracks)

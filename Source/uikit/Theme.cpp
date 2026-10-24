@@ -77,11 +77,51 @@ void drawIcon(juce::Graphics& g, Icon icon, juce::Rectangle<float> bounds, juce:
                 path.addRoundedRectangle(4.0f + static_cast<float>(x) * 10.0f, 4.0f + static_cast<float>(y) * 10.0f, 6, 6, 1.5f);
             break;
         case Icon::logo:
-            path.addTriangle(6, 2, 0, 12, 11, 12); path.addTriangle(8, 1, 14, 11, 23, 11);
-            path.addTriangle(24, 13, 18, 23, 13, 13); path.addTriangle(16, 24, 10, 14, 1, 14);
-            fill = true; break;
+        {
+            // Match the faceted signal monogram in distribution/macos-arm64/Logo.svg.
+            const auto facet = [&](std::initializer_list<juce::Point<float>> points, juce::uint32 colour)
+            {
+                juce::Path face;
+                auto point = points.begin(); face.startNewSubPath(*point++);
+                for (; point != points.end(); ++point) face.lineTo(*point);
+                face.closeSubPath();
+                g.setColour(juce::Colour(colour).withMultipliedAlpha(ink.getFloatAlpha()));
+                g.fillPath(face);
+            };
+            facet({ {12, 1}, {21, 6}, {21, 9}, {14, 9}, {10.5f, 14.5f}, {3, 14.5f}, {3, 6} }, 0xffbfd3cd);
+            facet({ {12, 1}, {21, 6}, {14, 9}, {10.5f, 9}, {3, 6} }, 0xffdde8df);
+            facet({ {3, 6}, {10.5f, 9}, {10.5f, 14.5f}, {3, 14.5f} }, 0xff829a9b);
+            facet({ {15, 11}, {21, 11}, {21, 18}, {12, 23}, {3, 18}, {3, 16.5f}, {11.5f, 16.5f} }, 0xff718a93);
+            facet({ {15, 11}, {21, 11}, {21, 18}, {12, 23}, {12, 16} }, 0xffa9bfba);
+            return;
+        }
         case Icon::close: line(5, 5, 19, 19); line(19, 5, 5, 19); break;
         case Icon::check: path.startNewSubPath(4, 12); path.lineTo(9, 17); path.lineTo(20, 6); break;
+        case Icon::undo:
+        case Icon::redo:
+            path.startNewSubPath(4, 9); path.lineTo(14, 9); path.cubicTo(23, 9, 23, 20, 14, 20);
+            line(4, 9, 9, 4); line(4, 9, 9, 14);
+            if (icon == Icon::redo) path.applyTransform(juce::AffineTransform::scale(-1.0f, 1.0f).translated(24.0f, 0.0f));
+            break;
+        case Icon::eraser:
+            path.startNewSubPath(3, 14); path.lineTo(13, 4); path.lineTo(21, 12);
+            path.lineTo(12, 21); path.lineTo(10, 21); path.closeSubPath();
+            line(8, 9, 16, 17); line(11, 21, 22, 21); break;
+        case Icon::join:
+            path.addRoundedRectangle(2, 8, 8, 8, 2); path.addRoundedRectangle(14, 8, 8, 8, 2);
+            line(7, 12, 17, 12); break;
+        case Icon::flex:
+            line(3, 5, 3, 19); line(21, 5, 21, 19); line(5, 12, 19, 12);
+            line(5, 12, 8, 9); line(5, 12, 8, 15); line(19, 12, 16, 9); line(19, 12, 16, 15); break;
+        case Icon::vibrato:
+            path.startNewSubPath(2, 12); path.cubicTo(5, 0, 7, 0, 10, 12);
+            path.cubicTo(13, 24, 15, 24, 18, 12); path.cubicTo(20, 4, 21, 4, 23, 12); break;
+        case Icon::gain:
+            line(5, 3, 5, 21); line(12, 3, 12, 21); line(19, 3, 19, 21);
+            line(2, 8, 8, 8); line(9, 16, 15, 16); line(16, 10, 22, 10); break;
+        case Icon::notes:
+            path.addRoundedRectangle(2, 14, 7, 4, 1); path.addRoundedRectangle(9, 7, 6, 4, 1);
+            path.addRoundedRectangle(15, 11, 7, 4, 1); break;
         case Icon::none: break;
     }
     if (fill) g.fillPath(path);

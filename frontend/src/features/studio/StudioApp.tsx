@@ -1,12 +1,8 @@
-import { useEffect, useRef, useState } from "react";
-import type {
-  AudioSettingsState,
-  PluginBridge,
-  ProjectAction,
-  VoiceTrainingState,
-} from "@/bridge/plugin-bridge";
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { AudioSettingsState, PluginBridge, VoiceTrainingState } from "@/bridge/plugin-bridge";
 import type { CorrectionToolId } from "@/domain/studio";
 import { Arrangement } from "@/features/studio/components/Arrangement";
+import { AudioFileDropZone } from "@/features/studio/components/AudioFileDropZone";
 import { ExportToast, type ExportToastState } from "@/features/studio/components/ExportToast";
 import { ProjectStatusBar } from "@/features/studio/components/ProjectStatusBar";
 import {
@@ -14,7 +10,6 @@ import {
   SettingsDialog,
 } from "@/features/studio/components/SettingsDialog";
 import { StudioHeader } from "@/features/studio/components/StudioHeader";
-import { TrackSidebar } from "@/features/studio/components/TrackSidebar";
 import {
   EMPTY_VOICE_TRAINING_STATE,
   VoiceTrainingDialog,
@@ -147,11 +142,11 @@ function StudioWorkspace({
   const controller = useStudioController(bridge, project, shortcuts);
   const [voiceTrainingOpen, setVoiceTrainingOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const closeSettings = useCallback(() => setSettingsOpen(false), []);
+  const closeVoiceTraining = useCallback(() => setVoiceTrainingOpen(false), []);
   const { pianoCollapsed, serviceTracksCollapsed } = controller;
   const pitchEditorAvailable = project.hasVocal || project.initialBackingTracks.length > 0;
-  const sendProjectAction = (action: ProjectAction) => {
-    bridge.send({ type: "project-action", action });
-  };
+
   const updateShortcuts = (next: ShortcutBindings) => {
     setShortcuts(next);
     saveShortcutBindings(next);
@@ -227,54 +222,62 @@ function StudioWorkspace({
   }, [controller, settingsOpen, shortcuts, voiceTrainingOpen]);
 
   return (
-    <main className="studio-shell">
-      <StudioHeader
-        controller={controller}
-        voiceTraining={voiceTraining}
-        onOpenVoiceTraining={() => setVoiceTrainingOpen(true)}
-        onOpenSettings={() => setSettingsOpen(true)}
-      />
-      <section
-        className={[
-          "workspace",
-          pianoCollapsed ? "is-piano-collapsed" : "",
-          pitchEditorAvailable ? "" : "is-piano-unavailable",
-          serviceTracksCollapsed ? "is-service-tracks-collapsed" : "",
-        ]
-          .filter(Boolean)
-          .join(" ")}
-      >
-        <TrackSidebar controller={controller} />
-        <Arrangement
+    <AudioFileDropZone
+      controller={controller}
+      busy={
+        vocalAnalysisRunning ||
+        instrumentalAnalysisRunning ||
+        backingGenerationRunning ||
+        backingAudioRenderRunning
+      }
+    >
+      <main className="studio-shell">
+        <StudioHeader
           controller={controller}
-          project={project}
-          status={status}
-          vocalAnalysisRunning={vocalAnalysisRunning}
-          instrumentalAnalysisRunning={instrumentalAnalysisRunning}
-          backingGenerationRunning={backingGenerationRunning}
-          backingAudioRenderRunning={backingAudioRenderRunning}
-          backingGenerationTrack={backingGenerationTrack}
-          backingAudioRenderTrack={backingAudioRenderTrack}
-          onProjectAction={sendProjectAction}
+          voiceTraining={voiceTraining}
           onOpenVoiceTraining={() => setVoiceTrainingOpen(true)}
+          onOpenSettings={() => setSettingsOpen(true)}
         />
-      </section>
-      <ProjectStatusBar status={status} />
-      {exportToast ? <ExportToast toast={exportToast} onDismiss={onDismissExportToast} /> : null}
-      <VoiceTrainingDialog
-        bridge={bridge}
-        state={voiceTraining}
-        open={voiceTrainingOpen}
-        onClose={() => setVoiceTrainingOpen(false)}
-      />
-      <SettingsDialog
-        bridge={bridge}
-        audio={audioSettings}
-        shortcuts={shortcuts}
-        open={settingsOpen}
-        onClose={() => setSettingsOpen(false)}
-        onShortcutsChange={updateShortcuts}
-      />
-    </main>
+        <section
+          className={[
+            "workspace",
+            pianoCollapsed ? "is-piano-collapsed" : "",
+            pitchEditorAvailable ? "" : "is-piano-unavailable",
+            serviceTracksCollapsed ? "is-service-tracks-collapsed" : "",
+          ]
+            .filter(Boolean)
+            .join(" ")}
+        >
+          <Arrangement
+            controller={controller}
+            project={project}
+            status={status}
+            vocalAnalysisRunning={vocalAnalysisRunning}
+            instrumentalAnalysisRunning={instrumentalAnalysisRunning}
+            backingGenerationRunning={backingGenerationRunning}
+            backingAudioRenderRunning={backingAudioRenderRunning}
+            backingGenerationTrack={backingGenerationTrack}
+            backingAudioRenderTrack={backingAudioRenderTrack}
+            onOpenVoiceTraining={() => setVoiceTrainingOpen(true)}
+          />
+        </section>
+        <ProjectStatusBar status={status} />
+        {exportToast ? <ExportToast toast={exportToast} onDismiss={onDismissExportToast} /> : null}
+        <VoiceTrainingDialog
+          bridge={bridge}
+          state={voiceTraining}
+          open={voiceTrainingOpen}
+          onClose={closeVoiceTraining}
+        />
+        <SettingsDialog
+          bridge={bridge}
+          audio={audioSettings}
+          shortcuts={shortcuts}
+          open={settingsOpen}
+          onClose={closeSettings}
+          onShortcutsChange={updateShortcuts}
+        />
+      </main>
+    </AudioFileDropZone>
   );
 }

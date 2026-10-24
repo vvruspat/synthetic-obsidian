@@ -29,6 +29,8 @@ struct NoteBlock
     juce::String syllableId;
     juce::StringArray flags;
     std::vector<PitchCurvePoint> curve;
+    juce::String clipId;
+    double sourcePitchExact = -1.0;
 };
 
 enum class BoundaryKind
@@ -96,6 +98,30 @@ struct BackingVocalTrack
     juce::String id;
 };
 
+struct ArrangementClip
+{
+    juce::String id;
+    juce::String name;
+    juce::File audioFile;
+    double start = 0.0;
+    double offset = 0.0;
+    double duration = 0.0;
+};
+
+// Message-thread project data. Playback uses a separately prepared snapshot.
+struct ArrangementTrack
+{
+    juce::String id;
+    juce::String name;
+    juce::String parentId;
+    bool collapsed = false;
+    bool muted = false;
+    bool solo = false;
+    bool audioMuted = false;
+    bool notesMuted = false;
+    std::vector<ArrangementClip> clips;
+};
+
 struct AnnotationDocument
 {
     int version = 1;
@@ -117,6 +143,8 @@ struct AnnotationDocument
     std::vector<TempoSegment> tempoSegments;
     std::vector<TimeSignatureSegment> timeSignatures;
     std::vector<ChordSegment> chords;
+    bool hasArrangement = false;
+    std::vector<ArrangementTrack> tracks;
 
     void clear();
     juce::String nextNoteId() const;

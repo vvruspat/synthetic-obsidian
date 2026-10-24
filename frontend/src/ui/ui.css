@@ -7,6 +7,41 @@
   color: inherit;
 }
 
+.ui-compact-button {
+  display: inline-grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: var(--track-control-width, 32px);
+  height: var(--track-control-height, 26px);
+  padding: 0;
+  font-size: var(--track-control-font-size, var(--ui-font-md));
+  cursor: pointer;
+  border: 1px solid rgba(66, 122, 192, 0.62);
+  border-radius: 5px;
+  background: linear-gradient(180deg, #102441, #071226);
+  box-shadow: inset 0 0 8px rgba(71, 135, 221, 0.15);
+}
+
+.ui-compact-button svg {
+  width: 16px;
+  height: 16px;
+}
+
+.ui-compact-button:hover,
+.ui-compact-button:focus-visible,
+.ui-compact-button.selected {
+  color: var(--cyan);
+  border-color: #24aee7;
+  box-shadow:
+    inset 0 0 9px rgba(0, 180, 255, 0.27),
+    0 0 9px rgba(0, 177, 255, 0.16);
+}
+
+.ui-compact-button.selected.solo {
+  color: #ffd84c;
+  border-color: #ffb72e;
+}
+
 .ui-select-menu > summary {
   list-style: none;
 }

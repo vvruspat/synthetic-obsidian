@@ -32,10 +32,17 @@ bool SyntheticObsidianWebView::LocalBrowser::pageAboutToLoad(const juce::String&
 
 SyntheticObsidianWebView::SyntheticObsidianWebView(CommandHandler commandHandler)
     : commandHandler_(std::move(commandHandler)),
+      audioTransfer_(juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+                         .getChildFile("Synthetic Obsidian/Imported Audio")),
       browser_(makeOptions())
 {
     addAndMakeVisible(browser_);
     browser_.goToURL(juce::WebBrowserComponent::getResourceProviderRoot());
+}
+
+SyntheticObsidianWebView::~SyntheticObsidianWebView()
+{
+    transferWorker_.removeAllJobs(true, -1);
 }
 
 void SyntheticObsidianWebView::dispatch(const juce::var& event)
@@ -58,12 +65,35 @@ juce::WebBrowserComponent::Options SyntheticObsidianWebView::makeOptions()
         .withNativeIntegrationEnabled()
         .withKeepPageLoadedWhenBrowserIsHidden()
         .withUserScript(R"javascript(
+            let nextImportPromise = 0;
+            const importPromises = new Map();
+            window.__JUCE__.backend.addEventListener("__juce__complete", ({ promiseId, result }) => {
+                const resolve = importPromises.get(promiseId);
+                if (resolve) { importPromises.delete(promiseId); resolve(result); }
+            });
             window.syntheticObsidianHost = {
+                transferAudio(request) {
+                    const promiseId = nextImportPromise++;
+                    const promise = new Promise(resolve => importPromises.set(promiseId, resolve));
+                    window.__JUCE__.backend.emitEvent("__juce__invoke", {
+                        name: "transferAudio", params: [request], resultId: promiseId
+                    });
+                    return promise;
+                },
                 postMessage(message) {
                     window.__JUCE__.backend.emitEvent("syntheticObsidianCommand", message);
                 }
             };
         )javascript")
+        .withNativeFunction("transferAudio", [this](const juce::Array<juce::var>& args,
+                                                     juce::WebBrowserComponent::NativeFunctionCompletion completion)
+        {
+            const auto request = args.isEmpty() ? juce::var() : args[0];
+            transferWorker_.addJob([this, request, complete = std::move(completion)]
+            {
+                complete(audioTransfer_.process(request));
+            });
+        })
         .withEventListener(
             "syntheticObsidianCommand",
             [this](const juce::var& payload)

@@ -1,21 +1,23 @@
 import {
+  FolderOpenIcon,
   MicrophoneIcon,
   MusicalNoteIcon,
   SignalIcon,
-  SparklesIcon,
   SpeakerWaveIcon,
   TrashIcon,
 } from "@heroicons/react/24/outline";
-import type { CSSProperties } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import type {
   TrackChannelState,
   TrackLayerAvailability,
   TrackLayerState,
   TrackName,
 } from "@/domain/studio";
-import { RangeInput, ToggleButton } from "@/ui";
+import { IconButton, RangeInput, ToggleButton } from "@/ui";
 
 type TrackHeaderProps = {
+  depth?: number;
+  rowNumber?: number;
   id: TrackName;
   name: TrackName;
   state: TrackChannelState;
@@ -27,10 +29,14 @@ type TrackHeaderProps = {
   onToggleLayer?(layer: keyof TrackLayerState): void;
   selected: boolean;
   onSelect(additive: boolean): void;
+  onOpenFile?(): void;
+  voiceControl?: ReactNode;
   onDelete?(): void;
 };
 
 export function TrackHeader({
+  depth = 0,
+  rowNumber,
   id,
   name,
   state,
@@ -42,22 +48,26 @@ export function TrackHeader({
   onToggleLayer,
   selected,
   onSelect,
+  onOpenFile,
+  voiceControl,
   onDelete,
 }: TrackHeaderProps) {
-  const TrackIcon =
-    name === "Voice Main" ? MicrophoneIcon : name === "Instrumental" ? SignalIcon : SparklesIcon;
+  const TrackIcon = depth || id === "Instrumental" ? SignalIcon : MicrophoneIcon;
   const volumeControlId = `track-volume-${id.toLowerCase().replace(/\s+/g, "-")}`;
 
   return (
     <div
       className={[
         "track-header",
+        depth ? "is-child-track" : "",
         name === "Voice Main" ? "is-voice" : "",
         selected ? "is-selected" : "",
       ]
         .filter(Boolean)
         .join(" ")}
+      style={{ paddingLeft: `${36 + depth * 16}px` }}
     >
+      <span className="track-row-number">{rowNumber}</span>
       <button
         type="button"
         className="track-selection-target"
@@ -130,6 +140,7 @@ export function TrackHeader({
         <span className="track-name">{name}</span>
         <div className="track-toggles">
           <ToggleButton
+            className="ui-compact-button"
             active={state.mute}
             onClick={() => onToggle("mute")}
             aria-label={`Mute ${name}`}
@@ -138,12 +149,23 @@ export function TrackHeader({
           </ToggleButton>
           <ToggleButton
             active={state.solo}
-            className={state.solo ? "solo" : ""}
+            className={`ui-compact-button ${state.solo ? "solo" : ""}`}
             onClick={() => onToggle("solo")}
             aria-label={`Solo ${name}`}
           >
             S
           </ToggleButton>
+          <div className="track-secondary-action">
+            {voiceControl ??
+              (onOpenFile ? (
+                <IconButton
+                  className="ui-compact-button"
+                  label={`Open audio file on ${name}`}
+                  icon={FolderOpenIcon}
+                  onClick={onOpenFile}
+                />
+              ) : null)}
+          </div>
         </div>
         {volume !== undefined && onVolumeChange ? (
           <label

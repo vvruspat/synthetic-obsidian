@@ -100,6 +100,20 @@ export type VoiceTrainingState = {
 
 export type PluginCommand =
   | { type: "frontend-ready" }
+  | { type: "add-track" }
+  | { type: "import-audio"; track: string }
+  | { type: "import-dropped-audio"; track: string; start: number; files: string[] }
+  | { type: "remove-track"; track: string }
+  | { type: "import-track-audio"; track: string }
+  | { type: "set-track-collapsed"; track: string; collapsed: boolean }
+  | {
+      type: "move-arrangement-clip";
+      track: string;
+      clipId: string;
+      targetTrack: string;
+      start: number;
+    }
+  | { type: "remove-arrangement-clip"; track: string; clipId: string }
   | { type: "project-action"; action: ProjectAction }
   | {
       type: "audio-settings";
@@ -142,7 +156,12 @@ export type PluginCommand =
       state: TrackLayerState;
     }
   | { type: "select-tracks"; tracks: TrackName[] }
-  | { type: "add-backing-track"; track: BackingTrackName; generator?: BackingGenerator }
+  | {
+      type: "add-backing-track";
+      track: BackingTrackName;
+      generator?: BackingGenerator;
+      parentId?: string;
+    }
   | { type: "regenerate-backing-track"; track: string; generator?: BackingGenerator }
   | { type: "render-backing-track"; track: string }
   | { type: "remove-backing-track"; track: string }
@@ -224,7 +243,15 @@ export type PluginCommand =
       gainDb: number;
     };
 
+export type AudioTransferRequest =
+  | { action: "begin"; name: string; size: number }
+  | { action: "append"; token: string; offset: number; data: string }
+  | { action: "finish" | "abort"; token: string };
+
+export type AudioTransferReply = { error?: string; token?: string; path?: string; ok?: boolean };
+
 export type PluginEvent =
+  | { type: "track-selected"; track: string }
   | { type: "project-state"; project: StudioProject }
   | { type: "audio-settings-state"; state: AudioSettingsState }
   | { type: "voice-training-state"; state: VoiceTrainingState }
@@ -275,4 +302,5 @@ export interface PluginBridge {
 
 export interface NativePluginHost {
   postMessage(message: string): void;
+  transferAudio?(request: AudioTransferRequest): Promise<AudioTransferReply>;
 }

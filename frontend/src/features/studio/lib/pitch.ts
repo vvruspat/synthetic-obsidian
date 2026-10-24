@@ -1,14 +1,11 @@
 import type { VocalClip } from "@/domain/studio";
 
-export const PITCH_ROWS = 25;
-export const PITCH_TOP = 72;
+export const PITCH_ROWS = 128;
+export const PITCH_TOP = 127;
 export const PITCH_ROW_HEIGHT = 100 / PITCH_ROWS;
 
 const NOTE_NAMES = ["C", "C♯", "D", "D♯", "E", "F", "F♯", "G", "G♯", "A", "A♯", "B"];
 const BLACK_NOTES = new Set([1, 3, 6, 8, 10]);
-
-export const WHITE_KEY_PITCHES = [72, 71, 69, 67, 65, 64, 62, 60, 59, 57, 55, 53, 52, 50, 48];
-export const BLACK_KEY_PITCHES = [70, 68, 66, 63, 61, 58, 56, 54, 51, 49];
 
 export const PIANO_KEYS = Array.from({ length: PITCH_ROWS }, (_, index) => {
   const midi = PITCH_TOP - index;
@@ -31,21 +28,6 @@ export const TONE_RGB: Record<VocalClip["color"], string> = {
 
 export function pitchToTop(pitch: number) {
   return Math.max(0, Math.min(100 - PITCH_ROW_HEIGHT, (PITCH_TOP - pitch) * PITCH_ROW_HEIGHT));
-}
-
-export function getWhiteKeyBounds(index: number) {
-  const pitch = WHITE_KEY_PITCHES[index];
-  const center = pitchToTop(pitch) + PITCH_ROW_HEIGHT / 2;
-  const higherCenter =
-    index > 0 ? pitchToTop(WHITE_KEY_PITCHES[index - 1]) + PITCH_ROW_HEIGHT / 2 : null;
-  const lowerCenter =
-    index < WHITE_KEY_PITCHES.length - 1
-      ? pitchToTop(WHITE_KEY_PITCHES[index + 1]) + PITCH_ROW_HEIGHT / 2
-      : null;
-  const top = higherCenter === null ? 0 : (higherCenter + center) / 2;
-  const bottom = lowerCenter === null ? 100 : (center + lowerCenter) / 2;
-
-  return { top, height: bottom - top };
 }
 
 export function getPitchFill(clip: VocalClip) {

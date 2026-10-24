@@ -2,6 +2,8 @@
 #include "AnnotationJson.h"
 #include "AnnotationValidator.h"
 #include "AlgorithmicPitchPreview.h"
+#include "ArrangementPlayback.h"
+#include "ClipPitchAnalysis.h"
 #include "RuntimeManager.h"
 #include "SashaNoteAnalysis.h"
 #if JUCE_MAC
@@ -22,6 +24,7 @@
 #include <map>
 #include <memory>
 #include <vector>
+#include <utility>
 
 namespace vocal_annotation
 {
@@ -1158,6 +1161,11 @@ public:
         setWantsKeyboardFocus(true);
         setSize(1280, 720);
         resetHistory();
+        arrangementPlayback_.onReady = [this](const juce::String& error)
+        {
+            if (error.isNotEmpty()) setStatus(error);
+            sendWebProjectState();
+        };
         updatePlaybackNotes();
         startTimerHz(30);
         const auto savedAudioSettings = loadAudioDeviceSettings();
@@ -1199,6 +1207,7 @@ public:
     void prepareToPlay(int samplesPerBlockExpected, double sampleRate) override
     {
         audioSampleRate_.store(sampleRate);
+        arrangementPlayback_.prepare(sampleRate);
         for (auto& peak : outputPeakLevels_)
             peak.store(0.0f, std::memory_order_relaxed);
         leadAudioMixBuffer_.setSize(2, samplesPerBlockExpected, false, false, true);
@@ -1292,48 +1301,8 @@ public:
 
     void getNextAudioBlock(const juce::AudioSourceChannelInfo& bufferToFill) override
     {
-        const auto playheadStart = currentTransportPosition();
         bufferToFill.clearActiveBufferRegion();
-
-        if (readerSource_ != nullptr)
-        {
-            const auto channels = bufferToFill.buffer != nullptr ? bufferToFill.buffer->getNumChannels() : 0;
-            if (leadAudioMixBuffer_.getNumChannels() >= channels && leadAudioMixBuffer_.getNumSamples() >= bufferToFill.numSamples)
-            {
-                leadAudioMixBuffer_.clear();
-                juce::AudioSourceChannelInfo leadInfo(&leadAudioMixBuffer_, 0, bufferToFill.numSamples);
-                transport_.getNextAudioBlock(leadInfo);
-                applyLeadClipGains(leadAudioMixBuffer_, bufferToFill.numSamples, playheadStart);
-
-                const auto anySolo = instrumentalSolo_.load()
-                    || leadSolo_.load()
-                    || anyBackingTrackSoloed();
-                const auto leadAudible = ! leadAudioMuted_.load()
-                    && (anySolo ? leadSolo_.load() : ! leadMuted_.load());
-
-                if (leadAudible && bufferToFill.buffer != nullptr)
-                {
-                    for (int channel = 0; channel < channels; ++channel)
-                        bufferToFill.buffer->addFrom(channel,
-                                                     bufferToFill.startSample,
-                                                     leadAudioMixBuffer_,
-                                                     channel,
-                                                     0,
-                                                     bufferToFill.numSamples);
-                }
-            }
-            else
-            {
-                transport_.getNextAudioBlock(bufferToFill);
-                bufferToFill.clearActiveBufferRegion();
-            }
-        }
-
-        if (isPlaybackRunning())
-            renderTimelineNotes(bufferToFill, playheadStart);
-
-        mixInstrumentalTrack(bufferToFill);
-        mixBackingAudioTracks(bufferToFill);
+        arrangementPlayback_.process(bufferToFill);
 
         renderClickedNoteTone(bufferToFill);
 
@@ -1969,29 +1938,9 @@ private:
             requestWaveformData(WaveformTrack::backing, document_.backingAudioFile);
     }
 
-    bool isPlaybackRunning() const
-    {
-        return transport_.isPlaying()
-            || instrumentalTransport_.isPlaying()
-            || anyBackingAudioTransportPlaying();
-    }
-
-    double currentTransportPosition() const
-    {
-        if (readerSource_ != nullptr)
-            return transport_.getCurrentPosition();
-        if (instrumentalReaderSource_ != nullptr)
-            return instrumentalTransport_.getCurrentPosition();
-        for (size_t index = 0; index < kMaxBackingTracks; ++index)
-            if (backingAudioReaderSources_[index] != nullptr)
-                return backingAudioTransports_[index].getCurrentPosition();
-        return 0.0;
-    }
-
-    double timelineDuration() const
-    {
-        return juce::jmax(1.0, document_.duration);
-    }
+    bool isPlaybackRunning() const { return arrangementPlayback_.isPlaying(); }
+    double currentTransportPosition() const { return arrangementPlayback_.position(); }
+    double timelineDuration() const { return arrangement::duration(document_); }
 
     double normalisedTimelinePosition(double seconds) const
     {
@@ -2000,6 +1949,7 @@ private:
 
     void setTransportPosition(double seconds)
     {
+        arrangementPlayback_.seek(seconds);
         const auto clamped = juce::jlimit(0.0, juce::jmax(0.0, document_.duration), seconds);
         transport_.setPosition(clamped);
         instrumentalTransport_.setPosition(clamped);
@@ -2009,6 +1959,7 @@ private:
 
     void stopPlayback()
     {
+        arrangementPlayback_.setPlaying(false);
         transport_.stop();
         instrumentalTransport_.stop();
         stopBackingAudioTransports();
@@ -2026,7 +1977,7 @@ private:
         event->setProperty("message", statusLabel_.getText());
         event->setProperty(
             "vocalAnalysisRunning",
-            analysisRunning_ || aiPartsAnalysisRunning_ || analyzeAfterAiParts_);
+            analysisRunning_ || aiPartsAnalysisRunning_ || analyzeAfterAiParts_ || arrangementImportRunning_ || preparingBackingSource_);
         event->setProperty(
             "instrumentalAnalysisRunning",
             musicalContextAnalysisRunning_);
@@ -3462,14 +3413,57 @@ private:
         syncActiveBackingTrackNotes(trackName);
     }
 
+    void scheduleArrangementPitchPreview(const juce::String& trackId)
+    {
+        const auto revision = ++backingPitchPreviewRevisions_[trackId];
+        const auto* track = arrangement::findTrack(document_, trackId);
+        if (track == nullptr) return;
+        std::vector<AlgorithmicPitchCorrection> corrections;
+        for (const auto& note : arrangement::notes(std::as_const(document_), trackId))
+        {
+            if (note.sourcePitchExact < 0.0 || std::abs(note.pitchExact - note.sourcePitchExact) < 0.02) continue;
+            corrections.push_back({ note.start, note.end, static_cast<float>(std::pow(2.0,
+                juce::jlimit(-12.0, 12.0, note.pitchExact - note.sourcePitchExact) / 12.0)) });
+        }
+        if (corrections.empty())
+        {
+            if (const auto previous = backingPitchPreviewFiles_.find(trackId); previous != backingPitchPreviewFiles_.end())
+            { previous->second.deleteFile(); backingPitchPreviewFiles_.erase(previous); }
+            updatePlaybackNotes();
+            return;
+        }
+        auto snapshot = document_;
+        for (auto& note : arrangement::notes(snapshot, trackId)) note.gainDb = 0.0;
+        const auto source = juce::File::getSpecialLocation(juce::File::tempDirectory)
+            .getNonexistentChildFile("obsidian_pitch_source", ".wav");
+        const auto output = juce::File::getSpecialLocation(juce::File::tempDirectory)
+            .getNonexistentChildFile("obsidian_pitch_preview", ".wav");
+        juce::WeakReference<MainComponent> safeThis(this);
+        juce::Thread::launch([safeThis, snapshot, trackId, revision, corrections, source, output]
+        {
+            auto result = ArrangementPlayback::renderTrack(snapshot, trackId, source);
+            if (result.wasOk()) result = AlgorithmicPitchPreview::render(source, output, corrections);
+            source.deleteFile();
+            juce::MessageManager::callAsync([safeThis, trackId, revision, result, output]
+            {
+                if (safeThis == nullptr) { output.deleteFile(); return; }
+                if (safeThis->backingPitchPreviewRevisions_[trackId] != revision
+                    || arrangement::findTrack(safeThis->document_, trackId) == nullptr)
+                { output.deleteFile(); return; }
+                if (result.failed()) { output.deleteFile(); safeThis->setStatus(result.getErrorMessage()); return; }
+                if (auto previous = safeThis->backingPitchPreviewFiles_.find(trackId); previous != safeThis->backingPitchPreviewFiles_.end())
+                    previous->second.deleteFile();
+                safeThis->backingPitchPreviewFiles_[trackId] = output;
+                safeThis->updatePlaybackNotes();
+            });
+        });
+    }
+
     void finishPitchTrackEdit(const juce::String& trackName)
     {
         syncActiveBackingTrackNotes(trackName);
         markChanged();
-        if (trackName == "Voice Main")
-            scheduleLeadPitchPreview();
-        else
-            scheduleBackingPitchPreview(trackName);
+        scheduleArrangementPitchPreview(trackName);
     }
 
     void undoPitchTrack(const juce::String& trackName)
@@ -3499,6 +3493,9 @@ private:
     void clearPitchTrackHistory(const juce::String& trackName)
     {
         pitchTrackHistories_.erase(trackName);
+        ++backingPitchPreviewRevisions_[trackName];
+        if (auto preview = backingPitchPreviewFiles_.find(trackName); preview != backingPitchPreviewFiles_.end())
+        { preview->second.deleteFile(); backingPitchPreviewFiles_.erase(preview); }
     }
 
     bool hasPitchTrackUndo(const juce::String& trackName) const
@@ -4294,7 +4291,30 @@ private:
             voiceProfileValues.add(value);
         }
 
+        trackStates.clear();
+        trackLayerState.clear();
+        auto arrangementTracks = arrangement::toJson(document_, juce::File());
+        if (auto* values = arrangementTracks.getArray())
+            for (auto& value : *values)
+            {
+                const auto* track = arrangement::findTrack(document_, value["id"].toString());
+                if (track == nullptr) continue;
+                addTrackState(track->id, track->muted, track->solo);
+                addTrackLayerState(track->id, track->audioMuted, track->notesMuted);
+                if (auto* clipsValue = value.getDynamicObject()->getProperty("clips").getArray())
+                    for (int i = 0; i < clipsValue->size(); ++i)
+                    {
+                        auto* clip = clipsValue->getReference(i).getDynamicObject();
+                        clip->setProperty("waveform", arrangementPlayback_.waveform(track->clips[static_cast<size_t>(i)].audioFile));
+                        clip->removeProperty("audio");
+                    }
+            }
         auto* project = new juce::DynamicObject();
+        project->setProperty("tracks", arrangementTracks);
+        for (auto& value : backingTrackContents)
+            if (const auto* track = arrangement::findTrack(document_, value["id"].toString()))
+                value.getDynamicObject()->setProperty("hasAudio", std::any_of(track->clips.begin(), track->clips.end(),
+                    [](const auto& clip) { return clip.audioFile.existsAsFile(); }));
         project->setProperty("tempo", document_.bpm);
         project->setProperty("meter", meter);
         project->setProperty("hasInstrumental", document_.instrumentalFile.existsAsFile());
@@ -4875,6 +4895,325 @@ private:
         return false;
     }
 
+    void analyzeArrangementTrack(const juce::String& trackId, bool enrichPitch)
+    {
+        const auto* track = arrangement::findTrack(document_, trackId);
+        if (track == nullptr || track->clips.empty() || projectHasBackgroundWork()) return;
+        if (std::none_of(track->clips.begin(), track->clips.end(), [](const auto& clip) { return clip.audioFile.existsAsFile(); }))
+        { setStatus("Import or render audio on this track before analysis."); return; }
+        const auto clips = track->clips;
+        const auto existingNotes = arrangement::notes(std::as_const(document_), trackId);
+        const auto revision = documentRevision_;
+        const auto model = RuntimeManager::noteBoundaryModelFile();
+        const auto sibilants = RuntimeManager::sibilantModelFile();
+        const auto cancelled = noteAnalysisCancelled_;
+        const auto analyzer = sashaNoteAnalysis_;
+        arrangementImportRunning_ = true;
+        setStatus("Analyzing clips on " + track->name + "...");
+        juce::WeakReference<MainComponent> safeThis(this);
+        juce::Thread::launch([safeThis, trackId, clips, existingNotes, enrichPitch, revision, model, sibilants, cancelled, analyzer]
+        {
+            std::vector<NoteBlock> resultNotes;
+            juce::String error, warning;
+            for (const auto& clip : clips)
+            {
+                if (cancelled->load()) return;
+                try
+                {
+                    if (! clip.audioFile.existsAsFile())
+                    {
+                        for (const auto& note : existingNotes)
+                            if (note.clipId == clip.id) resultNotes.push_back(note);
+                        continue;
+                    }
+                    std::vector<NoteBlock> clipNotes;
+                    const auto preserveParts = enrichPitch && ! existingNotes.empty();
+                    if (preserveParts)
+                    {
+                        for (auto note : existingNotes)
+                            if (note.clipId == clip.id)
+                            {
+                                arrangement::shiftNote(note, clip.offset - clip.start);
+                                clipNotes.push_back(std::move(note));
+                            }
+                    }
+                    else
+                    {
+                        auto draft = analyzer->analyze(clip.audioFile, model, *cancelled, sibilants);
+                        if (! draft.succeeded) { error = draft.error; break; }
+                        clipNotes = std::move(draft.notes);
+                        if (draft.warning.isNotEmpty()) warning = draft.warning;
+                    }
+                    if (enrichPitch)
+                    {
+                        const auto pitchResult = enrichClipPitch(clip, clipNotes, *cancelled);
+                        if (pitchResult.failed()) warning = pitchResult.getErrorMessage() + " Existing pitch retained.";
+                    }
+                    for (auto note : clipNotes)
+                    {
+                        if (note.end <= clip.offset || note.start >= clip.offset + clip.duration) continue;
+                        note.start = juce::jmax(note.start, clip.offset);
+                        note.end = juce::jmin(note.end, clip.offset + clip.duration);
+                        if (! preserveParts) note.id = clip.id + ":" + note.id;
+                        note.clipId = clip.id;
+                        note.sourcePitchExact = note.pitchExact;
+                        arrangement::shiftNote(note, clip.start - clip.offset);
+                        resultNotes.push_back(std::move(note));
+                    }
+                }
+                catch (const std::exception& exception) { error = exception.what(); break; }
+            }
+            juce::MessageManager::callAsync([safeThis, trackId, revision, error, warning, analyzedNotes = std::move(resultNotes)]() mutable
+            {
+                if (safeThis == nullptr) return;
+                safeThis->arrangementImportRunning_ = false;
+                if (error.isNotEmpty() || revision != safeThis->documentRevision_)
+                { safeThis->setStatus(error.isNotEmpty() ? error : "Track changed during analysis; result discarded."); return; }
+                safeThis->beginUndoableAction();
+                arrangement::notes(safeThis->document_, trackId) = std::move(analyzedNotes);
+                safeThis->clearPitchTrackHistory(trackId);
+                safeThis->markChanged();
+                safeThis->setStatus("Clip analysis complete." + (warning.isNotEmpty() ? " " + warning : ""));
+            });
+        });
+    }
+
+    void appendArrangementTrack(const juce::String& id, const juce::String& name)
+    {
+        ArrangementTrack track;
+        track.id = id;
+        track.name = name;
+        track.notesMuted = true;
+        BackingVocalTrack content;
+        content.id = id;
+        content.styleName = name;
+        document_.backingTracks.push_back(std::move(content));
+        document_.tracks.push_back(std::move(track));
+    }
+
+    void selectArrangementTrack(const juce::String& id)
+    {
+        selectedWebTrack_ = id;
+        auto* event = new juce::DynamicObject();
+        event->setProperty("type", "track-selected");
+        event->setProperty("track", id);
+        webView_.dispatch(event);
+    }
+
+    void importArrangementAudio(const juce::String& trackId)
+    {
+        if (arrangementImportRunning_ || projectHasBackgroundWork() || preparingBackingSource_)
+        {
+            setStatus("Wait for the current operation before importing clips.");
+            return;
+        }
+        const auto start = currentTransportPosition();
+        chooser_ = std::make_unique<juce::FileChooser>("Import audio files", juce::File(), "*.wav;*.aif;*.aiff;*.flac;*.mp3;*.ogg");
+        juce::WeakReference<MainComponent> safeThis(this);
+        chooser_->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles
+                             | juce::FileBrowserComponent::canSelectMultipleItems,
+            [safeThis, trackId, start](const juce::FileChooser& chooser)
+            {
+                if (safeThis != nullptr && ! chooser.getResults().isEmpty())
+                    safeThis->importArrangementFiles(chooser.getResults(), trackId, start);
+            });
+    }
+
+    void importArrangementFiles(const juce::Array<juce::File>& files, juce::String trackId, double start)
+    {
+        if (arrangementImportRunning_ || projectHasBackgroundWork() || preparingBackingSource_)
+        { setStatus("Wait for the current operation before importing clips."); return; }
+        if (files.isEmpty() || ! std::isfinite(start) || start < 0.0) return;
+        if (const auto* target = arrangement::findTrack(document_, trackId);
+            target != nullptr && target->parentId.isNotEmpty())
+            trackId.clear();
+        const auto createTrack = arrangement::findTrack(document_, trackId) == nullptr;
+        if (createTrack) trackId = "audio-" + juce::Uuid().toString();
+        arrangementImportRunning_ = true;
+        setStatus("Importing and analyzing audio clips...");
+        const auto model = RuntimeManager::noteBoundaryModelFile();
+        const auto sibilants = RuntimeManager::sibilantModelFile();
+        const auto cancelled = noteAnalysisCancelled_;
+        juce::WeakReference<MainComponent> safeThis(this);
+        juce::Thread::launch([safeThis, trackId, createTrack, files, start, model, sibilants, cancelled]() mutable
+        {
+            std::vector<ArrangementClip> clips;
+            std::vector<NoteBlock> importedNotes;
+            juce::String error;
+            juce::AudioFormatManager formats;
+            formats.registerBasicFormats();
+            SashaNoteAnalysis analyzer;
+            for (const auto& file : files)
+            {
+                if (cancelled->load()) return;
+                std::unique_ptr<juce::AudioFormatReader> reader(formats.createReaderFor(file));
+                if (reader == nullptr || reader->sampleRate <= 0.0 || reader->lengthInSamples <= 0)
+                { error = "Could not read " + file.getFileName(); continue; }
+                ArrangementClip clip { "clip-" + juce::Uuid().toString(), file.getFileNameWithoutExtension(),
+                    file, start, 0.0, static_cast<double>(reader->lengthInSamples) / reader->sampleRate };
+                if (trackId != "Instrumental")
+                {
+                    AnnotationDocument annotation;
+                    const auto sidecar = file.withFileExtension(".annotation.json");
+                    if (! sidecar.existsAsFile() || AnnotationJson::load(sidecar, annotation).failed())
+                    {
+                        try
+                        {
+                            auto draft = analyzer.analyze(file, model, *cancelled, sibilants);
+                            annotation.notes = std::move(draft.notes);
+                            if (! draft.succeeded) error = "Audio imported; note analysis: " + draft.error;
+                        }
+                        catch (const std::exception& exception) { error = exception.what(); }
+                    }
+                    for (auto note : annotation.notes)
+                    {
+                        note.id = clip.id + ":" + note.id;
+                        note.clipId = clip.id;
+                        arrangement::shiftNote(note, start);
+                        importedNotes.push_back(std::move(note));
+                    }
+                }
+                start += clip.duration;
+                clips.push_back(std::move(clip));
+            }
+            juce::MessageManager::callAsync([safeThis, trackId, createTrack, readyClips = std::move(clips),
+                                            readyNotes = std::move(importedNotes), error]() mutable
+            {
+                if (safeThis == nullptr) return;
+                safeThis->arrangementImportRunning_ = false;
+                if (readyClips.empty())
+                { safeThis->setStatus(error.isNotEmpty() ? error : "No audio files imported."); return; }
+                auto* track = arrangement::findTrack(safeThis->document_, trackId);
+                if (track == nullptr && ! createTrack) return;
+                safeThis->beginUndoableAction();
+                if (track == nullptr)
+                {
+                    safeThis->appendArrangementTrack(trackId, readyClips.front().name);
+                    track = arrangement::findTrack(safeThis->document_, trackId);
+                }
+                for (auto& clip : readyClips) track->clips.push_back(std::move(clip));
+                auto& notes = arrangement::notes(safeThis->document_, trackId);
+                notes.insert(notes.end(), readyNotes.begin(), readyNotes.end());
+                if (trackId == "Voice Main" && ! track->clips.empty())
+                    safeThis->document_.audioFile = track->clips.front().audioFile;
+                if (trackId == "Instrumental" && ! track->clips.empty())
+                    safeThis->document_.instrumentalFile = track->clips.front().audioFile;
+                safeThis->clearPitchTrackHistory(trackId);
+                safeThis->markChanged();
+                safeThis->scheduleArrangementPitchPreview(trackId);
+                safeThis->selectArrangementTrack(trackId);
+                safeThis->setStatus(error.isEmpty() ? "Audio clips imported." : error);
+                if (trackId == "Instrumental") safeThis->runMusicalContextAnalysis();
+            });
+        });
+    }
+
+    bool handleArrangementCommand(juce::DynamicObject& root, const juce::String& type)
+    {
+        const auto isEdit = type == "add-track" || type == "remove-track" || type == "import-track-audio"
+            || type == "import-audio" || type == "import-dropped-audio"
+            || type == "move-arrangement-clip" || type == "remove-arrangement-clip";
+        if (isEdit && (projectHasBackgroundWork() || arrangementImportRunning_ || preparingBackingSource_))
+        {
+            setStatus("Wait for the current operation before changing the arrangement.");
+            sendWebProjectState();
+            return true;
+        }
+        if (type == "add-track")
+        {
+            beginUndoableAction();
+            const auto trackId = "audio-" + juce::Uuid().toString();
+            appendArrangementTrack(trackId, "Audio " + juce::String(static_cast<int>(document_.tracks.size()) + 1));
+            markChanged();
+            selectArrangementTrack(trackId);
+            return true;
+        }
+        const auto id = root.getProperty("track").toString();
+        auto* track = arrangement::findTrack(document_, id);
+        if (type == "import-track-audio" || type == "import-audio")
+        { importArrangementAudio(id); return true; }
+        if (type == "import-dropped-audio")
+        {
+            juce::Array<juce::File> files;
+            if (const auto* paths = root.getProperty("files").getArray())
+                for (const auto& path : *paths)
+                    if (juce::File::isAbsolutePath(path.toString())) files.add(juce::File(path.toString()));
+            importArrangementFiles(files, id, static_cast<double>(root.getProperty("start")));
+            return true;
+        }
+        if (type == "set-track-collapsed")
+        {
+            if (track != nullptr)
+            {
+                track->collapsed = root.getProperty("collapsed");
+                ++arrangementViewRevision_;
+                dirty_ = true;
+                lastDirtyTimeMs_ = juce::Time::getMillisecondCounterHiRes();
+                sendWebProjectState();
+            }
+            return true;
+        }
+        if (type == "set-track-state" || type == "set-track-layer-state")
+        {
+            if (track == nullptr) return true;
+            const auto state = root.getProperty("state");
+            if (type == "set-track-state") { track->muted = state["mute"]; track->solo = state["solo"]; }
+            else { track->audioMuted = state["audioMuted"]; track->notesMuted = state["notesMuted"]; }
+            ++arrangementViewRevision_;
+            dirty_ = true;
+            lastDirtyTimeMs_ = juce::Time::getMillisecondCounterHiRes();
+            updatePlaybackNotes();
+            sendWebProjectState();
+            return true;
+        }
+        if (type == "remove-track")
+        {
+            if (id == "Instrumental") return true;
+            beginUndoableAction();
+            if (arrangement::removeTrack(document_, id))
+            {
+                pitchTrackHistories_.clear();
+                for (auto& [key, revision] : backingPitchPreviewRevisions_)
+                { juce::ignoreUnused(key); ++revision; }
+                for (const auto& [key, file] : backingPitchPreviewFiles_)
+                { juce::ignoreUnused(key); file.deleteFile(); }
+                backingPitchPreviewFiles_.clear();
+                if (findBackingTrackById(activeBackingTrackId_) == nullptr)
+                {
+                    activeBackingTrackId_.clear();
+                    document_.backingNotes.clear();
+                    document_.backingAudioFile = juce::File();
+                    document_.backingStyleId.clear();
+                    document_.backingStyleName.clear();
+                }
+                selectedWebTrack_.clear();
+                markChanged();
+            }
+            return true;
+        }
+        if (type == "move-arrangement-clip" || type == "remove-arrangement-clip")
+        {
+            beginUndoableAction();
+            const auto clipId = root.getProperty("clipId").toString();
+            const auto changed = type == "move-arrangement-clip"
+                ? arrangement::moveClip(document_, id, clipId, root.getProperty("targetTrack").toString(),
+                                        static_cast<double>(root.getProperty("start")))
+                : arrangement::removeClip(document_, id, clipId);
+            if (changed)
+            {
+                clearPitchTrackHistory(id);
+                clearPitchTrackHistory(root.getProperty("targetTrack").toString());
+                markChanged();
+                scheduleArrangementPitchPreview(id);
+                if (type == "move-arrangement-clip" && root.getProperty("targetTrack").toString() != id)
+                    scheduleArrangementPitchPreview(root.getProperty("targetTrack").toString());
+            }
+            else sendWebProjectState();
+            return true;
+        }
+        return false;
+    }
+
     void handleWebCommand(const juce::var& command)
     {
         auto* root = command.getDynamicObject();
@@ -4882,6 +5221,7 @@ private:
             return;
 
         const auto type = root->getProperty("type").toString();
+        if (handleArrangementCommand(*root, type)) return;
         if (type == "frontend-ready")
         {
             webFrontendReady_ = true;
@@ -4904,6 +5244,16 @@ private:
 
         if (type == "project-action")
         {
+            const auto action = root->getProperty("action").toString();
+            if (action == "analyze" || action == "ai-parts")
+            { analyzeArrangementTrack(selectedWebTrack_, action == "analyze"); return; }
+            if (action == "open-audio" || action == "open-instrumental")
+            {
+                importArrangementAudio(action == "open-instrumental" ? "Instrumental" : "Voice Main");
+                return;
+            }
+            if ((arrangementImportRunning_ || preparingBackingSource_) && (action == "new-project" || action == "open-project"))
+            { setStatus("Wait for the current import to finish."); return; }
             handleProjectAction(root->getProperty("action").toString());
             return;
         }
@@ -4988,6 +5338,7 @@ private:
                 lastDirtyTimeMs_ = juce::Time::getMillisecondCounterHiRes();
                 updateInfoText();
             }
+            updatePlaybackNotes();
             sendWebInstrumentalVolumeState();
             return;
         }
@@ -5094,7 +5445,7 @@ private:
                 const auto track = tracks->getFirst().toString();
                 selectedWebTrack_ = track;
                 if (track != "Instrumental" && track != "Voice Main")
-                    selectBackingTrackForEditing(track);
+                    if (auto* content = findBackingTrackById(track)) makeBackingTrackActive(*content);
             }
             else
             {
@@ -5116,13 +5467,10 @@ private:
 
         if (type == "add-backing-track")
         {
+            requestedBackingParent_ = root->getProperty("parentId").toString();
+            if (requestedBackingParent_.isEmpty()) requestedBackingParent_ = "Voice Main";
             const auto requestedTrack = root->getProperty("track").toString();
             const auto requestedGenerator = root->getProperty("generator").toString();
-            if (document_.backingTracks.size() >= kMaxBackingTracks)
-            {
-                setStatus("The project already has the maximum number of backing tracks.");
-                return;
-            }
             for (size_t i = 0; i < kBackingStyles.size(); ++i)
             {
                 if (requestedTrack == kBackingStyles[i].name)
@@ -5154,7 +5502,7 @@ private:
 
         if (type == "set-backing-voice-profile")
         {
-            if (backingAudioRenderRunning_)
+            if (projectHasBackgroundWork())
                 return;
 
             const auto trackId = root->getProperty("track").toString();
@@ -5182,7 +5530,9 @@ private:
             beginUndoableAction();
             backingTrack->voiceProfileId = profileId;
             markChanged();
-            setStatus("Voice for " + backingTrackDisplayName(*backingTrack) + ": " + profile->name + ".");
+            makeBackingTrackActive(*backingTrack);
+            ++backingPitchPreviewRevisions_[trackId];
+            runBackingAudioRender();
             return;
         }
 
@@ -5307,7 +5657,9 @@ private:
         pitchTrackHistories_.clear();
         ++leadPitchPreviewRevision_;
         restoreOriginalLeadAudio();
-        backingPitchPreviewRevisions_.clear();
+        // A worker from the previous project must never match a reused revision.
+        for (auto& [trackId, revision] : backingPitchPreviewRevisions_)
+        { juce::ignoreUnused(trackId); ++revision; }
         for (const auto& [trackName, previewFile] : backingPitchPreviewFiles_)
         {
             juce::ignoreUnused(trackName);
@@ -5320,6 +5672,14 @@ private:
 
     void updatePlaybackNotes()
     {
+        arrangement::migrate(document_);
+        arrangement::assignClipIds(document_);
+        auto playbackDocument = document_;
+        playbackDocument.notes = audibleLeadNoteFragments(document_.notes, document_.regions);
+        for (auto& track : playbackDocument.tracks)
+            if (const auto preview = backingPitchPreviewFiles_.find(track.id); preview != backingPitchPreviewFiles_.end())
+                track.clips = { { "pitch-preview", track.name, preview->second, 0.0, 0.0, timelineDuration() } };
+        arrangementPlayback_.request(playbackDocument);
         auto& state = noteStates_[static_cast<size_t>(writeNoteStateIndex_)];
         state.count = 0;
         const auto addNote = [&state](const NoteBlock& note, int backingTrackIndex)
@@ -5482,6 +5842,10 @@ private:
     void finishHistoryRestore()
     {
         ++documentRevision_;
+        pitchTrackHistories_.clear();
+        for (auto& [id, revision] : backingPitchPreviewRevisions_) { juce::ignoreUnused(id); ++revision; }
+        for (const auto& [id, file] : backingPitchPreviewFiles_) { juce::ignoreUnused(id); file.deleteFile(); }
+        backingPitchPreviewFiles_.clear();
         undoButton_.setEnabled(! undoStack_.empty());
         redoButton_.setEnabled(! redoStack_.empty());
         dirty_ = true;
@@ -5510,6 +5874,7 @@ private:
         updatePlaybackNotes();
         syncInspector();
         setStatus("History restored.");
+        for (const auto& track : document_.tracks) scheduleArrangementPitchPreview(track.id);
     }
 
     void clearInstrumentalTrack()
@@ -5525,9 +5890,7 @@ private:
         const auto trackIndex = activeBackingTrackIndex_.load(std::memory_order_relaxed);
         if (trackIndex >= 0 && trackIndex < static_cast<int>(kMaxBackingTracks))
         {
-            deviceManager.closeAudioDevice();
             clearBackingAudioTransport(static_cast<size_t>(trackIndex));
-            deviceManager.restartLastAudioDevice();
         }
         requestWaveformData(WaveformTrack::backing, {});
         editor_.setBackingAudioFile({});
@@ -5543,34 +5906,30 @@ private:
 
     void clearAllBackingAudioTransports()
     {
-        deviceManager.closeAudioDevice();
         for (size_t index = 0; index < kMaxBackingTracks; ++index)
             clearBackingAudioTransport(index);
-        deviceManager.restartLastAudioDevice();
     }
 
     void configureTransportForFile(const juce::File& file)
     {
+        // These readers serve the legacy editor. ArrangementPlayback owns output,
+        // so replacing a reader must not tear down the active audio device.
         std::unique_ptr<juce::AudioFormatReader> reader(formatManager_.createReaderFor(file));
         if (reader == nullptr)
         {
-            deviceManager.closeAudioDevice();
             transport_.stop();
             transport_.setSource(nullptr);
             readerSource_.reset();
-            deviceManager.restartLastAudioDevice();
             return;
         }
 
         const auto sampleRate = reader->sampleRate;
         auto nextReaderSource = std::make_unique<juce::AudioFormatReaderSource>(reader.release(), true);
 
-        deviceManager.closeAudioDevice();
         transport_.stop();
         transport_.setSource(nullptr);
         readerSource_ = std::move(nextReaderSource);
         transport_.setSource(readerSource_.get(), 0, nullptr, sampleRate);
-        deviceManager.restartLastAudioDevice();
         playButton_.setButtonText("Play");
     }
 
@@ -5579,23 +5938,19 @@ private:
         std::unique_ptr<juce::AudioFormatReader> reader(formatManager_.createReaderFor(file));
         if (reader == nullptr)
         {
-            deviceManager.closeAudioDevice();
             instrumentalTransport_.stop();
             instrumentalTransport_.setSource(nullptr);
             instrumentalReaderSource_.reset();
-            deviceManager.restartLastAudioDevice();
             return;
         }
 
         const auto sampleRate = reader->sampleRate;
         auto nextReaderSource = std::make_unique<juce::AudioFormatReaderSource>(reader.release(), true);
 
-        deviceManager.closeAudioDevice();
         instrumentalTransport_.stop();
         instrumentalTransport_.setSource(nullptr);
         instrumentalReaderSource_ = std::move(nextReaderSource);
         instrumentalTransport_.setSource(instrumentalReaderSource_.get(), 0, nullptr, sampleRate);
-        deviceManager.restartLastAudioDevice();
     }
 
     void configureBackingAudioTransportForFile(const juce::File& file)
@@ -5610,16 +5965,13 @@ private:
         std::unique_ptr<juce::AudioFormatReader> reader(formatManager_.createReaderFor(file));
         if (reader == nullptr)
         {
-            deviceManager.closeAudioDevice();
             clearBackingAudioTransport(static_cast<size_t>(activeTrackIndex));
-            deviceManager.restartLastAudioDevice();
             return;
         }
 
         const auto sampleRate = reader->sampleRate;
         auto nextReaderSource = std::make_unique<juce::AudioFormatReaderSource>(reader.release(), true);
 
-        deviceManager.closeAudioDevice();
         const auto index = static_cast<size_t>(activeTrackIndex);
         clearBackingAudioTransport(index);
         backingAudioReaderSources_[index] = std::move(nextReaderSource);
@@ -5630,7 +5982,6 @@ private:
             sampleRate);
         backingAudioTransportFiles_[index] = file;
         backingAudioTransports_[index].setPosition(position);
-        deviceManager.restartLastAudioDevice();
         if (shouldResume)
             backingAudioTransports_[index].start();
     }
@@ -5673,7 +6024,6 @@ private:
 
         const auto position = currentTransportPosition();
         const auto shouldResume = isPlaybackRunning();
-        deviceManager.closeAudioDevice();
         for (size_t index = 0; index < kMaxBackingTracks; ++index)
         {
             clearBackingAudioTransport(index);
@@ -5689,7 +6039,6 @@ private:
             backingAudioTransportFiles_[index] = sourceFiles[index];
             backingAudioTransports_[index].setPosition(position);
         }
-        deviceManager.restartLastAudioDevice();
         if (shouldResume)
             startBackingAudioTransports();
     }
@@ -5732,48 +6081,31 @@ private:
 
     void togglePlayback()
     {
-        if (readerSource_ == nullptr
-            && instrumentalReaderSource_ == nullptr
-            && ! hasBackingAudioSource())
-        {
-            setStatus("Open an audio file before playback.");
-            return;
-        }
-
-        if (transport_.isPlaying()
-            || instrumentalTransport_.isPlaying()
-            || anyBackingAudioTransportPlaying())
-        {
-            transport_.stop();
-            instrumentalTransport_.stop();
-            stopBackingAudioTransports();
-            loopAuditionActive_ = false;
-            playButton_.setButtonText("Play");
-        }
+        if (isPlaybackRunning()) stopPlayback();
         else
         {
-            loopAuditionActive_ = false;
-            auto startPosition = currentTransportPosition();
-            if (startPosition >= juce::jmax(0.0, document_.duration - 0.01))
-                startPosition = 0.0;
-
-            transport_.setPosition(startPosition);
-            instrumentalTransport_.setPosition(startPosition);
-            setBackingAudioTransportPositions(startPosition);
-
-            // Start secondary transports before the playhead master so they are ready
-            // by the first block in which the UI/audio position starts advancing.
-            startBackingAudioTransports();
-            if (instrumentalReaderSource_ != nullptr)
-                instrumentalTransport_.start();
-            if (readerSource_ != nullptr)
-                transport_.start();
+            auto* device = deviceManager.getCurrentAudioDevice();
+            if (device == nullptr || ! device->isOpen() || ! device->isPlaying())
+            {
+                const auto savedSettings = loadAudioDeviceSettings();
+                audioSettingsError_ = deviceManager.initialise(0, 2, savedSettings.get(), true);
+                device = deviceManager.getCurrentAudioDevice();
+                if (audioSettingsError_.isNotEmpty() || device == nullptr || ! device->isPlaying())
+                {
+                    setStatus("Could not start audio output. " + audioSettingsError_);
+                    sendWebAudioSettingsState();
+                    return;
+                }
+            }
+            if (currentTransportPosition() >= timelineDuration() - 0.01) setTransportPosition(0.0);
+            arrangementPlayback_.setPlaying(true);
             playButton_.setButtonText("Stop");
         }
     }
 
     void auditionNote(const NoteBlock& note)
     {
+        arrangementPlayback_.setPlaying(false);
         loopAuditionActive_ = false;
         if (transport_.isPlaying())
             transport_.stop();
@@ -5827,6 +6159,9 @@ private:
         if (loopEndTime_ - loopStartTime_ < 0.02)
             loopEndTime_ = juce::jmin(document_.duration, loopStartTime_ + 0.02);
         loopAuditionActive_ = true;
+        arrangementPlayback_.seek(loopStartTime_);
+        arrangementPlayback_.setLoop(true, loopStartTime_, loopEndTime_);
+        arrangementPlayback_.setPlaying(true);
         transport_.setPosition(loopStartTime_);
         instrumentalTransport_.setPosition(loopStartTime_);
         setBackingAudioTransportPositions(loopStartTime_);
@@ -5842,18 +6177,10 @@ private:
     void timerCallback() override
     {
         const auto transportPosition = currentTransportPosition();
-        const auto playhead = juce::jlimit(0.0, juce::jmax(0.0, document_.duration), transportPosition);
+        const auto playhead = juce::jlimit(0.0, timelineDuration(), transportPosition);
         editor_.setPlayheadTime(playhead);
 
-        if (isPlaybackRunning() && (loopAuditionActive_ || cycleLoopActive_))
-        {
-            if (playhead >= loopEndTime_ - 0.004)
-                setTransportPosition(loopStartTime_);
-        }
-        else if (isPlaybackRunning() && document_.duration > 0.0 && playhead >= document_.duration - 0.005)
-        {
-            stopPlayback();
-        }
+        arrangementPlayback_.setLoop(loopAuditionActive_ || cycleLoopActive_, loopStartTime_, loopEndTime_);
 
         sendWebTransportState();
         sendWebOutputMeterState();
@@ -5920,9 +6247,9 @@ private:
     void createNewProject()
     {
         stopPlayback();
+        arrangementPlayback_.seek(0.0);
         resetHistory();
 
-        deviceManager.closeAudioDevice();
         transport_.setSource(nullptr);
         instrumentalTransport_.setSource(nullptr);
         for (auto& backingTransport : backingAudioTransports_)
@@ -5934,8 +6261,6 @@ private:
             backingAudioReaderSources_[index].reset();
             backingAudioTransportFiles_[index] = juce::File();
         }
-        deviceManager.restartLastAudioDevice();
-
         document_.clear();
         ++documentRevision_;
         currentJsonFile_ = juce::File();
@@ -7696,7 +8021,11 @@ private:
         if (backingGenerationRunning_ || backingAudioRenderRunning_)
             return;
 
-        if (document_.notes.empty())
+        const auto* targetArrangement = arrangement::findTrack(document_, targetTrackId);
+        const auto parentId = targetArrangement != nullptr ? targetArrangement->parentId : requestedBackingParent_;
+        if (arrangement::findTrack(document_, parentId) == nullptr) return;
+        const auto sourceNotes = arrangement::notes(std::as_const(document_), parentId);
+        if (sourceNotes.empty())
         {
             setStatus("Analyze vocal first: backing generation needs lead melody notes.");
             return;
@@ -7724,11 +8053,6 @@ private:
         if (targetTrackId.isNotEmpty() && backingTrack == nullptr)
         {
             setStatus("Could not regenerate backing vocal: track not found.");
-            return;
-        }
-        if (backingTrack == nullptr && document_.backingTracks.size() >= kMaxBackingTracks)
-        {
-            setStatus("The project already has the maximum number of backing tracks.");
             return;
         }
 
@@ -7811,7 +8135,7 @@ private:
         requestRoot->setProperty("chords", chords);
 
         const auto backingLeadNotes = leadNotesForBackingGeneration(
-            audibleLeadNoteFragments(document_.notes, document_.regions));
+            audibleLeadNoteFragments(sourceNotes, parentId == "Voice Main" ? document_.regions : std::vector<AnnotationRegion> {}));
         juce::Array<juce::var> leadNotes;
         for (const auto& note : backingLeadNotes)
         {
@@ -7857,6 +8181,7 @@ private:
             return;
         }
 
+        beginUndoableAction();
         if (backingTrack == nullptr)
         {
             document_.backingTracks.push_back({
@@ -7873,13 +8198,20 @@ private:
             backingTrack = &document_.backingTracks.back();
         }
         const auto trackId = backingTrack->id;
+        arrangement::syncGeneratedTracks(document_);
+        if (auto* track = arrangement::findTrack(document_, trackId))
+        {
+            track->parentId = parentId;
+            track->name = backingTrackDisplayName(*backingTrack);
+            track->clips.clear();
+        }
+        if (auto* parent = arrangement::findTrack(document_, parentId)) parent->collapsed = false;
         const auto trackDisplayName = backingTrackDisplayName(*backingTrack);
         backingGenerationRunning_ = true;
         backingGenerationTrackName_ = trackId;
         clearPitchTrackHistory(trackId);
         ++backingPitchPreviewRevisions_[trackId];
         addBackingVocalButton_.setEnabled(false);
-        beginUndoableAction();
         backingTrack->notes.clear();
         backingTrack->renderedNotes.clear();
         backingTrack->audioFile = juce::File();
@@ -8062,6 +8394,9 @@ private:
         }
 
         backingTrack->notes = std::move(generatedNotes);
+        if (auto* track = arrangement::findTrack(document_, trackId); track != nullptr && track->clips.empty())
+            track->clips.push_back({ "clip-" + juce::Uuid().toString(), track->name, {}, 0.0, 0.0, timelineDuration() });
+        arrangement::assignClipIds(document_);
         backingTrack->renderedNotes.clear();
         backingTrack->audioFile = juce::File();
         makeBackingTrackActive(*backingTrack);
@@ -8314,19 +8649,52 @@ private:
 
     void finishBackingAudioRender()
     {
+        preparedBackingSource_.deleteFile();
+        preparedBackingSource_ = juce::File();
         backingAudioRenderRunning_ = false;
         backingAudioRenderTrackName_.clear();
         renderBackingAudioButton_.setEnabled(true);
     }
 
-    void runBackingAudioRender()
+    void runBackingAudioRender(const juce::File& sourceAudio = {})
     {
-        if (backingAudioRenderRunning_ || backingGenerationRunning_)
+        if (backingAudioRenderRunning_ || backingGenerationRunning_ || preparingBackingSource_)
             return;
 
-        if (! document_.audioFile.existsAsFile())
+        const auto* arrangementTrack = arrangement::findTrack(document_, activeBackingTrackId_);
+        if (arrangementTrack == nullptr) return;
+        const auto parentId = arrangementTrack->parentId;
+        if (sourceAudio == juce::File())
         {
-            setStatus("Open main vocal audio before rendering backing vocal audio.");
+            preparingBackingSource_ = true;
+            const auto snapshot = document_;
+            const auto revision = documentRevision_;
+            const auto trackId = activeBackingTrackId_;
+            const auto output = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                .getNonexistentChildFile("obsidian_backing_source", ".wav");
+            setStatus("Preparing source track for backing vocals...");
+            juce::WeakReference<MainComponent> safeThis(this);
+            juce::Thread::launch([safeThis, snapshot, revision, trackId, parentId, output]
+            {
+                const auto result = ArrangementPlayback::renderTrack(snapshot, parentId, output);
+                juce::MessageManager::callAsync([safeThis, result, revision, trackId, output]
+                {
+                    if (safeThis == nullptr) { output.deleteFile(); return; }
+                    safeThis->preparingBackingSource_ = false;
+                    if (result.failed() || revision != safeThis->documentRevision_)
+                    {
+                        output.deleteFile();
+                        safeThis->setStatus(result.failed() ? result.getErrorMessage() : "Source changed; render again.");
+                        return;
+                    }
+                    if (auto* track = safeThis->findBackingTrackById(trackId))
+                    {
+                        safeThis->makeBackingTrackActive(*track);
+                        safeThis->preparedBackingSource_ = output;
+                        safeThis->runBackingAudioRender(output);
+                    }
+                });
+            });
             return;
         }
 
@@ -8376,7 +8744,7 @@ private:
                 : activeVoiceAdapterFile_;
 
         auto* root = new juce::DynamicObject();
-        root->setProperty("audio", document_.audioFile.getFullPathName());
+        root->setProperty("audio", sourceAudio.getFullPathName());
         if (! promptSources.empty())
         {
             juce::Array<juce::var> promptCandidates;
@@ -8436,7 +8804,7 @@ private:
         root->setProperty("backing_notes", backingNotes);
 
         juce::Array<juce::var> leadNotes;
-        for (const auto& note : document_.notes)
+        for (const auto& note : arrangement::notes(std::as_const(document_), parentId))
         {
             if (note.end <= note.start)
                 continue;
@@ -8621,7 +8989,11 @@ private:
 
         const auto sourceChangedDuringRender = expectedRevision != documentRevision_;
         if (sourceChangedDuringRender)
-            setStatus("Applied rendered backing audio to the current document; source annotation changed during render.");
+        {
+            outputFile.deleteFile();
+            setStatus("Source changed during render; stale backing audio discarded.");
+            return;
+        }
 
         auto* backingTrack = findBackingTrackById(renderedTrackId);
         if (backingTrack == nullptr)
@@ -8640,6 +9012,15 @@ private:
             backingPitchPreviewFiles_.erase(previousPreview);
         ++backingPitchPreviewRevisions_[renderedTrackId];
         backingTrack->audioFile = outputFile;
+        if (auto* track = arrangement::findTrack(document_, renderedTrackId))
+        {
+            track->clips.clear();
+            track->clips.push_back({ "clip-" + juce::Uuid().toString(), track->name, outputFile, 0.0, 0.0, timelineDuration() });
+            for (auto& note : backingTrack->notes)
+            { note.clipId = track->clips.front().id; note.sourcePitchExact = note.pitchExact; }
+            track->audioMuted = false;
+            track->notesMuted = true;
+        }
         backingTrack->renderedNotes = renderedNotes.empty()
             ? backingTrack->notes
             : std::move(renderedNotes);
@@ -8674,7 +9055,7 @@ private:
             backingTrackIndex(renderedTrackId));
         markChanged();
         if (sourceChangedDuringRender)
-            scheduleBackingPitchPreview(renderedTrackId);
+            scheduleArrangementPitchPreview(renderedTrackId);
         updateInfoText();
 
         auto jsonText = output.trim();
@@ -9211,6 +9592,9 @@ private:
             return false;
         }
 
+        stopPlayback();
+        arrangementPlayback_.seek(0.0);
+        resetHistory();
         if (activeVoiceAdapterFile_.existsAsFile()
             && activeVoiceProfileId_.isNotEmpty())
         {
@@ -9255,6 +9639,7 @@ private:
         updatePlaybackNotes();
         syncInspector();
         resetHistory();
+        for (const auto& track : document_.tracks) scheduleArrangementPitchPreview(track.id);
         updateValidationStatus();
         return true;
     }
@@ -9372,6 +9757,14 @@ private:
             }
         }
 
+        for (auto& track : consolidated.tracks)
+            for (auto& clip : track.clips)
+            {
+                juce::File copied;
+                const auto result = copyProjectAsset(clip.audioFile, audioDirectory.getChildFile("clips"), clip.id, copied);
+                if (result.failed()) return result;
+                clip.audioFile = copied;
+            }
         return AnnotationJson::save(
             consolidated,
             projectDirectory.getChildFile("project.synthetic-obsidian.json"));
@@ -9379,7 +9772,9 @@ private:
 
     bool projectHasBackgroundWork() const
     {
-        return analysisRunning_
+        return arrangementImportRunning_
+            || preparingBackingSource_
+            || analysisRunning_
             || aiPartsAnalysisRunning_
             || musicalContextAnalysisRunning_
             || backingGenerationRunning_
@@ -9397,14 +9792,15 @@ private:
         setStatus("Consolidating project files...");
         const auto snapshot = document_;
         const auto expectedRevision = documentRevision_;
+        const auto expectedViewRevision = arrangementViewRevision_;
         juce::WeakReference<MainComponent> safeThis(this);
 
-        juce::Thread::launch([safeThis, snapshot, expectedRevision, directory]
+        juce::Thread::launch([safeThis, snapshot, expectedRevision, expectedViewRevision, directory]
         {
             auto consolidated = std::make_shared<AnnotationDocument>();
             const auto result = consolidateProject(snapshot, directory, *consolidated);
             juce::MessageManager::callAsync(
-                [safeThis, consolidated, expectedRevision, directory, result]
+                [safeThis, consolidated, expectedRevision, expectedViewRevision, directory, result]
                 {
                     if (safeThis == nullptr)
                         return;
@@ -9419,11 +9815,13 @@ private:
                     safeThis->projectDirectory_ = directory;
                     safeThis->currentJsonFile_ =
                         directory.getChildFile("project.synthetic-obsidian.json");
-                    if (safeThis->documentRevision_ == expectedRevision)
+                    if (safeThis->documentRevision_ == expectedRevision && safeThis->arrangementViewRevision_ == expectedViewRevision)
                     {
                         safeThis->document_ = *consolidated;
                         safeThis->dirty_ = false;
                         safeThis->refreshWaveformData();
+                        safeThis->updatePlaybackNotes();
+                        safeThis->sendWebProjectState();
                         safeThis->updateInfoText();
                         safeThis->setStatus(
                             "Saved consolidated project to "
@@ -9621,76 +10019,40 @@ private:
     void exportAllTracks()
     {
         const auto directory = exportDirectory();
-        if (const auto result = directory.createDirectory(); result.failed())
+        const auto snapshot = document_;
+        setStatus("Exporting arranged audio stems and MIDI...");
+        juce::WeakReference<MainComponent> safeThis(this);
+        juce::Thread::launch([safeThis, snapshot, directory]
         {
-            setStatus(resultMessage("Export all tracks", result));
-            return;
-        }
-
-        int exportedAudioCount = 0;
-        const auto copyAudioTrack =
-            [&directory, &exportedAudioCount](
-                const juce::File& source,
-                const juce::String& stemName) -> juce::Result
-        {
-            if (! source.existsAsFile())
-                return juce::Result::ok();
-
-            const auto target = directory.getChildFile(
-                juce::File::createLegalFileName(stemName)
-                + source.getFileExtension());
-            if (target.existsAsFile() && ! target.deleteFile())
-                return juce::Result::fail("Could not replace " + target.getFileName() + ".");
-            if (! source.copyFileTo(target))
-                return juce::Result::fail("Could not export " + source.getFileName() + ".");
-
-            ++exportedAudioCount;
-            return juce::Result::ok();
-        };
-
-        if (const auto result = copyAudioTrack(document_.instrumentalFile, "instrumental");
-            result.failed())
-        {
-            setStatus(resultMessage("Export all tracks", result));
-            return;
-        }
-        if (const auto result = copyAudioTrack(document_.audioFile, "voice_main");
-            result.failed())
-        {
-            setStatus(resultMessage("Export all tracks", result));
-            return;
-        }
-        for (const auto& track : document_.backingTracks)
-        {
-            if (const auto result = copyAudioTrack(
-                    track.audioFile,
-                    track.styleName.isNotEmpty()
-                        ? backingTrackDisplayName(track)
-                        : "backing_vocal");
-                result.failed())
+            auto result = directory.createDirectory();
+            int audioCount = 0, midiCount = 0;
+            for (const auto& track : snapshot.tracks)
             {
-                setStatus(resultMessage("Export all tracks", result));
-                return;
+                if (result.failed()) break;
+                const auto stem = juce::File::createLegalFileName(track.name + "_" + track.id);
+                if (std::any_of(track.clips.begin(), track.clips.end(), [](const auto& clip) { return clip.audioFile != juce::File(); }))
+                {
+                    result = ArrangementPlayback::renderTrack(snapshot, track.id, directory.getChildFile(stem + ".wav"));
+                    if (result.wasOk()) ++audioCount;
+                }
+                auto midi = snapshot;
+                midi.notes = arrangement::notes(snapshot, track.id);
+                midi.backingNotes.clear();
+                midi.backingTracks.clear();
+                if (result.wasOk() && ! midi.notes.empty())
+                {
+                    result = AnnotationJson::exportMidi(midi, directory.getChildFile(stem + ".mid"));
+                    if (result.wasOk()) ++midiCount;
+                }
             }
-        }
-
-        int exportedMidiCount = 0;
-        const auto midiResult = exportMidiFilesTo(directory, exportedMidiCount);
-        if (midiResult.failed() && exportedAudioCount == 0)
-        {
-            setStatus(resultMessage("Export all tracks", midiResult));
-            return;
-        }
-
-        completeExport("Exported "
-            + juce::String(exportedAudioCount)
-            + " audio stem"
-            + (exportedAudioCount == 1 ? "" : "s")
-            + " and "
-            + juce::String(exportedMidiCount)
-            + " MIDI file"
-            + (exportedMidiCount == 1 ? "" : "s"),
-            directory);
+            juce::MessageManager::callAsync([safeThis, result, audioCount, midiCount, directory]
+            {
+                if (safeThis == nullptr) return;
+                if (result.failed()) safeThis->setStatus(result.getErrorMessage());
+                else safeThis->completeExport("Exported " + juce::String(audioCount) + " audio stems and "
+                    + juce::String(midiCount) + " MIDI files", directory);
+            });
+        });
     }
 
     void createDraftAnnotation(juce::AudioFormatReader& reader)
@@ -10107,7 +10469,8 @@ private:
 
     void markChanged()
     {
-        openAudioButton_.setEnabled(document_.instrumentalFile.existsAsFile());
+        openAudioButton_.setEnabled(true);
+        document_.duration = arrangement::duration(document_);
         dirty_ = true;
         ++documentRevision_;
         lastDirtyTimeMs_ = juce::Time::getMillisecondCounterHiRes();
@@ -10159,6 +10522,11 @@ private:
 
     juce::AudioFormatManager formatManager_;
     AnnotationDocument document_;
+    ArrangementPlayback arrangementPlayback_;
+    juce::String requestedBackingParent_ { "Voice Main" };
+    bool arrangementImportRunning_ = false;
+    bool preparingBackingSource_ = false;
+    juce::File preparedBackingSource_;
     AnnotationEditorComponent editor_;
     juce::AudioTransportSource transport_;
     juce::AudioTransportSource instrumentalTransport_;
@@ -10258,6 +10626,7 @@ private:
     bool projectSaveRunning_ = false;
     bool restoringHistory_ = false;
     unsigned int documentRevision_ = 0;
+    unsigned int arrangementViewRevision_ = 0;
     double lastDirtyTimeMs_ = 0.0;
     std::unique_ptr<juce::ChildProcess> backingWorkerProcess_;
     juce::File backingWorkerQueueDir_;

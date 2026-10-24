@@ -1,4 +1,5 @@
 #include "AnnotationJson.h"
+#include "ArrangementModel.h"
 
 #include <algorithm>
 #include <cmath>
@@ -50,6 +51,8 @@ juce::var makeNoteVar(const NoteBlock& note)
 {
     auto* object = new juce::DynamicObject();
     object->setProperty("id", note.id);
+    object->setProperty("clip_id", note.clipId);
+    object->setProperty("source_pitch_exact", note.sourcePitchExact);
     object->setProperty("start", note.start);
     object->setProperty("end", note.end);
     object->setProperty("pitch", note.pitch);
@@ -82,6 +85,7 @@ std::optional<NoteBlock> readNoteBlock(const juce::var& value, AnnotationDocumen
 
     NoteBlock note;
     note.id = stringProperty(*noteObject, "id", loaded.nextNoteId());
+    note.clipId = stringProperty(*noteObject, "clip_id");
     note.start = numberProperty(*noteObject, "start", 0.0);
     note.end = numberProperty(*noteObject, "end", note.start + 0.25);
     note.pitch = static_cast<int>(numberProperty(*noteObject, "pitch", 60.0));
@@ -112,6 +116,7 @@ std::optional<NoteBlock> readNoteBlock(const juce::var& value, AnnotationDocumen
     }
 
     note.pitchExact = numberProperty(*noteObject, "pitch_exact", representativePitchExact(note));
+    note.sourcePitchExact = numberProperty(*noteObject, "source_pitch_exact", note.pitchExact);
     return note;
 }
 
@@ -423,6 +428,13 @@ juce::Result AnnotationJson::load(const juce::File& jsonFile, AnnotationDocument
         }
     }
 
+    if (root->hasProperty("arrangement_tracks"))
+    {
+        const auto result = arrangement::fromJson(root->getProperty("arrangement_tracks"), loaded, jsonFile.getParentDirectory());
+        if (result.failed()) return result;
+    }
+    else arrangement::migrate(loaded);
+
     document = std::move(loaded);
     return juce::Result::ok();
 }
@@ -431,6 +443,8 @@ juce::Result AnnotationJson::save(const AnnotationDocument& document, const juce
 {
     auto* root = new juce::DynamicObject();
     root->setProperty("version", document.version);
+    if (document.hasArrangement)
+        root->setProperty("arrangement_tracks", arrangement::toJson(document, jsonFile.getParentDirectory()));
     root->setProperty("audio", projectPathForFile(document.audioFile, jsonFile));
     root->setProperty("instrumental", projectPathForFile(document.instrumentalFile, jsonFile));
     root->setProperty("backing_audio", projectPathForFile(document.backingAudioFile, jsonFile));

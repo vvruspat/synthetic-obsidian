@@ -23,6 +23,12 @@ import type {
   VocalClip,
 } from "@/domain/studio";
 import {
+  arrangementRows,
+  arrangementWaveform,
+  projectTracks,
+  visibleTrackRows,
+} from "@/features/studio/lib/arrangement";
+import {
   chordLabelAtPosition,
   chordPitchClasses,
   snapClipsToChords,
@@ -34,7 +40,12 @@ import {
   formatMusicalPosition,
   getMusicalContext,
 } from "@/features/studio/lib/musical-time";
-import { createPitchPath, PITCH_ROW_HEIGHT, PITCH_TOP } from "@/features/studio/lib/pitch";
+import {
+  createPitchPath,
+  PITCH_ROW_HEIGHT,
+  PITCH_ROWS,
+  PITCH_TOP,
+} from "@/features/studio/lib/pitch";
 import {
   createManualClip,
   getJoinCandidateIds,
@@ -121,6 +132,9 @@ export function useStudioController(
   project: StudioProject,
   shortcutBindings: ShortcutBindings,
 ) {
+  const arrangementTracks = useMemo(() => projectTracks(project), [project]);
+  const trackRows = useMemo(() => visibleTrackRows(arrangementTracks), [arrangementTracks]);
+  const displayRows = useMemo(() => arrangementRows(arrangementTracks), [arrangementTracks]);
   const minimumClipWidth = getMinimumClipWidthPercent(project.timelineDurationSeconds);
   const [playing, setPlaying] = useState(false);
   const [playhead, setPlayhead] = useState(project.initialPlayhead);
@@ -203,19 +217,16 @@ export function useStudioController(
   }, [project.initialBackingTracks]);
 
   useEffect(() => {
-    const availableTracks = new Set<TrackName>([
-      ...(project.hasInstrumental ? (["Instrumental"] as const) : []),
-      ...(project.hasVocal ? (["Voice Main"] as const) : []),
-      ...backingTracks.map((track) => track.id),
-    ]);
+    const availableTracks = new Set(trackRows.map(({ track }) => track.id));
     setSelectedTracks((current) => {
+      if (current.length === 0) return current;
       const availableSelection = current.filter((track) => availableTracks.has(track));
       if (availableSelection.length > 0) return availableSelection;
-      if (project.hasVocal) return ["Voice Main"];
-      if (project.hasInstrumental) return ["Instrumental"];
-      return backingTracks.length > 0 ? [backingTracks[0].id] : ["Voice Main"];
+      const hidden = arrangementTracks.find((track) => current.includes(track.id));
+      if (hidden?.parentId && availableTracks.has(hidden.parentId)) return [hidden.parentId];
+      return trackRows[0] ? [trackRows[0].track.id] : [];
     });
-  }, [backingTracks, project.hasInstrumental, project.hasVocal]);
+  }, [arrangementTracks, trackRows]);
 
   useEffect(() => {
     setTrackState(
@@ -236,12 +247,10 @@ export function useStudioController(
   const editorRef = useRef<HTMLFieldSetElement>(null);
   const arrangementScrollRef = useRef<HTMLElement>(null);
   const timelineContentRef = useRef<HTMLDivElement>(null);
-  const sidebarTrackScrollRef = useRef<HTMLDivElement>(null);
-  const arrangementTrackScrollRef = useRef<HTMLDivElement>(null);
   const pianoRollScrollRef = useRef<HTMLDivElement>(null);
-  const pianoKeysScrollRef = useRef<HTMLDivElement>(null);
   const horizontalZoomAnchorRef = useRef<number | null>(null);
   const verticalZoomAnchorRef = useRef<number | null>(null);
+  const pianoViewportInitialised = useRef(false);
   const zoomWheelRef = useRef({ frame: 0, horizontal: 0, vertical: 0 });
   const editorGestureRef = useRef<PitchEditorGesture | null>(null);
   const playheadDragRef = useRef(false);
@@ -287,6 +296,11 @@ export function useStudioController(
               [event.track]: event.state,
             }));
             break;
+          case "track-selected":
+            setSelectedTracks([event.track]);
+            setSelectedClipIds([]);
+            bridge.send({ type: "select-tracks", tracks: [event.track] });
+            break;
           case "backing-track-created":
             setBackingTracks((current) =>
               current.some((track) => track.id === event.track.id)
@@ -320,7 +334,7 @@ export function useStudioController(
   );
 
   useEffect(() => {
-    if (!playing) return;
+    if (!playing || window.syntheticObsidianHost) return;
     let animation = 0;
     let previous = performance.now();
     const tick = (now: number) => {
@@ -347,16 +361,13 @@ export function useStudioController(
     return () => cancelAnimationFrame(animation);
   }, [cycleRange.end, cycleRange.start, looping, playing, project.timelineDurationSeconds]);
 
-  useEffect(() => {
-    void backingTracks.length;
-    const frame = requestAnimationFrame(() => {
-      const sidebar = sidebarTrackScrollRef.current;
-      const arrangement = arrangementTrackScrollRef.current;
-      if (sidebar) sidebar.scrollTop = sidebar.scrollHeight;
-      if (arrangement) arrangement.scrollTop = arrangement.scrollHeight;
-    });
-    return () => cancelAnimationFrame(frame);
-  }, [backingTracks.length]);
+  useLayoutEffect(() => {
+    const selected = selectedTracks[0];
+    if (!selected) return;
+    arrangementScrollRef.current
+      ?.querySelector<HTMLElement>(`[data-track-header="${CSS.escape(selected)}"]`)
+      ?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [selectedTracks]);
 
   const timeLabel = useMemo(
     () => formatTime(playhead, project.timelineStartSeconds, project.timelineDurationSeconds),
@@ -395,8 +406,20 @@ export function useStudioController(
         notesAvailable: (backingClipsByTrack[track.id]?.length ?? 0) > 0,
       };
     }
+    for (const track of arrangementTracks) {
+      availability[track.id] = {
+        audioAvailable: track.clips.some((clip) =>
+          Array.isArray(clip.waveform) ? clip.waveform.length > 0 : clip.waveform.pointCount > 0,
+        ),
+        notesAvailable:
+          track.id === "Voice Main"
+            ? clips.length > 0
+            : (backingClipsByTrack[track.id]?.length ?? 0) > 0,
+      };
+    }
     return availability;
   }, [
+    arrangementTracks,
     backingClipsByTrack,
     backingTracks,
     clips.length,
@@ -430,16 +453,23 @@ export function useStudioController(
     selectedTracks.length === 1 && selectedTracks[0] !== "Instrumental"
       ? project.backingTrackContents.find((item) => item.id === selectedTracks[0])
       : undefined;
+  const arrangedEditorWaveform = useMemo(() => {
+    if (!project.tracks || selectedTracks.length !== 1) return null;
+    const track = arrangementTracks.find((item) => item.id === selectedTracks[0]);
+    return track ? arrangementWaveform(track, project.timelineDurationSeconds) : null;
+  }, [project.tracks, selectedTracks, arrangementTracks, project.timelineDurationSeconds]);
   const editorWaveform =
-    selectedTracks.length !== 1
+    arrangedEditorWaveform ??
+    (selectedTracks.length !== 1
       ? []
       : selectedTracks[0] === "Instrumental"
         ? project.instrumentalWaveform
         : selectedTracks[0] === "Voice Main"
           ? project.vocalWaveform
-          : (selectedTrackContent?.waveform ?? []);
-  const editorWaveformDurationRatio =
-    selectedTracks.length !== 1
+          : (selectedTrackContent?.waveform ?? []));
+  const editorWaveformDurationRatio = arrangedEditorWaveform
+    ? 1
+    : selectedTracks.length !== 1
       ? 0
       : selectedTracks[0] === "Instrumental"
         ? project.instrumentalDurationSeconds / project.timelineDurationSeconds
@@ -451,7 +481,9 @@ export function useStudioController(
     ({ track }) => track === activePitchTrack,
   ) ?? { track: activePitchTrack ?? "Voice Main", canUndo: false, canRedo: false };
   const backingRenderAction =
-    activePitchTrack !== null && activePitchTrack !== "Voice Main" && selectedTrackContent
+    activePitchTrack !== null &&
+    arrangementTracks.find((track) => track.id === activePitchTrack)?.parentId &&
+    selectedTrackContent
       ? !selectedTrackContent.hasAudio
         ? {
             track: activePitchTrack,
@@ -474,12 +506,11 @@ export function useStudioController(
   };
 
   const togglePlayback = () => {
-    setPlaying((current) => {
-      bridge.send({
-        type: "transport",
-        action: current ? "pause" : "play",
-      });
-      return !current;
+    const next = !playing;
+    setPlaying(next);
+    bridge.send({
+      type: "transport",
+      action: next ? "play" : "pause",
     });
   };
 
@@ -548,8 +579,9 @@ export function useStudioController(
     bridge.send({ type: "select-tracks", tracks: nextSelection });
   };
 
-  const addBackingTrack = (name: BackingTrackName) => {
-    bridge.send({ type: "add-backing-track", track: name, generator: backingGenerator });
+  const addBackingTrack = (name: BackingTrackName, parentId = selectedTracks[0]) => {
+    if (!parentId) return;
+    bridge.send({ type: "add-backing-track", track: name, generator: backingGenerator, parentId });
   };
 
   const regenerateBackingTrack = (trackId: string) => {
@@ -621,34 +653,28 @@ export function useStudioController(
     bridge.send({ type: "project-action", action: "export-midi" });
   };
 
-  const syncVerticalScroll = (source: "roll" | "keys") => {
-    const sourceElement =
-      source === "roll" ? pianoRollScrollRef.current : pianoKeysScrollRef.current;
-    const targetElement =
-      source === "roll" ? pianoKeysScrollRef.current : pianoRollScrollRef.current;
-    if (!sourceElement || !targetElement) return;
-    const sourceMax = sourceElement.scrollHeight - sourceElement.clientHeight;
-    const targetMax = targetElement.scrollHeight - targetElement.clientHeight;
-    const progress = sourceMax > 0 ? sourceElement.scrollTop / sourceMax : 0;
-    const next = progress * Math.max(0, targetMax);
-    if (Math.abs(targetElement.scrollTop - next) > 0.5) {
-      targetElement.scrollTop = next;
-    }
+  const syncHorizontalScroll = (source: "arrangement" | "piano") => {
+    const from =
+      source === "arrangement" ? arrangementScrollRef.current : pianoRollScrollRef.current;
+    const to = source === "arrangement" ? pianoRollScrollRef.current : arrangementScrollRef.current;
+    if (from && to && Math.abs(to.scrollLeft - from.scrollLeft) > 0.5)
+      to.scrollLeft = from.scrollLeft;
   };
 
-  const syncTrackScroll = (source: "sidebar" | "arrangement") => {
-    const sourceElement =
-      source === "sidebar" ? sidebarTrackScrollRef.current : arrangementTrackScrollRef.current;
-    const targetElement =
-      source === "sidebar" ? arrangementTrackScrollRef.current : sidebarTrackScrollRef.current;
+  useLayoutEffect(() => {
+    const scroller = pianoRollScrollRef.current;
     if (
-      sourceElement &&
-      targetElement &&
-      Math.abs(targetElement.scrollTop - sourceElement.scrollTop) > 0.5
+      !pianoCollapsed &&
+      (project.hasVocal || project.initialBackingTracks.length > 0) &&
+      scroller &&
+      scroller.clientHeight > 0 &&
+      !pianoViewportInitialised.current
     ) {
-      targetElement.scrollTop = sourceElement.scrollTop;
+      scroller.scrollTop =
+        ((PITCH_TOP - 60) / PITCH_ROWS) * scroller.scrollHeight - scroller.clientHeight / 2;
+      pianoViewportInitialised.current = true;
     }
-  };
+  }, [pianoCollapsed, project.hasVocal, project.initialBackingTracks.length]);
 
   const changeHorizontalZoom = (wheelDelta: number) => {
     horizontalZoomAnchorRef.current = playhead / 100;
@@ -704,8 +730,10 @@ export function useStudioController(
     if (scroller && anchor !== null) {
       scroller.scrollLeft = getCenteredTimelineScrollLeft(
         anchor,
-        scroller.scrollWidth,
-        scroller.clientWidth,
+        timelineContentRef.current?.clientWidth ?? scroller.scrollWidth,
+        scroller.clientWidth -
+          (scroller.scrollWidth -
+            (timelineContentRef.current?.clientWidth ?? scroller.scrollWidth)),
       );
     }
     horizontalZoomAnchorRef.current = null;
@@ -718,13 +746,6 @@ export function useStudioController(
       const anchor = verticalZoomAnchorRef.current;
       if (scroller && anchor !== null) {
         scroller.scrollTop = anchor * scroller.scrollHeight - scroller.clientHeight / 2;
-        const keyboard = pianoKeysScrollRef.current;
-        if (keyboard) {
-          const rollMax = scroller.scrollHeight - scroller.clientHeight;
-          const keyboardMax = keyboard.scrollHeight - keyboard.clientHeight;
-          const progress = rollMax > 0 ? scroller.scrollTop / rollMax : 0;
-          keyboard.scrollTop = progress * Math.max(0, keyboardMax);
-        }
       }
       verticalZoomAnchorRef.current = null;
     });
@@ -1278,7 +1299,7 @@ export function useStudioController(
         id: String(Date.now()),
         label,
         x: Math.max(0, Math.min(92, ((event.clientX - rect.left) / rect.width) * 100)),
-        pitch: Math.max(48, Math.min(PITCH_TOP, pitch)),
+        pitch: Math.max(PITCH_BOTTOM, Math.min(PITCH_TOP, pitch)),
         width: 6,
         color: "cyan",
       },
@@ -1325,8 +1346,12 @@ export function useStudioController(
     pianoCollapsed,
     serviceTracksCollapsed,
     backingTracks,
+    arrangementTracks,
+    trackRows,
+    displayRows,
     backingGenerator,
     voiceProfiles: project.voiceProfiles,
+    backingTrackContents: project.backingTrackContents,
     selectedTracks,
     trackState,
     trackLayerState,
@@ -1339,10 +1364,7 @@ export function useStudioController(
       editorRef,
       arrangementScrollRef,
       timelineContentRef,
-      sidebarTrackScrollRef,
-      arrangementTrackScrollRef,
       pianoRollScrollRef,
-      pianoKeysScrollRef,
     },
     actions: {
       returnToStart,
@@ -1358,6 +1380,26 @@ export function useStudioController(
       toggleTrackLayer,
       selectTrack,
       addBackingTrack,
+      addTrack: () => bridge.send({ type: "add-track" }),
+      removeTrack: (track: string) => bridge.send({ type: "remove-track", track }),
+      importAudio: () =>
+        bridge.send({
+          type: "import-audio",
+          track:
+            selectedTracks.length === 1 &&
+            arrangementTracks.some((track) => track.id === selectedTracks[0] && !track.parentId)
+              ? selectedTracks[0]
+              : "",
+        }),
+      importTrackAudio: (track: string) => bridge.send({ type: "import-track-audio", track }),
+      importDroppedAudio: (files: string[], track: string, start: number) =>
+        bridge.send({ type: "import-dropped-audio", track, start, files }),
+      toggleTrackCollapsed: (track: string, collapsed: boolean) =>
+        bridge.send({ type: "set-track-collapsed", track, collapsed }),
+      moveArrangementClip: (track: string, clipId: string, targetTrack: string, start: number) =>
+        bridge.send({ type: "move-arrangement-clip", track, clipId, targetTrack, start }),
+      removeArrangementClip: (track: string, clipId: string) =>
+        bridge.send({ type: "remove-arrangement-clip", track, clipId }),
       setBackingGenerator,
       regenerateBackingTrack,
       renderBackingTrack,
@@ -1380,10 +1422,9 @@ export function useStudioController(
       setServiceTracksCollapsed,
       setHorizontalZoomFromInput,
       setVerticalZoomFromInput,
-      syncVerticalScroll,
-      syncTrackScroll,
       handleTimelineWheel,
       handlePianoWheel,
+      syncHorizontalScroll,
       startPlayheadDrag,
       startClipTool,
       startEditorTool,

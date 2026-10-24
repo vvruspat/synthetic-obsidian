@@ -3,6 +3,7 @@
 #include "AnnotationValidator.h"
 #include "AlgorithmicPitchPreview.h"
 #include "ArrangementPlayback.h"
+#include "BackingVocalNotes.h"
 #include "ClipPitchAnalysis.h"
 #include "RuntimeManager.h"
 #include "SashaNoteAnalysis.h"
@@ -43,6 +44,50 @@ constexpr int kWaveformPointCount = 65536;
 constexpr int kWaveformReadBlockSize = 32768;
 constexpr double kMinimumWebNoteLengthSeconds = 0.04;
 constexpr auto kSourceTimbreVoiceProfileId = "source-timbre";
+
+juce::var pitchCurveForDisplay(const NoteBlock& note, double duration)
+{
+    juce::Array<juce::var> pitchCurve;
+    constexpr size_t maxCurvePoints = 64;
+    const auto curveStep = juce::jmax(
+        static_cast<size_t>(1),
+        note.curve.size() / maxCurvePoints);
+    for (size_t pointIndex = 0; pointIndex < note.curve.size(); pointIndex += curveStep)
+    {
+        const auto& point = note.curve[pointIndex];
+        if (point.time < note.start || point.time > note.end)
+            continue;
+
+        auto* curvePoint = new juce::DynamicObject();
+        curvePoint->setProperty(
+            "x",
+            juce::jlimit(0.0, 100.0, point.time * 100.0 / duration));
+        curvePoint->setProperty("pitch", juce::jlimit(0.0, 127.0, point.midi));
+        pitchCurve.add(curvePoint);
+    }
+    if (note.curve.size() > 1)
+    {
+        const auto& finalPoint = note.curve.back();
+        const auto finalX = juce::jlimit(
+            0.0,
+            100.0,
+            finalPoint.time * 100.0 / duration);
+        const auto lastX = pitchCurve.isEmpty()
+            ? -1.0
+            : static_cast<double>(
+                pitchCurve.getLast().getDynamicObject()->getProperty("x"));
+        if (std::abs(finalX - lastX) > 0.0001)
+        {
+            auto* curvePoint = new juce::DynamicObject();
+            curvePoint->setProperty("x", finalX);
+            curvePoint->setProperty(
+                "pitch",
+                juce::jlimit(0.0, 127.0, finalPoint.midi));
+            pitchCurve.add(curvePoint);
+        }
+    }
+    return pitchCurve;
+}
 
 juce::String supportedAudioFileWildcard()
 {
@@ -546,105 +591,6 @@ int collapseShortNoteGaps(std::vector<NoteBlock>& notes,
     }
 
     return collapsed;
-}
-
-bool canMergeLeadNotesForBacking(const NoteBlock& previous,
-                                 const NoteBlock& current,
-                                 double maximumGapSeconds,
-                                 double maximumPitchDeltaSemitones)
-{
-    if (previous.end <= previous.start || current.end <= current.start)
-        return false;
-
-    if (previous.flags.contains("non_vocal_trimmed_end")
-        || current.flags.contains("non_vocal_trimmed_start"))
-    {
-        return false;
-    }
-
-    const auto gap = current.start - previous.end;
-    if (gap > maximumGapSeconds)
-        return false;
-
-    if (previous.syllableId.isNotEmpty() && current.syllableId.isNotEmpty())
-        return previous.syllableId == current.syllableId;
-
-    if (std::abs(current.pitchExact - previous.pitchExact) >= maximumPitchDeltaSemitones)
-        return false;
-
-    // Some pitch plateaus at the edge of a detected syllable are intentionally
-    // left without text/id. Treat an adjacent unlabelled plateau as a continuation,
-    // but never merge two explicitly different syllables.
-    if (previous.syllableId.isNotEmpty() || current.syllableId.isNotEmpty())
-    {
-        const auto& unlabelled = previous.syllableId.isEmpty() ? previous : current;
-        return unlabelled.lyric.trim().isEmpty() && gap <= 0.03;
-    }
-
-    if (previous.lyric.trim().isNotEmpty() || current.lyric.trim().isNotEmpty())
-        return previous.lyric.trim() == current.lyric.trim();
-
-    return gap <= 0.03;
-}
-
-void mergeLeadNoteForBacking(NoteBlock& target, const NoteBlock& source)
-{
-    target.end = juce::jmax(target.end, source.end);
-    target.voicedStart = juce::jmin(target.voicedStart, source.voicedStart);
-    target.voicedEnd = juce::jmax(target.voicedEnd, source.voicedEnd);
-
-    if (target.lyric.trim().isEmpty())
-        target.lyric = source.lyric;
-    if (target.syllableId.isEmpty())
-        target.syllableId = source.syllableId;
-
-    // Keep the articulation at the beginning of the merged note, but inherit
-    // the outgoing legato state from its final absorbed plateau.
-    target.flags.removeString("legato_to_next");
-    if (source.flags.contains("legato_to_next"))
-        target.flags.addIfNotAlreadyThere("legato_to_next");
-    if (source.flags.contains("melisma_continuation"))
-        target.flags.addIfNotAlreadyThere("melisma_continuation");
-
-    target.curve.insert(target.curve.end(), source.curve.begin(), source.curve.end());
-}
-
-std::vector<NoteBlock> leadNotesForBackingGeneration(const std::vector<NoteBlock>& sourceNotes,
-                                                     double maximumGapSeconds = 0.08,
-                                                     double maximumPitchDeltaSemitones = 0.80)
-{
-    std::vector<NoteBlock> notes;
-    std::vector<double> anchorDurations;
-    notes.reserve(sourceNotes.size());
-    anchorDurations.reserve(sourceNotes.size());
-
-    for (const auto& note : sourceNotes)
-    {
-        if (note.end <= note.start)
-            continue;
-
-        if (! notes.empty()
-            && canMergeLeadNotesForBacking(notes.back(), note, maximumGapSeconds, maximumPitchDeltaSemitones))
-        {
-            const auto sourceDuration = juce::jmax(0.001, note.voicedEnd - note.voicedStart);
-            if (sourceDuration > anchorDurations.back())
-            {
-                notes.back().pitch = note.pitch;
-                notes.back().pitchExact = static_cast<double>(note.pitch);
-                anchorDurations.back() = sourceDuration;
-            }
-            mergeLeadNoteForBacking(notes.back(), note);
-            continue;
-        }
-
-        auto canonical = note;
-        canonical.pitchExact = static_cast<double>(canonical.pitch);
-        canonical.curve.clear();
-        notes.push_back(std::move(canonical));
-        anchorDurations.push_back(juce::jmax(0.001, note.voicedEnd - note.voicedStart));
-    }
-
-    return notes;
 }
 
 std::vector<AnalysisWindow> buildVocalPitchAnalysisWindows(const AnnotationDocument& document,
@@ -4042,46 +3988,7 @@ private:
                 note.flags.contains("legato_from_previous"));
             clip->setProperty("legatoToNext", note.flags.contains("legato_to_next"));
 
-            juce::Array<juce::var> pitchCurve;
-            constexpr size_t maxCurvePoints = 64;
-            const auto curveStep = juce::jmax(
-                static_cast<size_t>(1),
-                note.curve.size() / maxCurvePoints);
-            for (size_t pointIndex = 0; pointIndex < note.curve.size(); pointIndex += curveStep)
-            {
-                const auto& point = note.curve[pointIndex];
-                if (point.time < note.start || point.time > note.end)
-                    continue;
-
-                auto* curvePoint = new juce::DynamicObject();
-                curvePoint->setProperty(
-                    "x",
-                    juce::jlimit(0.0, 100.0, point.time * 100.0 / duration));
-                curvePoint->setProperty("pitch", juce::jlimit(0.0, 127.0, point.midi));
-                pitchCurve.add(curvePoint);
-            }
-            if (note.curve.size() > 1)
-            {
-                const auto& finalPoint = note.curve.back();
-                const auto finalX = juce::jlimit(
-                    0.0,
-                    100.0,
-                    finalPoint.time * 100.0 / duration);
-                const auto lastX = pitchCurve.isEmpty()
-                    ? -1.0
-                    : static_cast<double>(
-                        pitchCurve.getLast().getDynamicObject()->getProperty("x"));
-                if (std::abs(finalX - lastX) > 0.0001)
-                {
-                    auto* curvePoint = new juce::DynamicObject();
-                    curvePoint->setProperty("x", finalX);
-                    curvePoint->setProperty(
-                        "pitch",
-                        juce::jlimit(0.0, 127.0, finalPoint.midi));
-                    pitchCurve.add(curvePoint);
-                }
-            }
-            clip->setProperty("pitchCurve", pitchCurve);
+            clip->setProperty("pitchCurve", pitchCurveForDisplay(note, duration));
             clips.add(clip);
         }
 
@@ -4102,6 +4009,7 @@ private:
                     100.0,
                     juce::jmax(0.0, note.end - note.start) * 100.0 / duration));
             clip->setProperty("color", clipColours[(i + 1) % std::size(clipColours)]);
+            clip->setProperty("pitchCurve", pitchCurveForDisplay(note, duration));
             backingClips.add(clip);
         }
 
@@ -4160,6 +4068,7 @@ private:
                         100.0,
                         juce::jmax(0.0, note.end - note.start) * 100.0 / duration));
                 clip->setProperty("color", clipColours[(i + 1) % std::size(clipColours)]);
+                clip->setProperty("pitchCurve", pitchCurveForDisplay(note, duration));
                 trackClips.add(clip);
             }
             trackContent->setProperty("clips", trackClips);
@@ -4851,6 +4760,7 @@ private:
                     0.0,
                     127.0,
                     note.pitchExact + (point.midi - note.pitchExact) * scale);
+            note.flags.addIfNotAlreadyThere("explicit_pitch_curve");
             finishPitchTrackEdit(trackName);
             return true;
         }
@@ -8101,7 +8011,7 @@ private:
         }
         requestRoot->setProperty("chords", chords);
 
-        const auto backingLeadNotes = leadNotesForBackingGeneration(
+        auto backingLeadNotes = leadNotesForBackingGeneration(
             audibleLeadNoteFragments(sourceNotes, parentId == "Voice Main" ? document_.regions : std::vector<AnnotationRegion> {}));
         juce::Array<juce::var> leadNotes;
         for (const auto& note : backingLeadNotes)
@@ -8209,9 +8119,10 @@ private:
         setStatus(generationStatus);
 
         juce::WeakReference<MainComponent> safeThis(this);
+        const auto sourceSnapshot = std::make_shared<const std::vector<NoteBlock>>(std::move(backingLeadNotes));
         const auto eventsFile = backingWorkerQueueDir_.getChildFile(requestId + ".events.jsonl");
         juce::Thread::launch(
-            [safeThis, eventsFile, requestId, expectedRevision, trackId, trackDisplayName]
+            [safeThis, eventsFile, requestId, expectedRevision, trackId, trackDisplayName, sourceSnapshot]
         {
             int processedLines = 0;
             double lastEventTimeMs = juce::Time::getMillisecondCounterHiRes();
@@ -8245,14 +8156,15 @@ private:
                         const auto type = root->getProperty("type").toString();
                         const auto isTerminal = type == "done" || type == "error";
                         juce::MessageManager::callAsync(
-                            [safeThis, parsed, expectedRevision, trackId, trackDisplayName]
+                            [safeThis, parsed, expectedRevision, trackId, trackDisplayName, sourceSnapshot]
                         {
                             if (safeThis != nullptr)
                                 safeThis->applyBackingVocalWorkerEvent(
                                     parsed,
                                     expectedRevision,
                                     trackId,
-                                    trackDisplayName);
+                                    trackDisplayName,
+                                    *sourceSnapshot);
                         });
 
                         if (isTerminal)
@@ -8283,7 +8195,8 @@ private:
     void applyBackingVocalWorkerEvent(const juce::var& event,
                                       unsigned int expectedRevision,
                                       const juce::String& trackId,
-                                      const juce::String& styleName)
+                                      const juce::String& styleName,
+                                      const std::vector<NoteBlock>& sourceNotes)
     {
         auto* root = event.getDynamicObject();
         if (root == nullptr)
@@ -8341,7 +8254,7 @@ private:
         }
 
         juce::String parseError;
-        auto generatedNotes = parseBackingNotes(*payloadRoot, parseError);
+        auto generatedNotes = parseBackingNotes(*payloadRoot, sourceNotes, parseError);
         if (generatedNotes.empty())
         {
             if (type == "done")
@@ -8410,66 +8323,6 @@ private:
         if (debugDslPath.isNotEmpty())
             status += " Debug DSL: " + debugDslPath;
         setStatus(status);
-    }
-
-    std::vector<NoteBlock> parseBackingNotes(const juce::DynamicObject& root, juce::String& error) const
-    {
-        auto* notes = root.getProperty("notes").getArray();
-        if (notes == nullptr || notes->isEmpty())
-        {
-            error = "Backing vocal model returned no notes.";
-            return {};
-        }
-
-        const auto numberProperty = [](const juce::DynamicObject& object, const juce::Identifier& name, double fallback)
-        {
-            const auto value = object.getProperty(name);
-            return value.isDouble() || value.isInt() ? static_cast<double>(value) : fallback;
-        };
-        const auto stringProperty = [](const juce::DynamicObject& object, const juce::Identifier& name, const juce::String& fallback = {})
-        {
-            const auto value = object.getProperty(name);
-            return value.isString() ? value.toString() : fallback;
-        };
-        std::vector<NoteBlock> generatedNotes;
-        generatedNotes.reserve(static_cast<size_t>(notes->size()));
-        for (const auto& value : *notes)
-        {
-            auto* object = value.getDynamicObject();
-            if (object == nullptr)
-                continue;
-
-            NoteBlock note;
-            note.id = stringProperty(*object, "id", "bv_" + juce::String(static_cast<int>(generatedNotes.size()) + 1).paddedLeft('0', 3));
-            note.start = numberProperty(*object, "start", 0.0);
-            note.end = numberProperty(*object, "end", note.start + 0.25);
-            note.pitch = juce::jlimit(0, 127, static_cast<int>(numberProperty(*object, "midi_note", 60.0)));
-            note.pitchExact = static_cast<double>(note.pitch);
-            note.voicedStart = note.start;
-            note.voicedEnd = note.end;
-            note.lyric = stringProperty(
-                *object,
-                "lyric",
-                stringProperty(*object, "strategy", "BV"));
-            note.syllableId = stringProperty(*object, "syllable_id");
-            note.flags.add("backing_vocal");
-            if (static_cast<bool>(object->getProperty("legato_from_previous")))
-                note.flags.add("legato_from_previous");
-            if (static_cast<bool>(object->getProperty("legato_to_next")))
-                note.flags.add("legato_to_next");
-            if (static_cast<bool>(object->getProperty("melisma_continuation")))
-                note.flags.add("melisma_continuation");
-            note.curve.push_back({ note.start, note.pitchExact, 1.0 });
-            note.curve.push_back({ note.end, note.pitchExact, 1.0 });
-
-            if (note.end > note.start)
-                generatedNotes.push_back(std::move(note));
-        }
-
-        if (generatedNotes.empty())
-            error = "Backing vocal model returned only invalid notes.";
-
-        return generatedNotes;
     }
 
     void applyBackingVocalWorkerTimeout(unsigned int expectedRevision,
@@ -8750,6 +8603,7 @@ private:
             object->setProperty("voiced_end", note.voicedEnd);
             object->setProperty("pitch", note.pitch);
             object->setProperty("pitch_exact", note.pitchExact);
+            object->setProperty("preserve_pitch_curve", note.flags.contains("explicit_pitch_curve"));
             object->setProperty("lyric", note.lyric);
             object->setProperty("syllable_id", note.syllableId);
             object->setProperty("legato_from_previous", note.flags.contains("legato_from_previous"));

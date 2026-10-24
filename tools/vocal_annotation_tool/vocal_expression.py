@@ -557,7 +557,7 @@ def build_target_f0(
     f0_rate: float = DEFAULT_F0_RATE,
     seed: int | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Create an expressive F0 curve from backing notes, not from lead pitch."""
+    """Build target F0, preserving explicitly inherited or edited note curves."""
     profile = normalize_expression_profile(expression_profile)
     defaults = default_expression_profile()
     ordered_notes = sorted(
@@ -574,6 +574,7 @@ def build_target_f0(
     )
     source = np.asarray(source_f0, dtype=np.float32).reshape(-1)
     target_midi = np.full(len(source), np.nan, dtype=np.float32)
+    explicit_midi = np.full(len(source), np.nan, dtype=np.float32)
     note_mask = np.zeros(len(source), dtype=np.float32)
     vibrato_cents_layer = np.zeros(len(source), dtype=np.float32)
     attack_cents_layer = np.zeros(len(source), dtype=np.float32)
@@ -593,6 +594,10 @@ def build_target_f0(
             dtype=np.float32,
         )
         target_midi[indices] = base_midi
+        if note.get("preserve_pitch_curve") and note.get("curve"):
+            explicit_midi[indices] = base_midi
+        else:
+            explicit_midi[indices] = np.nan
         note_mask[indices] = 1.0
         note_regions.append(
             {
@@ -879,6 +884,11 @@ def build_target_f0(
     target_midi[expressed] += (
         vibrato_cents_layer[expressed] + attack_cents_layer[expressed]
     ) / 100.0
+
+    # Preserve the render target even when the user flattens its vibrato.
+    # Automatic attacks and legato must not overwrite an authored contour.
+    explicit = np.isfinite(explicit_midi)
+    target_midi[explicit] = explicit_midi[explicit]
 
     target_f0 = np.zeros(len(source), dtype=np.float32)
     voiced_target = np.isfinite(target_midi) & np.isfinite(source) & (source > 32.0)

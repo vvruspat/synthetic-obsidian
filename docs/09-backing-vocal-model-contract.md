@@ -82,6 +82,20 @@ move notes: strict structured output accepts only one pitch offset per supplied
 lead-note reference. Pitch output is harmonically post-processed against the
 active chord and key before insertion into the project.
 
+The native result handoff uses `source_lead_ref` to inherit the source pitch
+curve from an immutable local snapshot, transposed around the generated note.
+Before merging source plateaus, raw detector samples more than three semitones
+from their original note centre are replaced by interpolation between reliable
+neighbours (nearest reliable value at an edge). This excludes harmonic jumps
+and dropouts without smoothing valid drift/vibrato or modifying source analysis.
+Explicitly edited source curves bypass this detector cleanup.
+The curve is displayed and saved on the backing note; it is not sent to the
+note-generation model. Notes with inherited or manually scaled contours carry
+the additive `explicit_pitch_curve` flag. Audio requests map this to the optional
+`preserve_pitch_curve` field so the SVC renderer does not overwrite the curve
+with automatic vibrato, attacks or legato. Unmatched source references retain
+the existing flat-curve fallback and automatic expression.
+
 ## Threading
 
 Model loading and inference happen in the persistent `backing-notes` background

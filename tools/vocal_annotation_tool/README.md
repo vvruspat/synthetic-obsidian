@@ -87,6 +87,15 @@ selected group or an adjacent pair. Gain and Vibrato preview during vertical
 drag and commit once on release. Zoom doubles/halves time scale at the click.
 The existing note menu and pitch history remain available.
 
+Newly generated backing notes inherit the source note's pitch contour, transposed
+relative to the generated pitch. Drift, vibrato and attacks are visible in the
+backing piano roll before audio rendering. Detector octave jumps and dropouts
+are repaired before transfer; reliable expression samples remain unchanged.
+The Vibrato tool scales this contour;
+the SVC renderer preserves it instead of adding automatic expression on top.
+Curves and edits persist in project saves. Existing backing notes keep their
+saved curves; regenerate their notes to inherit the source contour.
+
 Vertical zoom spans 1×–4× and preserves the visible pitch centre. The keyboard
 and notes share one vertical scroller. Alt+wheel changes vertical zoom,
 Cmd/Ctrl+wheel changes horizontal zoom, Shift+wheel pans time and plain wheel
